@@ -82,3 +82,8 @@ add_executable(test_protocol tests/test_protocol.cpp src/Protocol.cpp src/Palett
 target_include_directories(test_protocol PRIVATE src)
 enable_testing()
 add_test(NAME protocol COMMAND test_protocol)
+
+# ----- CLI smoke-test (libusb only, no REAPER) --------------------------------
+add_executable(uf8_color_test tools/uf8_color_test.cpp src/Protocol.cpp)
+target_include_directories(uf8_color_test PRIVATE src)
+target_link_libraries(uf8_color_test PRIVATE PkgConfig::LIBUSB)

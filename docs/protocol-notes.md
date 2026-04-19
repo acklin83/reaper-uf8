@@ -100,6 +100,31 @@ The UF8 does NOT hold a bank pointer. Every visible-window change = new 8-index 
 
 Everything else (meters, faders, text scribble-strip content) can be left to SSL's MCU-over-MIDI path or ignored.
 
+## Init sequence — REQUIRED for any color to render
+
+Empirical discovery (2026-04-19): sending `FF 66 09 18 <8 indices> CKSUM`
+over EP 0x02 when SSL 360° is NOT running lands fine at the USB layer
+(libusb reports rc=0, full byte count transferred) but the UF8 renders
+nothing — display stays dark, no layer active.
+
+This means SSL 360° pushes a **wakeup / mode-set sequence** shortly after
+device enumeration that puts the UF8 into a state where scribble-strip
+color data is actually rendered. Our extension must replay the same
+sequence at `open()` time before any color command will be visible.
+
+**TODO — next session:**
+1. On Windows, start a USBPcap capture on USBPcap3 (or whichever bus the
+   UF8 is on after a fresh boot).
+2. Trigger a fresh enumeration: replug the UF8 while SSL 360° is running
+   and watching.
+3. Stop capture ~3 s after replug.
+4. Look at the packets on EP 0x02 OUT between USB enumeration and the
+   first meter/heartbeat — those are the init commands.
+5. Transcribe into `src/UF8Device.cpp::open()` as a preamble.
+
+Until we have that, the extension can still be built and loaded but won't
+drive the hardware.
+
 ## Session log
 | date | capture | finding |
 |------|---------|---------|
