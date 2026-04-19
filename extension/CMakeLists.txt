@@ -9,16 +9,36 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-# ----- REAPER SDK (fetch if missing) ------------------------------------------
-set(REAPER_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/vendor/reaper-sdk")
+# ----- REAPER SDK + WDL (fetch if missing) ------------------------------------
+# reaper_plugin.h on non-Windows includes "../WDL/swell/swell.h" relative to
+# the sdk directory. We vendor both repos into vendor/ so the relative path
+# resolves: vendor/reaper-sdk/sdk/reaper_plugin.h -> vendor/WDL/swell/swell.h
+set(VENDOR_DIR "${CMAKE_CURRENT_SOURCE_DIR}/vendor")
+set(REAPER_SDK_DIR "${VENDOR_DIR}/reaper-sdk")
+set(WDL_DIR        "${VENDOR_DIR}/WDL")
+
+include(FetchContent)
 if(NOT EXISTS "${REAPER_SDK_DIR}/sdk/reaper_plugin.h")
-    include(FetchContent)
     FetchContent_Declare(reaper_sdk
         GIT_REPOSITORY https://github.com/justinfrankel/reaper-sdk.git
         GIT_TAG main
         SOURCE_DIR "${REAPER_SDK_DIR}"
     )
     FetchContent_MakeAvailable(reaper_sdk)
+endif()
+if(NOT EXISTS "${WDL_DIR}/WDL/swell/swell.h")
+    FetchContent_Declare(wdl
+        GIT_REPOSITORY https://github.com/justinfrankel/WDL.git
+        GIT_TAG main
+        SOURCE_DIR "${WDL_DIR}"
+    )
+    FetchContent_MakeAvailable(wdl)
+endif()
+
+# reaper_plugin.h does `#include "../WDL/swell/swell.h"` — expects WDL to
+# live as a sibling of the sdk/ directory. Make that true with a symlink.
+if(NOT EXISTS "${REAPER_SDK_DIR}/WDL")
+    file(CREATE_LINK "${WDL_DIR}/WDL" "${REAPER_SDK_DIR}/WDL" SYMBOLIC)
 endif()
 
 # ----- libusb -----------------------------------------------------------------

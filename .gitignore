@@ -21,3 +21,9 @@ venv/
 captures/*.pcapng
 captures/*.pcap
 !captures/.keep
+
+# CMake build outputs
+extension/build/
+
+# Vendored SDKs (fetched on demand)
+extension/vendor/
