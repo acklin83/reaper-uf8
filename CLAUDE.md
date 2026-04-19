@@ -30,13 +30,15 @@ docs/        protocol-notes.md — living spec built up from capture analysis
 extension/   REAPER extension source (reaper_plugin.h based, C++)
 ```
 
-## Capture Workflow (macOS Apple Silicon)
-See `docs/capture-workflow.md`. TL;DR:
-1. Identify XHC interface UF8 sits on: `ioreg -p IOUSB -l | grep -B1 UF-001254` → `locationID` → XHC bus
-2. Install Wireshark (incl. ChmodBPF for BPF permissions)
-3. `tshark -i XHC20 -w captures/baseline.pcapng` — UF8 idle for 10s
-4. Trigger color-change in SSL 360° while recording, stop capture
-5. Parse with `analysis/parse_usbpcap.py`
+## Capture Workflow
+
+**macOS 15 + Apple Silicon blocks USB capture via Wireshark** — Apple removed XHC-interface exposure in recent macOS versions. Workaround: capture on Windows with USBPcap, analyze on macOS.
+
+- **Capture path (Windows):** see `docs/windows-capture-workflow.md` — Wireshark + bundled USBPcap + SSL 360° Windows + any DAW
+- **Analysis path (macOS):** `python3 analysis/parse_usbpcap.py <capture.pcapng> --baseline <baseline.pcapng>` — filters out housekeeping traffic, surfaces packets novel to the triggering event
+- `captures/` is gitignored (pcapng files are large). Commit with `-f` only for small, annotated reference captures
+
+`docs/capture-workflow.md` (the macOS recipe) is retained for historical reference in case Apple re-enables XHC capture on a future macOS release.
 
 ## Tone
 - Minimal. Code speaks.
