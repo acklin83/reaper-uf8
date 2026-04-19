@@ -1,0 +1,23 @@
+# macOS
+.DS_Store
+
+# Build output
+build/
+*.dylib
+*.dll
+*.so
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Editor
+.vscode/
+.idea/
+
+# Large captures — keep selective ones via git add -f
+captures/*.pcapng
+captures/*.pcap
+!captures/.keep
