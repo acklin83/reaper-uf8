@@ -11,6 +11,7 @@
 #include <thread>
 
 #include "init_sequence.inc"
+#include "layer_plugin_mixer.inc"
 
 #include <cstdio>
 
@@ -120,6 +121,22 @@ bool UF8Device::open()
     }
 
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    // Replay the full state-flood captured when SSL 360° handles a
+    // physical Plugin-Mixer-Layer button press. A single FF 66 11 0F
+    // command alone doesn't switch modes — UF8 firmware needs the
+    // whole fader-position/motor/label/color sequence.
+    for (const auto& f : kLayerPluginMixerSequence) {
+        int transferred = 0;
+        libusb_bulk_transfer(
+            handle_, kEpOut,
+            const_cast<uint8_t*>(f.bytes),
+            static_cast<int>(f.size),
+            &transferred, 500);
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
     return true;
 }
 
@@ -156,8 +173,15 @@ void UF8Device::workerLoop_()
     // Heartbeat frames: SSL 360° sends these at ~50 Hz as a keepalive.
     // If we stop sending them the UF8 firmware declares "connection lost"
     // and goes back to splash screen.
+    //   hb1/hb2: 64-byte keepalive pair (always present)
+    //   hb3/hb4: 13-byte Plugin-Mixer-Layer-specific heartbeat pair —
+    //            in cap01 (PM mode steady state) these were sent alongside
+    //            the 64-byte pair at the same cadence. They may be what
+    //            keeps UF8 in Plugin-Mixer-Layer display mode.
     uint8_t hb1[64] = {0xff, 0x66, 0x21, 0x09};  hb1[63] = 0x90;
     uint8_t hb2[64] = {0xff, 0x66, 0x21, 0x0a};  hb2[63] = 0x91;
+    uint8_t hb3[13] = {0xff, 0x66, 0x09, 0x15, 0, 0, 0, 0, 0, 0, 0, 0, 0x84};
+    uint8_t hb4[13] = {0xff, 0x66, 0x09, 0x16, 0, 0, 0, 0, 0, 0, 0, 0, 0x85};
     auto lastHeartbeat = std::chrono::steady_clock::now();
 
     while (!shuttingDown_) {
@@ -180,6 +204,8 @@ void UF8Device::workerLoop_()
             int t = 0;
             libusb_bulk_transfer(handle_, kEpOut, hb1, sizeof(hb1), &t, 100);
             libusb_bulk_transfer(handle_, kEpOut, hb2, sizeof(hb2), &t, 100);
+            libusb_bulk_transfer(handle_, kEpOut, hb3, sizeof(hb3), &t, 100);
+            libusb_bulk_transfer(handle_, kEpOut, hb4, sizeof(hb4), &t, 100);
             lastHeartbeat = now;
         }
 

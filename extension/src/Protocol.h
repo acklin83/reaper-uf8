@@ -74,6 +74,15 @@ std::vector<uint8_t> buildMotorEnable(uint8_t strip, bool enable);
 // TBD — refine once we have captures with known audio levels to verify.
 std::vector<uint8_t> buildMeter(uint8_t strip, uint8_t level);
 
+// Switch UF8 display mode:
+//   Plugin-Mixer Layer: FF 66 11 0F 10 00 40 00 <20 00 × 6> 96   (shows color bar)
+//   DAW Layer:          FF 66 11 0F <00 × 16> 86                  (no color bar)
+// Decoded from a capture where the user pressed the physical layer
+// button on the UF8 three times; this command arrived from SSL 360°
+// within ~30 ms of each button press.
+std::vector<uint8_t> buildLayerPluginMixer();
+std::vector<uint8_t> buildLayerDaw();
+
 // Verify a frame's checksum. Returns true if frame starts with FF and the
 // last byte matches sum(middle bytes) mod 256.
 bool verifyFrame(std::span<const uint8_t> frame);

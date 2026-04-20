@@ -97,6 +97,30 @@ std::vector<uint8_t> buildMeter(uint8_t strip, uint8_t level)
     return frame;
 }
 
+std::vector<uint8_t> buildLayerPluginMixer()
+{
+    // Captured byte-for-byte: FF 66 11 0F 10 00 40 00 <20 00 × 6> 96
+    std::vector<uint8_t> frame{
+        0xFF, 0x66, 0x11, 0x0F,
+        0x10, 0x00, 0x40, 0x00,
+        0x20, 0x00, 0x20, 0x00,
+        0x20, 0x00, 0x20, 0x00,
+        0x20, 0x00, 0x20, 0x00
+    };
+    std::span<const uint8_t> payload{frame.data() + 1, frame.size() - 1};
+    frame.push_back(checksum(payload));
+    return frame;
+}
+
+std::vector<uint8_t> buildLayerDaw()
+{
+    std::vector<uint8_t> frame{0xFF, 0x66, 0x11, 0x0F};
+    for (int i = 0; i < 16; ++i) frame.push_back(0x00);
+    std::span<const uint8_t> payload{frame.data() + 1, frame.size() - 1};
+    frame.push_back(checksum(payload));
+    return frame;
+}
+
 std::vector<uint8_t> buildStripTextLower(uint8_t strip, std::string_view text)
 {
     // Frame: FF 66 09 0E <strip> <7 chars, space-padded> CKSUM   (total 13 bytes)
