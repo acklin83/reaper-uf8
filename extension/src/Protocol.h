@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <string_view>
 #include <vector>
 
 namespace uf8 {
@@ -34,6 +35,12 @@ std::vector<uint8_t> buildColorCommand(const std::array<uint8_t, kStripCount>& p
 //   FF 66 09 15 00x8 84
 //   FF 66 09 16 00x8 85
 std::array<std::vector<uint8_t>, 2> buildPluginMixerHeartbeat();
+
+// Build a scribble-strip-text command for a single strip.
+//   FF 66 09 0E <strip> <7 ASCII chars, space-padded> CKSUM
+// Matches the command SSL 360° issues for the upper scribble-strip row.
+// `text` longer than 7 chars is truncated, shorter is space-padded.
+std::vector<uint8_t> buildStripTextUpper(uint8_t strip, std::string_view text);
 
 // Verify a frame's checksum. Returns true if frame starts with FF and the
 // last byte matches sum(middle bytes) mod 256.

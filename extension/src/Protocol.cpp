@@ -30,6 +30,24 @@ std::vector<uint8_t> buildColorCommand(const std::array<uint8_t, kStripCount>& i
     return frame;
 }
 
+std::vector<uint8_t> buildStripTextUpper(uint8_t strip, std::string_view text)
+{
+    // Frame: FF 66 09 0E <strip> <7 chars> CKSUM   (total 13 bytes)
+    std::vector<uint8_t> frame;
+    frame.reserve(13);
+    frame.push_back(kFrameMagic);
+    const std::array<uint8_t, 3> head{0x66, 0x09, 0x0E};
+    for (auto b : head) frame.push_back(b);
+    frame.push_back(strip);
+
+    for (size_t i = 0; i < 7; ++i) {
+        frame.push_back(i < text.size() ? static_cast<uint8_t>(text[i]) : 0x20);
+    }
+    std::span<const uint8_t> payload{frame.data() + 1, frame.size() - 1};
+    frame.push_back(checksum(payload));
+    return frame;
+}
+
 std::array<std::vector<uint8_t>, 2> buildPluginMixerHeartbeat()
 {
     auto build = [](uint8_t counter) {

@@ -39,6 +39,49 @@ void logMidi(std::span<const uint8_t> bytes)
     std::fclose(f);
 }
 
+// Translate an incoming MCU MIDI packet to UF8 vendor-USB commands.
+// Currently handles the scribble-strip SysEx only — enough to prove the
+// end-to-end pipe. Fuller mapping (meters, LEDs, V-pot, fader) is next.
+void onMidiFromReaper(std::span<const uint8_t> bytes)
+{
+    logMidi(bytes);
+    if (!g_dev || !g_dev->isOpen()) return;
+
+    // Scribble-strip SysEx: F0 00 00 66 14 12 <pos> <up to 112 chars> F7
+    // <pos> indexes into a 56-char-wide virtual display (7 chars * 8 strips),
+    // row 0 at 0..0x37, row 1 at 0x38..0x6F. We only handle row 0 for now.
+    if (bytes.size() >= 8
+        && bytes[0] == 0xF0 && bytes[1] == 0x00 && bytes[2] == 0x00
+        && bytes[3] == 0x66 && bytes[4] == 0x14 && bytes[5] == 0x12)
+    {
+        const uint8_t pos = bytes[6];
+        if (pos >= 0x38) return;  // lower row — skip for now
+
+        const uint8_t strip = pos / 7;
+        if (strip >= 8) return;
+
+        // Text bytes stretch from byte 7 until F7 (sysex end) or end of buffer.
+        size_t textStart = 7;
+        size_t textEnd   = bytes.size();
+        if (bytes.back() == 0xF7) --textEnd;
+
+        std::string_view text(
+            reinterpret_cast<const char*>(bytes.data() + textStart),
+            textEnd - textStart);
+
+        // The SysEx may carry all 8 strips in one packet (starting at 0x00).
+        // Walk 7 chars at a time, dispatching one UF8 command per strip.
+        while (!text.empty() && strip < 8) {
+            uint8_t s = strip + static_cast<uint8_t>((text.data() - reinterpret_cast<const char*>(bytes.data() + textStart)) / 7);
+            if (s >= 8) break;
+            auto chunk = text.substr(0, 7);
+            g_dev->send(uf8::buildStripTextUpper(s, chunk));
+            if (text.size() <= 7) break;
+            text.remove_prefix(7);
+        }
+    }
+}
+
 uint32_t reaperColorForVisibleSlot(int slot)
 {
     const int trackCount = CountTracks(nullptr);
@@ -82,7 +125,7 @@ extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(
     // user configures CSI to route to them.
     g_midi = std::make_unique<uf8::MidiBridge>();
     if (g_midi->open("reaper_uf8")) {
-        g_midi->setIncomingHandler(logMidi);
+        g_midi->setIncomingHandler(onMidiFromReaper);
     } else {
         ShowConsoleMsg("reaper_uf8: failed to open virtual MIDI ports\n");
     }
