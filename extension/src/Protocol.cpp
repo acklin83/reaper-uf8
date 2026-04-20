@@ -67,6 +67,20 @@ std::vector<uint8_t> buildFaderPosition(uint8_t strip, uint8_t lsb, uint8_t msb)
     return frame;
 }
 
+std::vector<uint8_t> buildMotorEnable(uint8_t strip, bool enable)
+{
+    std::vector<uint8_t> frame;
+    frame.reserve(6);
+    frame.push_back(kFrameMagic);
+    frame.push_back(0x1D);
+    frame.push_back(0x02);
+    frame.push_back(strip);
+    frame.push_back(enable ? 0x01 : 0x00);
+    std::span<const uint8_t> payload{frame.data() + 1, frame.size() - 1};
+    frame.push_back(checksum(payload));
+    return frame;
+}
+
 std::vector<uint8_t> buildStripTextLower(uint8_t strip, std::string_view text)
 {
     // Frame: FF 66 09 0E <strip> <7 chars, space-padded> CKSUM   (total 13 bytes)

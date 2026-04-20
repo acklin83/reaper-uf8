@@ -16,7 +16,9 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <memory>
 
 #include "ColorSync.h"
@@ -48,13 +50,23 @@ std::unique_ptr<uf8::HidDevice>   g_hid;
 //
 // Plus the "FF 04 02 9d 01 a4" and partner "FF 04 02 94 01 9b" polling
 // packets which repeat at ~100 Hz — we ignore those.
-// Per-strip touch state. Fader position reports from the UF8 are noisy —
-// they come in even when nobody is touching the fader — so we only
-// forward pitch-bend to REAPER while the user is actively holding the
-// fader (per the capacitive touch sensor). This matches MCU protocol
-// semantics: the DAW owns the fader position except during user-driven
-// movement.
-std::array<std::atomic<bool>, 8> g_faderTouched{};
+// Per-strip touch state with debounce. The UF8 touch sensor bounces
+// during a single sustained touch (~9 press+release pairs per second
+// observed in captures). Emitting every one of those as MCU note-on/off
+// would make REAPER's automation engine stutter (e.g. Touch mode would
+// release-then-reacquire constantly). Instead:
+//   - On any touch-press IN event: emit MCU Note-on immediately (if not
+//     already "reported as touched"). Update last-press timestamp.
+//   - On touch-release IN event: do NOTHING immediately.
+//   - The REAPER timer (30 Hz) emits Note-off when (now - lastPress)
+//     exceeds the hold threshold, which means the user really let go.
+std::array<std::atomic<bool>, 8>          g_touchReported{};
+std::array<std::chrono::steady_clock::time_point, 8> g_touchLastPress{};
+constexpr auto kTouchHoldThreshold = std::chrono::milliseconds(300);
+
+// De-dup for pitch-bend so REAPER's motor echo doesn't re-trigger us.
+std::array<std::atomic<uint8_t>, 8> g_lastMsbOut{};
+std::array<std::atomic<uint8_t>, 8> g_lastLsbOut{};
 
 void onUf8Input(const uint8_t* data, size_t len)
 {
@@ -86,10 +98,10 @@ void onUf8Input(const uint8_t* data, size_t len)
             case 0x04: frameSize = 7; break;   // poll (02 9d 01 a4) — ignore
             case 0x21: frameSize = 7; break;   // fader position
             case 0x22: frameSize = 7; break;   // button
-            case 0x20: frameSize = 6; break;   // v-pot push (tbc)
-            case 0x23: frameSize = 6; break;   // (unused in current UF8 firmware)
+            case 0x20: frameSize = 6; break;   // fader touch (capacitive)
+            case 0x23: frameSize = 6; break;   // pressure sensor (TBD)
             case 0x24: frameSize = 6; break;   // v-pot rotation
-            case 0x33: frameSize = 6; break;   // fader touch
+            case 0x33: frameSize = 6; break;   // pressure sensor (TBD)
             default:   frameSize = 0; break;
         }
         if (frameSize == 0 || i + frameSize > len) { ++i; continue; }
@@ -97,30 +109,48 @@ void onUf8Input(const uint8_t* data, size_t len)
         // Dispatch by command.
         if (cmd == 0x21 && data[i + 2] == 0x03) {
             // Fader position: FF 21 03 strip A B cksum
-            // TBD: the A/B-byte encoding isn't yet understood — what we
-            // forwarded as 14-bit MCU pitch-bend didn't line up with the
-            // physical fader position (values clustered near bottom even
-            // when the user pulled the fader up). Disabled until we do a
-            // targeted capture session with known fader positions to
-            // decode the encoding. Touch detection + REAPER -> UF8 motor
-            // still work, so the fader is usable as a display but not as
-            // an input.
-            (void)data;
+            // A = MCU LSB (high bit is a flag, masked), B = MCU MSB.
+            // Only forward while the user is currently holding the fader
+            // (debounced touch state) AND the value actually changed —
+            // otherwise REAPER's motor-echo feedback loop would tank the
+            // fader down.
+            const uint8_t strip = data[i + 3];
+            if (strip < 8 && g_touchReported[strip].load()) {
+                const uint8_t lsb = data[i + 4] & 0x7F;
+                const uint8_t msb = data[i + 5] & 0x7F;
+                const uint8_t prevMsb = g_lastMsbOut[strip].load();
+                const uint8_t prevLsb = g_lastLsbOut[strip].load();
+                const int lsbDelta = std::abs(int(lsb) - int(prevLsb));
+                if (msb != prevMsb || lsbDelta >= 4) {
+                    g_lastMsbOut[strip].store(msb);
+                    g_lastLsbOut[strip].store(lsb);
+                    const uint8_t mcu[3] = {static_cast<uint8_t>(0xE0 | strip), lsb, msb};
+                    g_midi->send(std::span<const uint8_t>(mcu, 3));
+                }
+            }
         } else if (cmd == 0x22 && data[i + 2] == 0x03) {
             // Button: FF 22 03 id 00 state cksum
             const uint8_t id    = data[i + 3];
             const uint8_t state = data[i + 5];
             const uint8_t mcu[3] = {0x90, id, state ? uint8_t{0x7F} : uint8_t{0x00}};
             g_midi->send(std::span<const uint8_t>(mcu, 3));
-        } else if (cmd == 0x33 && data[i + 2] == 0x02) {
-            // Fader touch: FF 33 02 strip state cksum → MCU Note-on 0x68+strip
+        } else if (cmd == 0x20 && data[i + 2] == 0x02) {
+            // Fader touch: FF 20 02 strip state cksum
+            //
+            // Clean capacitive touch — hardware-debounced. On press we
+            // (1) send MCU Note-on 0x68+strip to REAPER so CSI knows the
+            //     fader is user-controlled,
+            // (2) send FF 1D 02 strip 00 to the UF8 so its motor releases
+            //     and the user's hand isn't fighting it.
+            // On release, mirror both.
             const uint8_t strip = data[i + 3];
             const uint8_t state = data[i + 4];
             if (strip < 8) {
-                g_faderTouched[strip].store(state != 0);
+                g_touchReported[strip].store(state != 0);
                 const uint8_t mcu[3] = {0x90, static_cast<uint8_t>(0x68 + strip),
                                         state ? uint8_t{0x7F} : uint8_t{0x00}};
                 g_midi->send(std::span<const uint8_t>(mcu, 3));
+                if (g_dev) g_dev->send(uf8::buildMotorEnable(strip, state == 0));
             }
         } else if (cmd == 0x24 && data[i + 2] == 0x02) {
             // V-pot rotation: FF 24 02 strip delta_raw cksum

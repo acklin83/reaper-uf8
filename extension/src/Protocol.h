@@ -59,6 +59,14 @@ std::vector<uint8_t> buildStripTextLower(uint8_t strip, std::string_view text);
 // We pass them through verbatim — SSL 360° does the same in captures.
 std::vector<uint8_t> buildFaderPosition(uint8_t strip, uint8_t lsb, uint8_t msb);
 
+// Enable / disable the fader motor on one strip:
+//   FF 1D 02 <strip> <enable> CKSUM        (6 bytes)
+// enable = 0x01 → motor active (tracks host position)
+// enable = 0x00 → motor limp (user can move fader freely)
+// SSL 360° toggles this in response to the UF8's FF 20 02 capacitive
+// touch events, so the motor releases under the user's finger.
+std::vector<uint8_t> buildMotorEnable(uint8_t strip, bool enable);
+
 // Verify a frame's checksum. Returns true if frame starts with FF and the
 // last byte matches sum(middle bytes) mod 256.
 bool verifyFrame(std::span<const uint8_t> frame);
