@@ -57,6 +57,13 @@ void MidiBridge::send(std::span<const uint8_t> bytes)
 {
     if (!source_ || bytes.empty()) return;
 
+    // Debug: log every outgoing MIDI we push up to REAPER.
+    if (FILE* f = std::fopen("/tmp/reaper_uf8_midi_out.log", "a")) {
+        for (auto b : bytes) std::fprintf(f, "%02x ", b);
+        std::fprintf(f, "\n");
+        std::fclose(f);
+    }
+
     // MIDIPacketList with one packet. 256 B enough for all MCU frames except
     // large SysEx scribble updates — those we'd split, but for now keep it
     // simple.

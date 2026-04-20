@@ -14,10 +14,13 @@
 #include "reaper_plugin.h"
 #include "reaper_plugin_functions.h"
 
+#include <array>
+#include <atomic>
 #include <cstdio>
 #include <memory>
 
 #include "ColorSync.h"
+#include "HidDevice.h"
 #include "MidiBridge.h"
 #include "UF8Device.h"
 
@@ -26,6 +29,129 @@ namespace {
 std::unique_ptr<uf8::UF8Device>   g_dev;
 std::unique_ptr<uf8::ColorSync>   g_sync;
 std::unique_ptr<uf8::MidiBridge>  g_midi;
+std::unique_ptr<uf8::HidDevice>   g_hid;
+
+// Parse a UF8 vendor-USB IN report and, when it's an input event, convert
+// to the equivalent MCU MIDI message and push it back up to REAPER via the
+// virtual MIDI source. The UF8 firmware packs events into this EP 0x81 IN
+// stream, inter-mingled with its continuous polling heartbeat (which we
+// just skip).
+//
+// Observed event framing — all starting from a position past the 31 60
+// session prefix (stripped here if present):
+//
+//   FF 21 03 <strip> <A> <B> CKSUM    — fader position (16-bit abs.)
+//   FF 22 03 <id>    00 <s> CKSUM     — button press/release
+//   FF 23 02 <strip> <s>    CKSUM     — fader touch
+//   FF 24 02 <strip> <d>    CKSUM     — v-pot rotation (delta)
+//   FF 33 02 <strip> <s>    CKSUM     — v-pot push toggle (tbc)
+//
+// Plus the "FF 04 02 9d 01 a4" and partner "FF 04 02 94 01 9b" polling
+// packets which repeat at ~100 Hz — we ignore those.
+// Per-strip touch state. Fader position reports from the UF8 are noisy —
+// they come in even when nobody is touching the fader — so we only
+// forward pitch-bend to REAPER while the user is actively holding the
+// fader (per the capacitive touch sensor). This matches MCU protocol
+// semantics: the DAW owns the fader position except during user-driven
+// movement.
+std::array<std::atomic<bool>, 8> g_faderTouched{};
+
+void onUf8Input(const uint8_t* data, size_t len)
+{
+    // Debug: log every non-trivial IN packet that reaches this handler,
+    // including payloads that might be interesting (anything not a pure
+    // 31 60 / poll pair).
+    if (FILE* f = std::fopen("/tmp/reaper_uf8_in_dispatch.log", "a")) {
+        std::fprintf(f, "[%zu] ", len);
+        for (size_t k = 0; k < len && k < 32; ++k) std::fprintf(f, "%02x ", data[k]);
+        std::fprintf(f, "\n");
+        std::fclose(f);
+    }
+
+    if (!g_midi) return;
+
+    // Walk past each FF frame in the buffer (multiple frames can arrive
+    // concatenated, optionally preceded by a 31 60 / 31 00 session prefix).
+    size_t i = 0;
+    while (i < len) {
+        // Session-prefix byte 0x31 + flag byte: skip both.
+        if (data[i] == 0x31 && i + 1 < len) { i += 2; continue; }
+        if (data[i] != 0xFF) { ++i; continue; }
+        if (i + 2 >= len) break;  // need at least FF, cmd, something
+
+        // Figure out frame size based on the command byte.
+        const uint8_t cmd = data[i + 1];
+        size_t frameSize = 0;
+        switch (cmd) {
+            case 0x04: frameSize = 7; break;   // poll (02 9d 01 a4) — ignore
+            case 0x21: frameSize = 7; break;   // fader position
+            case 0x22: frameSize = 7; break;   // button
+            case 0x20: frameSize = 6; break;   // v-pot push (tbc)
+            case 0x23: frameSize = 6; break;   // (unused in current UF8 firmware)
+            case 0x24: frameSize = 6; break;   // v-pot rotation
+            case 0x33: frameSize = 6; break;   // fader touch
+            default:   frameSize = 0; break;
+        }
+        if (frameSize == 0 || i + frameSize > len) { ++i; continue; }
+
+        // Dispatch by command.
+        if (cmd == 0x21 && data[i + 2] == 0x03) {
+            // Fader position: FF 21 03 strip A B cksum
+            // TBD: the A/B-byte encoding isn't yet understood — what we
+            // forwarded as 14-bit MCU pitch-bend didn't line up with the
+            // physical fader position (values clustered near bottom even
+            // when the user pulled the fader up). Disabled until we do a
+            // targeted capture session with known fader positions to
+            // decode the encoding. Touch detection + REAPER -> UF8 motor
+            // still work, so the fader is usable as a display but not as
+            // an input.
+            (void)data;
+        } else if (cmd == 0x22 && data[i + 2] == 0x03) {
+            // Button: FF 22 03 id 00 state cksum
+            const uint8_t id    = data[i + 3];
+            const uint8_t state = data[i + 5];
+            const uint8_t mcu[3] = {0x90, id, state ? uint8_t{0x7F} : uint8_t{0x00}};
+            g_midi->send(std::span<const uint8_t>(mcu, 3));
+        } else if (cmd == 0x33 && data[i + 2] == 0x02) {
+            // Fader touch: FF 33 02 strip state cksum → MCU Note-on 0x68+strip
+            const uint8_t strip = data[i + 3];
+            const uint8_t state = data[i + 4];
+            if (strip < 8) {
+                g_faderTouched[strip].store(state != 0);
+                const uint8_t mcu[3] = {0x90, static_cast<uint8_t>(0x68 + strip),
+                                        state ? uint8_t{0x7F} : uint8_t{0x00}};
+                g_midi->send(std::span<const uint8_t>(mcu, 3));
+            }
+        } else if (cmd == 0x24 && data[i + 2] == 0x02) {
+            // V-pot rotation: FF 24 02 strip delta_raw cksum
+            // Convert to MCU CC: B0 <0x10+strip> <dir<<6 | speed>
+            // UF8 delta: low-nibble = speed; high-nibble presumably direction.
+            // Provisional mapping until we capture more data: bit 7 = direction.
+            const uint8_t strip = data[i + 3];
+            const uint8_t raw   = data[i + 4];
+            if (strip < 8) {
+                const uint8_t speed = raw & 0x3F;
+                const bool dir_down = (raw & 0x40) != 0;
+                const uint8_t cc_val = dir_down ? (0x40 | speed) : speed;
+                const uint8_t mcu[3] = {0xB0, static_cast<uint8_t>(0x10 + strip), cc_val};
+                g_midi->send(std::span<const uint8_t>(mcu, 3));
+            }
+        }
+        // cmd 0x33 (v-pot push?) skipped — need more samples to verify
+
+        i += frameSize;
+    }
+}
+
+// Log raw HID reports until we've reverse-engineered the report format.
+void logHid(const uint8_t* data, size_t len)
+{
+    if (FILE* f = std::fopen("/tmp/reaper_uf8_hid.log", "a")) {
+        for (size_t i = 0; i < len; ++i) std::fprintf(f, "%02x ", data[i]);
+        std::fprintf(f, "\n");
+        std::fclose(f);
+    }
+}
 
 // Very simple rolling log file so we can see what CSI sends us without
 // needing REAPER's console plumbing. Written from the Core-MIDI thread —
@@ -88,6 +214,16 @@ void onMidiFromReaper(std::span<const uint8_t> bytes)
             cursor += chunkLen;
             pos    += 7;
         }
+        return;
+    }
+
+    // Fader pitch-bend: E<ch> <LSB> <MSB>  (3 bytes, channel 0..7 = strip)
+    if (bytes.size() == 3 && (bytes[0] & 0xF0) == 0xE0) {
+        const uint8_t strip = bytes[0] & 0x07;
+        if (strip < 8) {
+            g_dev->send(uf8::buildFaderPosition(strip, bytes[1], bytes[2]));
+        }
+        return;
     }
 }
 
@@ -119,6 +255,8 @@ extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(
         // Unload
         plugin_register("-timer", reinterpret_cast<void*>(onTimer));
         g_sync.reset();
+        if (g_hid) g_hid->close();
+        g_hid.reset();
         if (g_midi) g_midi->close();
         g_midi.reset();
         if (g_dev) g_dev->close();
@@ -148,6 +286,14 @@ extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(
     }
     g_sync = std::make_unique<uf8::ColorSync>(*g_dev);
     g_sync->invalidate();
+
+    // Route every vendor-USB IN packet through our MCU translator.
+    g_dev->setRawInputHandler(onUf8Input);
+
+    // HID is locked behind Input Monitoring on macOS and the fader/v-pot
+    // inputs we need are actually on vendor-USB EP 0x81 (parsed above).
+    // Keep the HidDevice class around for eventual cross-platform use but
+    // don't open it for now.
 
     // Poll at ~30 Hz. REAPER's timer callback fires on the main thread.
     plugin_register("timer", reinterpret_cast<void*>(onTimer));

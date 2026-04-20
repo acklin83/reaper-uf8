@@ -47,6 +47,7 @@ endif()
 find_package(PkgConfig QUIET)
 if(PkgConfig_FOUND)
     pkg_check_modules(LIBUSB REQUIRED IMPORTED_TARGET libusb-1.0)
+    pkg_check_modules(HIDAPI REQUIRED IMPORTED_TARGET hidapi)
 endif()
 
 # ----- the plugin -------------------------------------------------------------
@@ -57,7 +58,10 @@ add_library(reaper_uf8 MODULE
     src/UF8Device.cpp
     src/ColorSync.cpp
     src/MidiBridge.cpp
+    src/HidDevice.cpp
 )
+
+target_link_libraries(reaper_uf8 PRIVATE PkgConfig::HIDAPI)
 
 if(APPLE)
     target_link_libraries(reaper_uf8 PRIVATE "-framework CoreMIDI" "-framework CoreFoundation")
@@ -92,3 +96,7 @@ add_test(NAME protocol COMMAND test_protocol)
 add_executable(uf8_color_test tools/uf8_color_test.cpp src/Protocol.cpp)
 target_include_directories(uf8_color_test PRIVATE src)
 target_link_libraries(uf8_color_test PRIVATE PkgConfig::LIBUSB)
+
+# ----- HID probe tool ---------------------------------------------------------
+add_executable(uf8_hid_probe tools/uf8_hid_probe.cpp)
+target_link_libraries(uf8_hid_probe PRIVATE PkgConfig::HIDAPI)

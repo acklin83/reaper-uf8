@@ -53,6 +53,12 @@ std::array<std::vector<uint8_t>, 2> buildPluginMixerHeartbeat();
 std::vector<uint8_t> buildStripTextUpper(uint8_t strip, std::string_view text);
 std::vector<uint8_t> buildStripTextLower(uint8_t strip, std::string_view text);
 
+// Set the motor fader position on one strip:
+//   FF 1E 03 <strip> <LSB> <MSB> CKSUM     (7 bytes)
+// LSB/MSB are the 7-bit halves of the MCU pitch-bend value (0..0x3FFF).
+// We pass them through verbatim — SSL 360° does the same in captures.
+std::vector<uint8_t> buildFaderPosition(uint8_t strip, uint8_t lsb, uint8_t msb);
+
 // Verify a frame's checksum. Returns true if frame starts with FF and the
 // last byte matches sum(middle bytes) mod 256.
 bool verifyFrame(std::span<const uint8_t> frame);

@@ -12,6 +12,8 @@
 
 #include "init_sequence.inc"
 
+#include <cstdio>
+
 namespace uf8 {
 
 namespace {
@@ -221,6 +223,11 @@ void UF8Device::readCallback_(libusb_transfer* xfer)
 
     if (xfer->status == LIBUSB_TRANSFER_COMPLETED && xfer->actual_length > 0) {
         std::span<const uint8_t> data{xfer->buffer, static_cast<size_t>(xfer->actual_length)};
+
+        if (self->rawInputHandler_) {
+            self->rawInputHandler_(xfer->buffer, static_cast<size_t>(xfer->actual_length));
+        }
+
         if (auto ev = parseButtonEvent(data); ev && self->buttonHandler_) {
             self->buttonHandler_(*ev);
         }

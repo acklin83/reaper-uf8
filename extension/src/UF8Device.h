@@ -26,7 +26,8 @@ namespace uf8 {
 
 class UF8Device {
 public:
-    using ButtonHandler = std::function<void(const ButtonEvent&)>;
+    using ButtonHandler    = std::function<void(const ButtonEvent&)>;
+    using RawInputHandler  = std::function<void(const uint8_t* data, size_t len)>;
 
     UF8Device();
     ~UF8Device();
@@ -49,6 +50,7 @@ public:
     // thread — keep it short, hop to REAPER's thread via main_OnCommand or
     // similar if you need to touch REAPER state.
     void setButtonHandler(ButtonHandler h) { buttonHandler_ = std::move(h); }
+    void setRawInputHandler(RawInputHandler h) { rawInputHandler_ = std::move(h); }
 
     const std::string& lastError() const { return lastError_; }
 
@@ -63,6 +65,7 @@ private:
     std::thread           worker_;
     std::string           lastError_;
     ButtonHandler         buttonHandler_;
+    RawInputHandler       rawInputHandler_;
 
     // Simple protected send queue — replace with lock-free ringbuf if
     // REAPER calls into send() at audio-thread rates. For color pushes at
