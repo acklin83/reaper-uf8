@@ -67,6 +67,13 @@ std::vector<uint8_t> buildFaderPosition(uint8_t strip, uint8_t lsb, uint8_t msb)
 // touch events, so the motor releases under the user's finger.
 std::vector<uint8_t> buildMotorEnable(uint8_t strip, bool enable);
 
+// Drive one strip's VU meter.
+//   FF 38 04 <strip*3> 00 00 <0xF0 | level> CKSUM     (8 bytes)
+// Best-guess from cap10 frame layout. level is the MCU meter nibble
+// (0..0xE full scale, 0xF clip). Actual byte semantics still partially
+// TBD — refine once we have captures with known audio levels to verify.
+std::vector<uint8_t> buildMeter(uint8_t strip, uint8_t level);
+
 // Verify a frame's checksum. Returns true if frame starts with FF and the
 // last byte matches sum(middle bytes) mod 256.
 bool verifyFrame(std::span<const uint8_t> frame);

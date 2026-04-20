@@ -203,6 +203,14 @@ void onMidiFromReaper(std::span<const uint8_t> bytes)
     logMidi(bytes);
     if (!g_dev || !g_dev->isOpen()) return;
 
+    // MCU meter forwarding DISABLED — the UF8 meter command layout
+    // (FF 38 04 <X> 00 <Y> <Z>) isn't fully decoded yet. Empirically
+    // the expected `X = strip * 3` mapping doesn't match the byte
+    // values seen in non-fader captures. Correlated audio-playback
+    // capture on Windows is the next step — then we can safely
+    // translate MCU D0 events without sending garbage to the device.
+    (void)bytes;
+
     // Scribble-strip SysEx: F0 00 00 66 14 12 <pos> <text> F7
     // <pos> indexes into a 56-char-wide virtual display (7 chars * 8 strips),
     // row 0 (upper) at 0..0x37, row 1 (lower) at 0x38..0x6F.

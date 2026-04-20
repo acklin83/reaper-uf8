@@ -81,6 +81,22 @@ std::vector<uint8_t> buildMotorEnable(uint8_t strip, bool enable)
     return frame;
 }
 
+std::vector<uint8_t> buildMeter(uint8_t strip, uint8_t level)
+{
+    std::vector<uint8_t> frame;
+    frame.reserve(8);
+    frame.push_back(kFrameMagic);
+    frame.push_back(0x38);
+    frame.push_back(0x04);
+    frame.push_back(static_cast<uint8_t>(strip * 3));
+    frame.push_back(0x00);
+    frame.push_back(0x00);
+    frame.push_back(static_cast<uint8_t>(0xF0 | (level & 0x0F)));
+    std::span<const uint8_t> payload{frame.data() + 1, frame.size() - 1};
+    frame.push_back(checksum(payload));
+    return frame;
+}
+
 std::vector<uint8_t> buildStripTextLower(uint8_t strip, std::string_view text)
 {
     // Frame: FF 66 09 0E <strip> <7 chars, space-padded> CKSUM   (total 13 bytes)
