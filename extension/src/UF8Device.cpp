@@ -8,6 +8,9 @@
 #include <cstring>
 #include <mutex>
 #include <queue>
+#include <thread>
+
+#include "init_sequence.inc"
 
 namespace uf8 {
 
@@ -75,8 +78,46 @@ bool UF8Device::open()
         return false;
     }
 
+    // Clear any stall left by the prior owner (typically SSL360Core).
+    libusb_clear_halt(handle_, kEpOut);
+    libusb_clear_halt(handle_, kEpIn);
+
+    // Start the worker thread BEFORE the init replay — the worker pumps
+    // async bulk IN reads, and without a drained IN endpoint the OUT
+    // pipeline stalls around frame 82 of the init sequence.
     shuttingDown_ = false;
     worker_ = std::thread([this]{ workerLoop_(); });
+
+    // Give the worker a beat to post its first IN transfer.
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    // Replay the SSL-360° wakeup/init sequence captured on 2026-04-20.
+    // Without this the UF8 stays in "SSL 360 connection lost" state — any
+    // frames we send are ignored until it sees this handshake.
+    for (const auto& f : kInitSequence) {
+        int transferred = 0;
+        int ircode = libusb_bulk_transfer(
+            handle_, kEpOut,
+            const_cast<uint8_t*>(f.bytes),
+            static_cast<int>(f.size),
+            &transferred, 1000);
+        if (ircode < 0) {
+            lastError_ = std::string("init sequence bulk OUT failed: ")
+                       + libusb_error_name(ircode);
+            shuttingDown_ = true;
+            if (worker_.joinable()) worker_.join();
+            libusb_release_interface(handle_, kInterface);
+            libusb_close(handle_);
+            libusb_exit(ctx_);
+            handle_ = nullptr;
+            ctx_ = nullptr;
+            return false;
+        }
+        // 2 ms pacing matches SSL 360°'s observed inter-frame gap.
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
     return true;
 }
 
@@ -106,8 +147,16 @@ void UF8Device::send(std::vector<uint8_t> frame)
 
 void UF8Device::workerLoop_()
 {
-    // Kick off an async read for button events.
+    // Kick off an async read for button events — also drains the IN
+    // endpoint so OUT flow-control doesn't stall.
     startBulkRead_();
+
+    // Heartbeat frames: SSL 360° sends these at ~50 Hz as a keepalive.
+    // If we stop sending them the UF8 firmware declares "connection lost"
+    // and goes back to splash screen.
+    uint8_t hb1[64] = {0xff, 0x66, 0x21, 0x09};  hb1[63] = 0x90;
+    uint8_t hb2[64] = {0xff, 0x66, 0x21, 0x0a};  hb2[63] = 0x91;
+    auto lastHeartbeat = std::chrono::steady_clock::now();
 
     while (!shuttingDown_) {
         // Drain pending sends.
@@ -122,6 +171,16 @@ void UF8Device::workerLoop_()
                 pending_->q.pop();
             }
         }
+
+        // Send heartbeat pair every ~20 ms regardless of pending sends.
+        auto now = std::chrono::steady_clock::now();
+        if (now - lastHeartbeat >= std::chrono::milliseconds(20)) {
+            int t = 0;
+            libusb_bulk_transfer(handle_, kEpOut, hb1, sizeof(hb1), &t, 100);
+            libusb_bulk_transfer(handle_, kEpOut, hb2, sizeof(hb2), &t, 100);
+            lastHeartbeat = now;
+        }
+
         if (!frame.empty()) {
             int transferred = 0;
             int rc = libusb_bulk_transfer(handle_, kEpOut,
