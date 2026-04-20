@@ -151,6 +151,47 @@ std::vector<uint8_t> buildPluginSlotName(uint8_t strip, std::string_view text)
     return frame;
 }
 
+std::vector<uint8_t> buildChannelStripType(uint8_t strip, std::string_view fourChars)
+{
+    // FF 66 06 17 <strip> <4 chars, space-padded> CKSUM
+    std::vector<uint8_t> frame{0xFF, 0x66, 0x06, 0x17, strip};
+    for (size_t i = 0; i < 4; ++i) {
+        frame.push_back(i < fourChars.size() ? static_cast<uint8_t>(fourChars[i]) : 0x20);
+    }
+    std::span<const uint8_t> payload{frame.data() + 1, frame.size() - 1};
+    frame.push_back(checksum(payload));
+    return frame;
+}
+
+std::vector<uint8_t> buildValueLine(uint8_t strip, std::string_view text)
+{
+    // FF 66 15 0E <strip> <19 chars, space-padded> CKSUM    (24 bytes)
+    std::vector<uint8_t> frame{0xFF, 0x66, 0x15, 0x0E, strip};
+    for (size_t i = 0; i < 19; ++i) {
+        frame.push_back(i < text.size() ? static_cast<uint8_t>(text[i]) : 0x20);
+    }
+    std::span<const uint8_t> payload{frame.data() + 1, frame.size() - 1};
+    frame.push_back(checksum(payload));
+    return frame;
+}
+
+std::vector<uint8_t> buildFaderDbReadout(uint8_t strip, std::string_view fourChars)
+{
+    // FF 66 0A 0C <strip> <4 bytes, NUL-padded> 00 00 "dB" CKSUM    (14 bytes)
+    // The 4-byte value slot is NUL-padded (not space-padded) to match SSL 360°.
+    std::vector<uint8_t> frame{0xFF, 0x66, 0x0A, 0x0C, strip};
+    for (size_t i = 0; i < 4; ++i) {
+        frame.push_back(i < fourChars.size() ? static_cast<uint8_t>(fourChars[i]) : 0x00);
+    }
+    frame.push_back(0x00);
+    frame.push_back(0x00);
+    frame.push_back('d');
+    frame.push_back('B');
+    std::span<const uint8_t> payload{frame.data() + 1, frame.size() - 1};
+    frame.push_back(checksum(payload));
+    return frame;
+}
+
 std::vector<uint8_t> buildStripTextLower(uint8_t strip, std::string_view text)
 {
     // Frame: FF 66 09 0E <strip> <7 chars, space-padded> CKSUM   (total 13 bytes)

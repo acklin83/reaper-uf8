@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <string>
 
 #include "ColorSync.h"
@@ -347,26 +348,105 @@ std::string slotLabelForVisibleSlot(int slot)
     return fallback;
 }
 
-// Per-strip cache so we only push the Parameter Label frame on change —
-// otherwise we'd re-send 8 × 14-byte frames every 33 ms and clog the OUT
-// endpoint.
-std::array<std::string, 8> g_lastSlotLabel{};
+// Convert REAPER linear-amplitude volume (0..~4) to a dB string that
+// fits the O/PdB zone's 4-char value slot: "-inf", "-6.0", "0.0", "12.0".
+//
+// REAPER stores fader position as a linear multiplier — 1.0 = 0 dB.
+// Below ~10^-5 we call it "-inf" to match what the SSL LCD shows at
+// the fader bottom.
+std::string formatDbReadout(double linearAmp)
+{
+    if (linearAmp < 1e-5) return "-inf";
+    const double dB = 20.0 * std::log10(linearAmp);
+    char buf[8];
+    if (std::abs(dB) < 10.0) {
+        std::snprintf(buf, sizeof(buf), "%.1f", dB);
+    } else {
+        std::snprintf(buf, sizeof(buf), "%.0f", dB);
+    }
+    std::string s(buf);
+    if (s.size() > 4) s.resize(4);
+    return s;
+}
 
-void pushSlotLabels()
+// Compose the Value Line (19 chars) — e.g. "Vol        -6.0dB".
+// Left-justified label, right-justified value. Truncates both if needed
+// so the total fits within 19 chars.
+std::string composeValueLine(std::string_view label, std::string_view value)
+{
+    constexpr size_t kWidth = 19;
+    if (label.size() + value.size() + 1 > kWidth) {
+        // Prefer to show full value; trim label.
+        const size_t labelMax = kWidth - value.size() - 1;
+        label = label.substr(0, labelMax);
+    }
+    std::string out(label);
+    const size_t padding = kWidth - label.size() - value.size();
+    out.append(padding, ' ');
+    out.append(value);
+    return out;
+}
+
+// Slot-level state caches — push only on change to avoid hammering the
+// OUT endpoint 30× per second.
+std::array<std::string, 8> g_lastSlotLabel{};
+std::array<std::string, 8> g_lastCsType{};
+std::array<std::string, 8> g_lastValueLine{};
+std::array<std::string, 8> g_lastFaderDb{};
+
+void pushZonesForVisibleSlots()
 {
     if (!g_dev || !g_dev->isOpen()) return;
+
+    const int trackCount = CountTracks(nullptr);
+
     for (int s = 0; s < 8; ++s) {
-        std::string want = slotLabelForVisibleSlot(s);
-        if (want == g_lastSlotLabel[s]) continue;
-        g_lastSlotLabel[s] = want;
-        g_dev->send(uf8::buildPluginSlotName(static_cast<uint8_t>(s), want));
+        MediaTrack* tr = (s < trackCount) ? GetTrack(nullptr, s) : nullptr;
+
+        // Channel Strip Type zone: SSL plug-in short name if present, else
+        // a 4-char REAPER mnemonic ("RPR ").
+        std::string csType = tr ? sslPluginShortName(tr) : std::string{};
+        if (csType.empty()) csType = "RPR ";
+        csType.resize(std::min<size_t>(csType.size(), 4), ' ');
+        while (csType.size() < 4) csType += ' ';
+        if (csType != g_lastCsType[s]) {
+            g_lastCsType[s] = csType;
+            g_dev->send(uf8::buildChannelStripType(static_cast<uint8_t>(s), csType));
+        }
+
+        // Parameter Label (Currently Selected Parameter zone) — already
+        // doubled as the "populate slot" activation flag; drive it with
+        // the track name or SSL plug-in short name.
+        std::string label = slotLabelForVisibleSlot(s);
+        if (label != g_lastSlotLabel[s]) {
+            g_lastSlotLabel[s] = label;
+            g_dev->send(uf8::buildPluginSlotName(static_cast<uint8_t>(s), label));
+        }
+
+        if (!tr) continue;
+
+        // O/PdB Fader Readout — track volume in dB.
+        const double volLin = GetMediaTrackInfo_Value(tr, "D_VOL");
+        std::string dbStr = formatDbReadout(volLin);
+        if (dbStr != g_lastFaderDb[s]) {
+            g_lastFaderDb[s] = dbStr;
+            g_dev->send(uf8::buildFaderDbReadout(static_cast<uint8_t>(s), dbStr));
+        }
+
+        // Value Line — "Vol         -6.0dB" format, single combined row.
+        std::string valLine = composeValueLine("Vol",
+            dbStr == "-inf" ? std::string("-inf dB") : dbStr + "dB");
+        if (valLine != g_lastValueLine[s]) {
+            g_lastValueLine[s] = valLine;
+            g_dev->send(uf8::buildValueLine(static_cast<uint8_t>(s), valLine));
+        }
     }
 }
 
 void onTimer()
 {
     if (g_sync) g_sync->refresh(reaperColorForVisibleSlot);
-    pushSlotLabels();
+    pushZonesForVisibleSlots();
 }
 
 } // anonymous

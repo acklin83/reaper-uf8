@@ -99,6 +99,26 @@ std::vector<uint8_t> buildLayerDaw();
 std::vector<uint8_t> buildPluginSlotActive();
 std::vector<uint8_t> buildPluginSlotName(uint8_t strip, std::string_view text);
 
+// Plug-in Mixer / Channel Strip Mode LCD zones — per-strip addressable.
+// All decoded from cap14a–cap18 on 2026-04-20.
+//
+// Channel Strip Type ("CS 2" / "4K B" / "4K E" / "BusComp"):
+//   FF 66 06 17 <strip> <4 ASCII chars> CKSUM       (9 bytes)
+std::vector<uint8_t> buildChannelStripType(uint8_t strip, std::string_view fourChars);
+
+// Value Line — combined parameter name + value on one row, 19 chars wide.
+// Left-justified name, right-justified value, spaces in between.
+// Example: "In Trim       0.0dB", "HF Freq     8.00kHz".
+//   FF 66 15 0E <strip> <19 ASCII chars> CKSUM      (24 bytes)
+std::vector<uint8_t> buildValueLine(uint8_t strip, std::string_view nineteenChars);
+
+// O/PdB Fader Readout — the big fader-dB number.
+// Format places a 4-char value field (e.g. "-0.1", "0.0", "12.0") followed
+// by two NUL bytes and the literal "dB" suffix. Caller passes the value
+// as a string (shorter strings right-padded with NUL inside the frame).
+//   FF 66 0A 0C <strip> <4 bytes> 00 00 "dB" CKSUM  (14 bytes)
+std::vector<uint8_t> buildFaderDbReadout(uint8_t strip, std::string_view fourChars);
+
 // Verify a frame's checksum. Returns true if frame starts with FF and the
 // last byte matches sum(middle bytes) mod 256.
 bool verifyFrame(std::span<const uint8_t> frame);

@@ -125,6 +125,42 @@ sequence at `open()` time before any color command will be visible.
 Until we have that, the extension can still be built and loaded but won't
 drive the hardware.
 
+## Plug-in Mixer LCD zones — per-strip addressable commands
+
+Each of the 8 scribble-strip LCDs in Plug-in Mixer / Channel Strip Mode
+is split into multiple text and graphic zones (see UF8 User Guide
+page 153). Commands decoded 2026-04-20 from cap14a–cap18:
+
+| Zone | Command | Frame size | Notes |
+|------|---------|-----------|-------|
+| DAW Colour | `FF 66 09 18 <8 palette idx> CKSUM` | 14 B | Already implemented |
+| Channel Strip Type | `FF 66 06 17 <strip> <4 ASCII> CKSUM` | 9 B | "CS 2", "4K B", "4K E" |
+| Currently Selected Parameter | `FF 66 <N+2> 04 <strip> <N ASCII> CKSUM` | 5+N B | "BYPASS", "LF FREQ", "COMP RATIO" |
+| Value Line | `FF 66 15 0E <strip> <19 ASCII> CKSUM` | 24 B | Combined label+value: "In Trim       0.0dB" |
+| O/PdB Fader Readout | `FF 66 0A 0C <strip> <4 ASCII> 00 00 "dB" CKSUM` | 14 B | Fader dB — `64 42` = "dB" fixed |
+| V-Pot Readout Bar | `FF 66 09 0D <8 bytes> CKSUM` | 13 B | Broadcast: 1 byte per strip |
+| Fader / meter bar | `FF 66 11 0F <16 bytes> CKSUM` | 20 B | Broadcast: 2 bytes per strip (8 × 16-bit) |
+| TrkNam (big) | `FF 66 <N+2> 0B <strip> <N ASCII> CKSUM` | 5+N B | Driven via MCU scribble-strip sysex pass-through |
+| Fader motor | `FF 1E 03 <strip> <LSB> <MSB> CKSUM` | 7 B | Bidirectional (host→UF8 = set position, UF8→host = user touch) |
+| Motor limp | `FF 1D 02 <strip> <01\|00> CKSUM` | 6 B | 01 = motor active, 00 = user controls |
+
+**Still undecoded:**
+- Top Zone soft-key labels (top row above each strip)
+- Plug-in Mixer Position ("No" slot number top-left)
+- Dynamics Metering (GR bars) — cap17 inconclusive, needs audio-playing retry
+- Input/Output Metering — `FF 38 04` / `FF 39 04` present but byte layout TBD
+- `FF 5B 02 00 00 5D` — always-present poll-like frame (likely status)
+- `FF 13 04 <4 bytes>` — present during fader moves, not a meter (fewer values than expected)
+
+## Palette corrections (2026-04-20)
+
+REAPER's default "blue" (#009FD5) quantizes to palette index **0x05**,
+not 0x04 as our original capture assumed. cap14a confirmed this: the
+reference `FF 66 09 18` frame with T1-blue set index 0x05 on strip 0.
+Current Palette.cpp is incomplete and needs a re-sweep. Until then,
+our quantizer falls back to nearest-match among the 5 measured entries
+and can misroute colors.
+
 ## Session log
 | date | capture | finding |
 |------|---------|---------|
@@ -135,3 +171,10 @@ drive the hardware.
 | 2026-04-19 | cap04_track1_blue.pcap | Track 1 blue (#0000FF) = 0x04 |
 | 2026-04-19 | cap05_track1_sequence.pcap | Track 1 white=0x0E, sequence partial due to timing/quantization |
 | 2026-04-19 | cap06_bankswitch.pcap | Bank change = new 8-index array. Button event format: `FF 22 03 <id> 00 <state> CKSUM`. BANK→ = 0x78, BANK← = 0x79. Meter cmds `FF 38/39 04 …` identified but ignorable. |
+| 2026-04-20 | cap13_layer_switch.pcap | PM layer state-flood captured. Slot populate flag `FF 66 0A 00 03 …` identified as color-bar activation gate. |
+| 2026-04-20 | cap14a_track1_blue_populated.pcap | REAPER "blue" = palette 0x05 (not 0x04); single color-change triggers ~10 state frames. |
+| 2026-04-20 | cap15_pm_param_cycle.pcap | Parameter Label zone (`FF 66 <n> 04 <strip> <text>`) + Value Line zone (`FF 66 15 0E <strip> <19 chars>`) + V-Pot Readout Bar (`FF 66 09 0D`) + 16-byte bar (`FF 66 11 0F`). |
+| 2026-04-20 | cap16_pm_fader_dB.pcap | O/PdB zone decoded: `FF 66 0A 0C <strip> <4 ASCII> 00 00 "dB" CKSUM`. |
+| 2026-04-20 | cap17_pm_gain_reduction.pcap | Inconclusive — audio didn't play through comp. Only `FF 13 04` (not a meter). |
+| 2026-04-20 | cap18_pm_cs_type.pcap | **Channel Strip Type zone**: `FF 66 06 17 <strip> <4 ASCII>` — "CS 2", "4K B", "4K E". |
+| 2026-04-20 | cap19_pm_bank_position.pcap | No bank shift captured (only DYN page shifts); Position indicator still TBD. |
