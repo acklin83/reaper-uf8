@@ -14,15 +14,30 @@
 #include "reaper_plugin.h"
 #include "reaper_plugin_functions.h"
 
+#include <cstdio>
 #include <memory>
 
 #include "ColorSync.h"
+#include "MidiBridge.h"
 #include "UF8Device.h"
 
 namespace {
 
-std::unique_ptr<uf8::UF8Device> g_dev;
-std::unique_ptr<uf8::ColorSync> g_sync;
+std::unique_ptr<uf8::UF8Device>   g_dev;
+std::unique_ptr<uf8::ColorSync>   g_sync;
+std::unique_ptr<uf8::MidiBridge>  g_midi;
+
+// Very simple rolling log file so we can see what CSI sends us without
+// needing REAPER's console plumbing. Written from the Core-MIDI thread —
+// kept fopen/fprintf/fclose for simplicity; REAPER's MIDI rate is low.
+void logMidi(std::span<const uint8_t> bytes)
+{
+    FILE* f = std::fopen("/tmp/reaper_uf8_midi.log", "a");
+    if (!f) return;
+    for (auto b : bytes) std::fprintf(f, "%02x ", b);
+    std::fprintf(f, "\n");
+    std::fclose(f);
+}
 
 uint32_t reaperColorForVisibleSlot(int slot)
 {
@@ -52,6 +67,8 @@ extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(
         // Unload
         plugin_register("-timer", reinterpret_cast<void*>(onTimer));
         g_sync.reset();
+        if (g_midi) g_midi->close();
+        g_midi.reset();
         if (g_dev) g_dev->close();
         g_dev.reset();
         return 0;
@@ -59,6 +76,16 @@ extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(
 
     if (rec->caller_version != REAPER_PLUGIN_VERSION) return 0;
     if (REAPERAPI_LoadAPI(rec->GetFunc) != 0) return 0;
+
+    // Open the virtual MIDI ports first — REAPER's control-surface layer
+    // picks these up during startup, so they need to exist before the
+    // user configures CSI to route to them.
+    g_midi = std::make_unique<uf8::MidiBridge>();
+    if (g_midi->open("reaper_uf8")) {
+        g_midi->setIncomingHandler(logMidi);
+    } else {
+        ShowConsoleMsg("reaper_uf8: failed to open virtual MIDI ports\n");
+    }
 
     g_dev = std::make_unique<uf8::UF8Device>();
     if (!g_dev->open()) {

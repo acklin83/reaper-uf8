@@ -56,7 +56,12 @@ add_library(reaper_uf8 MODULE
     src/Palette.cpp
     src/UF8Device.cpp
     src/ColorSync.cpp
+    src/MidiBridge.cpp
 )
+
+if(APPLE)
+    target_link_libraries(reaper_uf8 PRIVATE "-framework CoreMIDI" "-framework CoreFoundation")
+endif()
 
 target_include_directories(reaper_uf8 PRIVATE
     src
