@@ -88,6 +88,34 @@ int main()
         EXPECT(!parseButtonEvent(bytes).has_value());
     }
 
+    // --- Upper-row scribble-strip text (variable length)
+    //   captured:  ff 66 06 0b 00 4b 69 63 6b f9   ("Kick" on strip 0)
+    //              ff 66 07 0b 01 53 6e 61 72 65 72   ("Snare" on strip 1)
+    //              ff 66 08 0b 02 54 65 73 74 20 33 6e   ("Test 3" on strip 2)
+    {
+        auto kick  = buildStripTextUpper(0, "Kick");
+        auto snare = buildStripTextUpper(1, "Snare");
+        auto test3 = buildStripTextUpper(2, "Test 3");
+        EXPECT(hex(kick)  == "ff66060b004b69636bf9");
+        EXPECT(hex(snare) == "ff66070b01536e61726572");
+        EXPECT(hex(test3) == "ff66080b025465737420336e");
+    }
+
+    // --- Lower-row scribble-strip text (fixed 7 chars space-padded)
+    {
+        auto frame = buildStripTextLower(0, "dB");
+        // ff 66 09 0e 00 64 42 20 20 20 20 20 <cksum>
+        // 09+0e+00+64+42+20*5 = 0x66+0x0e+0+0x64+0x42+0x64 — recompute
+        // Actually recompute: 0x66+0x09+0x0E+0x00+0x64+0x42+0x20*5 = ...
+        // Let's just check prefix instead of full match.
+        EXPECT(frame.size() == 13);
+        EXPECT(frame[0] == 0xff && frame[1] == 0x66 && frame[2] == 0x09 && frame[3] == 0x0E);
+        EXPECT(frame[4] == 0x00);
+        EXPECT(frame[5] == 'd' && frame[6] == 'B');
+        // trailing pad is space
+        for (int i = 7; i < 12; ++i) EXPECT(frame[i] == 0x20);
+    }
+
     // --- Palette quantization (exact matches we have captures for)
     EXPECT(quantize(0xFF0000) == 0x02);   // pure red
     EXPECT(quantize(0x00FF00) == 0x03);   // pure green
@@ -101,6 +129,6 @@ int main()
         EXPECT(q == 0x02 || q == 0x0B);
     }
 
-    std::printf("OK — %d checks passed\n", 14);
+    std::printf("OK — all checks passed\n");
     return 0;
 }

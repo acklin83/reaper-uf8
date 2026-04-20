@@ -47,37 +47,46 @@ void onMidiFromReaper(std::span<const uint8_t> bytes)
     logMidi(bytes);
     if (!g_dev || !g_dev->isOpen()) return;
 
-    // Scribble-strip SysEx: F0 00 00 66 14 12 <pos> <up to 112 chars> F7
+    // Scribble-strip SysEx: F0 00 00 66 14 12 <pos> <text> F7
     // <pos> indexes into a 56-char-wide virtual display (7 chars * 8 strips),
-    // row 0 at 0..0x37, row 1 at 0x38..0x6F. We only handle row 0 for now.
+    // row 0 (upper) at 0..0x37, row 1 (lower) at 0x38..0x6F.
     if (bytes.size() >= 8
         && bytes[0] == 0xF0 && bytes[1] == 0x00 && bytes[2] == 0x00
         && bytes[3] == 0x66 && bytes[4] == 0x14 && bytes[5] == 0x12)
     {
-        const uint8_t pos = bytes[6];
-        if (pos >= 0x38) return;  // lower row — skip for now
+        const uint8_t startPos = bytes[6];
 
-        const uint8_t strip = pos / 7;
-        if (strip >= 8) return;
-
-        // Text bytes stretch from byte 7 until F7 (sysex end) or end of buffer.
         size_t textStart = 7;
         size_t textEnd   = bytes.size();
         if (bytes.back() == 0xF7) --textEnd;
 
-        std::string_view text(
-            reinterpret_cast<const char*>(bytes.data() + textStart),
-            textEnd - textStart);
+        // Walk the payload 7 chars at a time, one UF8 command per strip.
+        size_t cursor = textStart;
+        uint8_t pos = startPos;
+        while (cursor < textEnd) {
+            const size_t chunkLen = (textEnd - cursor) < 7u ? (textEnd - cursor) : 7u;
+            std::string_view chunk(
+                reinterpret_cast<const char*>(bytes.data() + cursor), chunkLen);
 
-        // The SysEx may carry all 8 strips in one packet (starting at 0x00).
-        // Walk 7 chars at a time, dispatching one UF8 command per strip.
-        while (!text.empty() && strip < 8) {
-            uint8_t s = strip + static_cast<uint8_t>((text.data() - reinterpret_cast<const char*>(bytes.data() + textStart)) / 7);
-            if (s >= 8) break;
-            auto chunk = text.substr(0, 7);
-            g_dev->send(uf8::buildStripTextUpper(s, chunk));
-            if (text.size() <= 7) break;
-            text.remove_prefix(7);
+            // Trim trailing spaces — SSL 360° sends upper-row at natural
+            // (unpadded) length. Keeping the text unpadded matches the
+            // captured command format.
+            auto last = chunk.find_last_not_of(' ');
+            std::string_view trimmed = (last == std::string_view::npos)
+                                       ? chunk.substr(0, 0) : chunk.substr(0, last + 1);
+
+            if (pos < 0x38) {
+                // Upper row (track names)
+                const uint8_t strip = pos / 7;
+                if (strip < 8) g_dev->send(uf8::buildStripTextUpper(strip, trimmed));
+            } else {
+                // Lower row (v-pot / value display)
+                const uint8_t strip = (pos - 0x38) / 7;
+                if (strip < 8) g_dev->send(uf8::buildStripTextLower(strip, chunk));
+            }
+
+            cursor += chunkLen;
+            pos    += 7;
         }
     }
 }

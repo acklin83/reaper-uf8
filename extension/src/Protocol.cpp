@@ -32,7 +32,29 @@ std::vector<uint8_t> buildColorCommand(const std::array<uint8_t, kStripCount>& i
 
 std::vector<uint8_t> buildStripTextUpper(uint8_t strip, std::string_view text)
 {
-    // Frame: FF 66 09 0E <strip> <7 chars> CKSUM   (total 13 bytes)
+    // Frame: FF 66 <len> 0B <strip> <N chars> CKSUM
+    // where len = N + 2 (strip byte + N text bytes... wait: len = count of bytes between
+    // len and cksum, which is 0B + strip + N chars = 2 + N).
+    const size_t N = std::min(text.size(), size_t{7});
+    const uint8_t len = static_cast<uint8_t>(N + 2);
+
+    std::vector<uint8_t> frame;
+    frame.reserve(5 + N);
+    frame.push_back(kFrameMagic);
+    frame.push_back(0x66);
+    frame.push_back(len);
+    frame.push_back(0x0B);
+    frame.push_back(strip);
+    for (size_t i = 0; i < N; ++i) frame.push_back(static_cast<uint8_t>(text[i]));
+
+    std::span<const uint8_t> payload{frame.data() + 1, frame.size() - 1};
+    frame.push_back(checksum(payload));
+    return frame;
+}
+
+std::vector<uint8_t> buildStripTextLower(uint8_t strip, std::string_view text)
+{
+    // Frame: FF 66 09 0E <strip> <7 chars, space-padded> CKSUM   (total 13 bytes)
     std::vector<uint8_t> frame;
     frame.reserve(13);
     frame.push_back(kFrameMagic);

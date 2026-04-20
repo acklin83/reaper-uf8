@@ -37,10 +37,21 @@ std::vector<uint8_t> buildColorCommand(const std::array<uint8_t, kStripCount>& p
 std::array<std::vector<uint8_t>, 2> buildPluginMixerHeartbeat();
 
 // Build a scribble-strip-text command for a single strip.
-//   FF 66 09 0E <strip> <7 ASCII chars, space-padded> CKSUM
-// Matches the command SSL 360° issues for the upper scribble-strip row.
-// `text` longer than 7 chars is truncated, shorter is space-padded.
+//
+// There are two physical rows on the UF8 display. SSL 360° uses two
+// different command types:
+//
+//   Upper row (where track names go):
+//     FF 66 <len> 0B <strip> <N chars ASCII> CKSUM    (variable length, N chars 0..7)
+//     len = N + 2
+//
+//   Lower row (where v-pot / value text goes):
+//     FF 66 09 0E <strip> <7 ASCII chars, space-padded> CKSUM  (fixed 13 bytes)
+//
+// `text` longer than 7 chars is truncated. Upper-row is not space-padded
+// (sent at natural length); lower-row is always 7 chars.
 std::vector<uint8_t> buildStripTextUpper(uint8_t strip, std::string_view text);
+std::vector<uint8_t> buildStripTextLower(uint8_t strip, std::string_view text);
 
 // Verify a frame's checksum. Returns true if frame starts with FF and the
 // last byte matches sum(middle bytes) mod 256.
