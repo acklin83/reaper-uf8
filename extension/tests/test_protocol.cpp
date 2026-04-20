@@ -116,17 +116,17 @@ int main()
         for (int i = 7; i < 12; ++i) EXPECT(frame[i] == 0x20);
     }
 
-    // --- Palette quantization (exact matches we have captures for)
-    EXPECT(quantize(0xFF0000) == 0x02);   // pure red
-    EXPECT(quantize(0x00FF00) == 0x03);   // pure green
-    EXPECT(quantize(0x0000FF) == 0x04);   // pure blue
-    EXPECT(quantize(0xFF8000) == 0x0B);   // bright orange
-    EXPECT(quantize(0xFFFFFF) == 0x0E);   // white
-    // Nearest-match on an off-palette input: reddish-orange should land on
-    // whichever measured entry is closest. Accept {red, orange}.
+    // --- Palette quantization (verified against on-device uf8_palette_probe
+    // 2026-04-20). Indices 0x00-0x0B are usable; 0x0C-0x0F render as off.
+    EXPECT(quantize(0xFF0000) == 0x01);   // pure red
+    EXPECT(quantize(0x00FF00) == 0x02);   // pure green
+    EXPECT(quantize(0x0000FF) == 0x03);   // pure blue
+    EXPECT(quantize(0xFF8000) == 0x07);   // orange
+    // Yellow has no direct palette match; should prefer lime (0x06) or
+    // orange (0x07) — both close in perceptual space.
     {
-        auto q = quantize(0xFF4000);
-        EXPECT(q == 0x02 || q == 0x0B);
+        auto q = quantize(0xFFFF00);
+        EXPECT(q == 0x06 || q == 0x07);
     }
 
     std::printf("OK — all checks passed\n");

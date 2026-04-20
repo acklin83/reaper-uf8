@@ -97,6 +97,11 @@ add_executable(uf8_color_test tools/uf8_color_test.cpp src/Protocol.cpp)
 target_include_directories(uf8_color_test PRIVATE src)
 target_link_libraries(uf8_color_test PRIVATE PkgConfig::LIBUSB)
 
+# ----- Palette probe (interactive) --------------------------------------------
+add_executable(uf8_palette_probe tools/uf8_palette_probe.cpp src/Protocol.cpp)
+target_include_directories(uf8_palette_probe PRIVATE src)
+target_link_libraries(uf8_palette_probe PRIVATE PkgConfig::LIBUSB)
+
 # ----- HID probe tool ---------------------------------------------------------
 add_executable(uf8_hid_probe tools/uf8_hid_probe.cpp)
 target_link_libraries(uf8_hid_probe PRIVATE PkgConfig::HIDAPI)

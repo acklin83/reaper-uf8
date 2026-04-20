@@ -7,37 +7,37 @@ namespace uf8 {
 
 namespace {
 
-// Reference RGB for each mapped palette index.
+// Reference RGB for each palette index — identified by direct on-device
+// probe (uf8_palette_probe, 2026-04-20). The UF8 exposes 12 usable colors;
+// indices 0x0C..0x0F render as black/off and are excluded from quantization.
 //
-// Only entries we've *directly captured* with a known input RGB are marked
-// active. Screenshot guesses (Tracks 2/4/5/6/7/8 in the first session) are
-// excluded — visual estimation of on-screen RGB is unreliable and can
-// poison nearest-match quantization. A follow-up systematic palette sweep
-// will fill the remaining 11 entries; for now an incomplete palette maps
-// input colors to their closest measured index, which is safe.
+// RGB values are approximations of what the UF8 LCD shows — close enough
+// for Euclidean-distance nearest-match. A lab-grade spectrometer sweep
+// could refine these but the perceptual mapping works for the REAPER
+// color picker's typical output.
 constexpr std::array<Rgb, 16> kPalette{{
-    {0x00, 0x00, 0x00},  // 0x00  UNMEASURED
-    {0x00, 0x00, 0x00},  // 0x01  UNMEASURED
-    {0xFF, 0x00, 0x00},  // 0x02  RED   — cap02 Track 1 #FF0000
-    {0x00, 0xFF, 0x00},  // 0x03  GREEN — cap03 Track 1 #00FF00
-    {0x00, 0x00, 0xFF},  // 0x04  BLUE  — cap04 Track 1 #0000FF
-    {0x00, 0x00, 0x00},  // 0x05  UNMEASURED
-    {0x00, 0x00, 0x00},  // 0x06  UNMEASURED (screenshot-only, too imprecise)
-    {0x00, 0x00, 0x00},  // 0x07  UNMEASURED
-    {0x00, 0x00, 0x00},  // 0x08  UNMEASURED
-    {0x00, 0x00, 0x00},  // 0x09  UNMEASURED
-    {0x00, 0x00, 0x00},  // 0x0A  UNMEASURED
-    {0xFF, 0x80, 0x00},  // 0x0B  ORANGE — cap05 Track 1 #FF8000
-    {0x00, 0x00, 0x00},  // 0x0C  UNMEASURED
-    {0x00, 0x00, 0x00},  // 0x0D  UNMEASURED
-    {0xFF, 0xFF, 0xFF},  // 0x0E  WHITE  — cap05 Track 1 #FFFFFF
-    {0x00, 0x00, 0x00},  // 0x0F  UNMEASURED
+    {0xFF, 0x80, 0xFF},  // 0x00  hellviolet — light magenta
+    {0xFF, 0x00, 0x00},  // 0x01  rot
+    {0x00, 0xFF, 0x00},  // 0x02  grün
+    {0x00, 0x00, 0xFF},  // 0x03  blau
+    {0x00, 0xFF, 0xFF},  // 0x04  hellblau — cyan
+    {0x80, 0x00, 0xFF},  // 0x05  violett — purple
+    {0x80, 0xFF, 0x00},  // 0x06  hellgrün — lime
+    {0xFF, 0x80, 0x00},  // 0x07  orange (dunkel)
+    {0x40, 0x00, 0xFF},  // 0x08  blauviolet — deeper blue-purple
+    {0x80, 0xFF, 0x80},  // 0x09  hellgrün (hell) — pale green
+    {0xFF, 0x00, 0xFF},  // 0x0A  violet (magenta)
+    {0x40, 0x80, 0xFF},  // 0x0B  blau (variant) — mid-light blue
+    {0x00, 0x00, 0x00},  // 0x0C  OFF
+    {0x00, 0x00, 0x00},  // 0x0D  OFF
+    {0x00, 0x00, 0x00},  // 0x0E  OFF
+    {0x00, 0x00, 0x00},  // 0x0F  OFF
 }};
 
 constexpr std::array<bool, 16> kHasEntry{{
-    false, false, true,  true,  true,  false,
-    false, false, false, false, false, true,
-    false, false, true,  false
+    true,  true,  true,  true,  true,  true,
+    true,  true,  true,  true,  true,  true,
+    false, false, false, false
 }};
 
 } // anonymous
@@ -54,7 +54,7 @@ uint8_t quantize(Rgb c)
     // When we sweep the full palette we can either remove the restriction or
     // keep it (unmapped entries become "never chosen" which is safer).
     int bestDist = std::numeric_limits<int>::max();
-    uint8_t bestIdx = 0x02;  // default to red if literally nothing matches
+    uint8_t bestIdx = 0x01;  // default to red if literally nothing matches
 
     for (uint8_t i = 0; i < 16; ++i) {
         if (!kHasEntry[i]) continue;
