@@ -121,6 +121,36 @@ std::vector<uint8_t> buildLayerDaw()
     return frame;
 }
 
+std::vector<uint8_t> buildPluginSlotActive()
+{
+    // FF 66 0A 00 03 00 00 00 00 00 00 00 00 CKSUM
+    std::vector<uint8_t> frame{0xFF, 0x66, 0x0A, 0x00, 0x03};
+    for (int i = 0; i < 8; ++i) frame.push_back(0x00);
+    std::span<const uint8_t> payload{frame.data() + 1, frame.size() - 1};
+    frame.push_back(checksum(payload));
+    return frame;
+}
+
+std::vector<uint8_t> buildPluginSlotName(uint8_t strip, std::string_view text)
+{
+    // FF 66 <len> 04 <strip> <N text bytes> CKSUM   (len = N + 2)
+    const size_t N = std::min(text.size(), size_t{12});
+    const uint8_t len = static_cast<uint8_t>(N + 2);
+
+    std::vector<uint8_t> frame;
+    frame.reserve(5 + N);
+    frame.push_back(kFrameMagic);
+    frame.push_back(0x66);
+    frame.push_back(len);
+    frame.push_back(0x04);
+    frame.push_back(strip);
+    for (size_t i = 0; i < N; ++i) frame.push_back(static_cast<uint8_t>(text[i]));
+
+    std::span<const uint8_t> payload{frame.data() + 1, frame.size() - 1};
+    frame.push_back(checksum(payload));
+    return frame;
+}
+
 std::vector<uint8_t> buildStripTextLower(uint8_t strip, std::string_view text)
 {
     // Frame: FF 66 09 0E <strip> <7 chars, space-padded> CKSUM   (total 13 bytes)

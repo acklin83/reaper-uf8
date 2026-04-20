@@ -10,6 +10,7 @@
 #include <queue>
 #include <thread>
 
+#include "Protocol.h"
 #include "init_sequence.inc"
 #include "layer_plugin_mixer.inc"
 
@@ -134,6 +135,29 @@ bool UF8Device::open()
             static_cast<int>(f.size),
             &transferred, 500);
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    // Plugin-Mixer color bar only renders when each strip's plugin slot is
+    // marked "populated". The layer-switch replay left every slot empty
+    // (FF 66 02 04 <strip>), which is why color pushes went through at the
+    // USB layer but nothing lit up. Send the "populated" 0x03 flag + 8
+    // non-empty slot-name frames to activate the bar. The strip names are
+    // placeholders — REAPER track names arrive on the scribble-strip via
+    // the MCU pipe, and ColorSync drives the bar via FF 66 09 18.
+    auto sendFrame = [&](const std::vector<uint8_t>& f) {
+        int t = 0;
+        libusb_bulk_transfer(handle_, kEpOut,
+                             const_cast<uint8_t*>(f.data()),
+                             static_cast<int>(f.size()),
+                             &t, 500);
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    };
+    sendFrame(buildPluginSlotActive());
+    for (uint8_t s = 0; s < 8; ++s) {
+        char name[8];
+        std::snprintf(name, sizeof(name), "TRK %u", static_cast<unsigned>(s + 1));
+        sendFrame(buildPluginSlotName(s, name));
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 

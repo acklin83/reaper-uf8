@@ -83,6 +83,22 @@ std::vector<uint8_t> buildMeter(uint8_t strip, uint8_t level);
 std::vector<uint8_t> buildLayerPluginMixer();
 std::vector<uint8_t> buildLayerDaw();
 
+// Plugin-Mixer "slot populate" frames. SSL 360° gates the color bar
+// rendering on the plugin slot being marked as occupied. An empty slot
+// (`FF 66 02 04 <strip>`) leaves the bar dark even when a color command
+// arrives; a populated slot (`FF 66 <len> 04 <strip> <text>`) makes the
+// bar respond to `FF 66 09 18`.
+//
+// buildPluginSlotActive(): one-shot "all 8 slots populated" flag —
+//   FF 66 0A 00 03 00 00 00 00 00 00 00 00 CKSUM       (13 bytes)
+//   (our replay captured the "empty" 0x02 variant; 0x03 is the populated
+//    variant seen in cap13 right before colors became visible).
+// buildPluginSlotName(strip, text): per-strip slot-occupant label —
+//   FF 66 <len> 04 <strip> <N ASCII chars> CKSUM       (len = N + 2)
+//   Text longer than ~12 chars is truncated.
+std::vector<uint8_t> buildPluginSlotActive();
+std::vector<uint8_t> buildPluginSlotName(uint8_t strip, std::string_view text);
+
 // Verify a frame's checksum. Returns true if frame starts with FF and the
 // last byte matches sum(middle bytes) mod 256.
 bool verifyFrame(std::span<const uint8_t> frame);
