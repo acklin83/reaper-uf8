@@ -21,9 +21,14 @@
 #include <cstdlib>
 #include <memory>
 
+#include <algorithm>
+#include <cctype>
+#include <string>
+
 #include "ColorSync.h"
 #include "HidDevice.h"
 #include "MidiBridge.h"
+#include "Protocol.h"
 #include "UF8Device.h"
 
 namespace {
@@ -279,9 +284,89 @@ uint32_t reaperColorForVisibleSlot(int slot)
     return static_cast<uint32_t>(c) & 0x00FFFFFFu;
 }
 
+// If the track hosts an SSL 360°-enabled plug-in, return the short label
+// the UF8 would display in Plug-in Mixer / Channel Strip Mode's "Channel
+// Strip Type" zone ("CS 2", "4K B", "4K E", "BusComp"). Empty string
+// means "no SSL plug-in on this track" — caller falls back to REAPER-native
+// rendering.
+//
+// Detection is name-based: the VST3 plug-ins SSL ships expose their
+// identity via TrackFX_GetFXName, prefixed with "VST3: SSL Native ...".
+// We match the substring rather than the exact name to be forgiving of
+// version bumps.
+std::string sslPluginShortName(MediaTrack* tr)
+{
+    if (!tr) return {};
+    const int fxCount = TrackFX_GetCount(tr);
+    char buf[256];
+    for (int fx = 0; fx < fxCount; ++fx) {
+        if (!TrackFX_GetFXName(tr, fx, buf, sizeof(buf))) continue;
+        std::string n(buf);
+        // TrackFX_GetFXName returns e.g. "VST3: SSL Native Channel Strip 2 (SSL)"
+        if (n.find("Channel Strip 2") != std::string::npos) return "CS 2";
+        if (n.find("Channel Strip")   != std::string::npos) return "CS";
+        if (n.find("4K B")            != std::string::npos) return "4K B";
+        if (n.find("4K E")            != std::string::npos) return "4K E";
+        if (n.find("Bus Compressor")  != std::string::npos) return "BusComp";
+        if (n.find("360 Link")        != std::string::npos) return "360 Link";
+    }
+    return {};
+}
+
+// Label shown in the "Currently Selected Parameter" zone (`FF 66 <n> 04
+// <strip>`) — also the command that keeps the color bar rendered.
+//
+// Two-mode logic (matches the user's request 2026-04-20):
+//   - Track hosts SSL 360° plug-in → show plug-in short name (e.g. "CS 2")
+//     so the UF8 displays the plug-in identity the same way SSL 360° would.
+//   - Otherwise → show the REAPER track name (truncated to 12 chars, as
+//     that's the widest this zone renders cleanly). Empty track name →
+//     "CH N" fallback so the slot still reads as populated.
+std::string slotLabelForVisibleSlot(int slot)
+{
+    const int trackCount = CountTracks(nullptr);
+    if (slot >= trackCount) {
+        char fallback[8];
+        std::snprintf(fallback, sizeof(fallback), "CH %d", slot + 1);
+        return fallback;
+    }
+    MediaTrack* tr = GetTrack(nullptr, slot);
+    if (!tr) return "";
+
+    if (auto ssl = sslPluginShortName(tr); !ssl.empty()) return ssl;
+
+    // REAPER track name via P_NAME config parm.
+    char name[256] = {0};
+    if (GetSetMediaTrackInfo_String(tr, "P_NAME", name, false) && name[0] != 0) {
+        std::string s(name);
+        if (s.size() > 12) s.resize(12);
+        return s;
+    }
+    char fallback[8];
+    std::snprintf(fallback, sizeof(fallback), "CH %d", slot + 1);
+    return fallback;
+}
+
+// Per-strip cache so we only push the Parameter Label frame on change —
+// otherwise we'd re-send 8 × 14-byte frames every 33 ms and clog the OUT
+// endpoint.
+std::array<std::string, 8> g_lastSlotLabel{};
+
+void pushSlotLabels()
+{
+    if (!g_dev || !g_dev->isOpen()) return;
+    for (int s = 0; s < 8; ++s) {
+        std::string want = slotLabelForVisibleSlot(s);
+        if (want == g_lastSlotLabel[s]) continue;
+        g_lastSlotLabel[s] = want;
+        g_dev->send(uf8::buildPluginSlotName(static_cast<uint8_t>(s), want));
+    }
+}
+
 void onTimer()
 {
     if (g_sync) g_sync->refresh(reaperColorForVisibleSlot);
+    pushSlotLabels();
 }
 
 } // anonymous
