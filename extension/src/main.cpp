@@ -35,6 +35,7 @@
 #include "ColorSync.h"
 #include "HidDevice.h"
 #include "MidiBridge.h"
+#include "PluginMap.h"
 #include "Protocol.h"
 #include "UF8Device.h"
 
@@ -87,6 +88,20 @@ std::atomic<int> g_bankOffset{0};
 // slot now points at a different track. Set by bank-shift, consumed
 // by the timer.
 std::atomic<bool> g_bankDirty{false};
+
+// Currently-visible parameter page for SSL plug-in mirroring. Each
+// plugin's PluginMap holds an ordered slots[] list; g_pageIdx indexes
+// into that list per-strip-per-plugin (clamped to each plugin's size).
+// Stage-1 is hard-coded to page 0; Stage 3 wires the UF8 Page ←/→
+// buttons to increment/decrement this value.
+std::atomic<int>  g_pageIdx{0};
+std::atomic<bool> g_pageDirty{false};
+
+// When the user hits the PAN button, we globally override every strip's
+// V-Pot to act as pan control regardless of whether the track hosts an
+// SSL plug-in. Any V-Pot assignment soft key (0x68–0x6D) returns to
+// automatic plug-in-param mode. Same invalidation path as a page change.
+std::atomic<bool> g_forcePan{false};
 
 // Read the "UI" volume for a track — reflects the same value the REAPER
 // mixer displays, including automation playback and the effect of a
@@ -320,19 +335,55 @@ void drainInputQueue()
                 CSurf_OnVolumeChange(tr, e.value, false);
                 break;
             case PendingInput::PanDelta: {
-                // CSurf_OnPanChange(tr, delta, relative=true) routes through
-                // REAPER's surface system and clamps; do it explicitly for
-                // predictable behavior when no CSurf-class owner exists.
-                const double cur = GetMediaTrackInfo_Value(tr, "D_PAN");
-                double next = cur + e.value;
-                if (next >  1.0) next =  1.0;
-                if (next < -1.0) next = -1.0;
-                SetMediaTrackInfo_Value(tr, "D_PAN", next);
+                // V-pot rotation: if the strip's track hosts an SSL plug-in
+                // map AND we're not in global Pan mode, drive its paged
+                // parameter. Otherwise fall back to track pan.
+                const int pgIdx = g_pageIdx.load();
+                auto mm = uf8::lookupPluginOnTrack(tr);
+                const bool forcePan = g_forcePan.load();
+                if (!forcePan && mm.map
+                    && static_cast<size_t>(pgIdx) < mm.map->slots.size())
+                {
+                    const uf8::LinkSlot& sl = mm.map->slots[pgIdx];
+                    const double cur = TrackFX_GetParamNormalized(tr, mm.fxIndex,
+                                                                  sl.vst3Param);
+                    // e.value is pan-scaled (≈1/128 per event). Plug-in param
+                    // ranges are 0..1, so without a bump a full sweep would
+                    // take ~128 detents. 4× gives ~32-detent full sweep —
+                    // snappy enough for quick gain grabs without being
+                    // nervous. Fine mode (Shift) quarters.
+                    double delta = e.value * 4.0 * (sl.inverted ? -1.0 : 1.0);
+                    if (g_shiftHeld.load()) delta *= 0.25;
+                    double next = cur + delta;
+                    if (next < 0.0) next = 0.0;
+                    if (next > 1.0) next = 1.0;
+                    TrackFX_SetParamNormalized(tr, mm.fxIndex, sl.vst3Param, next);
+                } else {
+                    const double cur = GetMediaTrackInfo_Value(tr, "D_PAN");
+                    double next = cur + e.value;
+                    if (next >  1.0) next =  1.0;
+                    if (next < -1.0) next = -1.0;
+                    SetMediaTrackInfo_Value(tr, "D_PAN", next);
+                }
                 break;
             }
-            case PendingInput::PanCenter:
-                SetMediaTrackInfo_Value(tr, "D_PAN", 0.0);
+            case PendingInput::PanCenter: {
+                // V-pot push: with an SSL plug-in present (and not in
+                // global Pan mode), reset the paged param to its midpoint.
+                // Otherwise, re-center pan.
+                auto mm = uf8::lookupPluginOnTrack(tr);
+                const int pgIdx = g_pageIdx.load();
+                const bool forcePan = g_forcePan.load();
+                if (!forcePan && mm.map
+                    && static_cast<size_t>(pgIdx) < mm.map->slots.size())
+                {
+                    TrackFX_SetParamNormalized(tr, mm.fxIndex,
+                        mm.map->slots[pgIdx].vst3Param, 0.5);
+                } else {
+                    SetMediaTrackInfo_Value(tr, "D_PAN", 0.0);
+                }
                 break;
+            }
         }
     }
 }
@@ -419,42 +470,57 @@ bool ReaSixtySurface::GetTouchState(MediaTrack* tr, int isPan)
     return false;
 }
 
-// MCU note IDs for the LED classes UF8 firmware responds to:
-//   0x00..0x07 = REC ARM, 0x08..0x0F = SOLO,
-//   0x10..0x17 = MUTE,    0x18..0x1F = SELECT,
-// each offset by strip index 0..7. Confirmed 2026-04-21 that UF8 lights
-// these LEDs even while in PM (Plug-in Mixer) mode as long as the MIDI
-// reaches its MCU endpoint.
-void sendMcuLed(uint8_t base, MediaTrack* tr, bool on)
+// Button LEDs: decoded via cap22 (command) + cap23 (ID map). Format is
+//   FF 3B 03 <id> 00 <state> CKSUM
+// `id = (7 - strip) * 3 + type` where type 0=SEL, 1=MUTE, 2=SOLO. That
+// covers the 24 LEDs in IDs 0x00..0x17 — note the REVERSED strip order:
+// leftmost UF8 strip (our index 0) uses IDs 0x15..0x17, rightmost strip
+// (index 7) uses 0x00..0x02. Confirmed empirically when track 1 (left)
+// was initially lighting channel 8 (right).
+//
+// REC ARM isn't in cap23 (its UF8-only selection mode wasn't active
+// during that capture); best guess is id = 0x18 + (7 - strip), disabled
+// until verified.
+enum class LedClass : uint8_t { Sel = 0, Mute = 1, Solo = 2, Arm = 3 };
+
+uint8_t ledIdFor(LedClass cls, int strip)
 {
-    if (!g_midi) return;
+    const int reversed = 7 - strip;
+    switch (cls) {
+        case LedClass::Sel:  return static_cast<uint8_t>(reversed * 3 + 0);
+        case LedClass::Mute: return static_cast<uint8_t>(reversed * 3 + 1);
+        case LedClass::Solo: return static_cast<uint8_t>(reversed * 3 + 2);
+        case LedClass::Arm:  return static_cast<uint8_t>(0x18 + reversed);  // unverified
+    }
+    return 0;
+}
+
+void sendLed(LedClass cls, MediaTrack* tr, bool on)
+{
+    if (!g_dev) return;
+    if (cls == LedClass::Arm) return;   // gate ARM until cap23b verifies its ID range
     for (int s = 0; s < 8; ++s) {
         if (g_slotTrack[s] != tr) continue;
-        const uint8_t msg[3] = {
-            0x90,
-            static_cast<uint8_t>(base + s),
-            on ? uint8_t{0x7F} : uint8_t{0x00},
-        };
-        g_midi->sendToUf8(std::span<const uint8_t>(msg, 3));
+        g_dev->send(uf8::buildLedCommand(ledIdFor(cls, s), on));
         return;
     }
 }
 
 void ReaSixtySurface::SetSurfaceSolo(MediaTrack* tr, bool solo)
 {
-    sendMcuLed(0x08, tr, solo);
+    sendLed(LedClass::Solo, tr, solo);
 }
 void ReaSixtySurface::SetSurfaceMute(MediaTrack* tr, bool mute)
 {
-    sendMcuLed(0x10, tr, mute);
+    sendLed(LedClass::Mute, tr, mute);
 }
 void ReaSixtySurface::SetSurfaceSelected(MediaTrack* tr, bool sel)
 {
-    sendMcuLed(0x18, tr, sel);
+    sendLed(LedClass::Sel, tr, sel);
 }
 void ReaSixtySurface::SetSurfaceRecArm(MediaTrack* tr, bool arm)
 {
-    sendMcuLed(0x00, tr, arm);
+    sendLed(LedClass::Arm, tr, arm);   // currently a no-op (gated)
 }
 
 // Device lifecycle: the surface instance owns the UF8 connection and the
@@ -490,6 +556,20 @@ ReaSixtySurface::ReaSixtySurface()
     g_sync = std::make_unique<uf8::ColorSync>(*g_dev);
     g_sync->invalidate();
     g_dev->setRawInputHandler(onUf8Input);
+
+    // UF8 firmware powers up with every SEL/MUTE/SOLO LED lit; we want
+    // them all dark until REAPER state says otherwise. Blast an OFF for
+    // every id 0x00..0x17 at open time so the initial display matches
+    // an idle REAPER session.
+    for (uint8_t id = 0x00; id <= 0x17; ++id) {
+        g_dev->send(uf8::buildLedCommand(id, false));
+    }
+
+    // Force the bank-change re-sync block to fire on the very first
+    // timer tick so LED state, slot caches and colors all reflect
+    // REAPER's actual state from the get-go (rather than whatever stale
+    // values the surface booted with).
+    g_bankDirty.store(true);
 
     // Zero the fader positions captured in the layer-replay blob (which
     // still hold the SSL session's fader values at capture time). The
@@ -703,6 +783,43 @@ void onUf8Input(const uint8_t* data, size_t len)
                     if (action) {
                         queueInput({PendingInput::MainAction, 0,
                                     static_cast<double>(action)});
+                    }
+                }
+                handledNatively = true;
+            } else if (id == 0x6E) {
+                // PAN button: toggle "force all V-Pots to Pan" regardless
+                // of SSL-plug-in presence on each track. Invalidates the
+                // per-strip caches so the Value Line / V-Pot bar switch
+                // to pan-mode rendering on the next tick.
+                if (pressed) {
+                    g_forcePan.store(!g_forcePan.load());
+                    g_pageDirty.store(true);
+                }
+                handledNatively = true;
+            } else if (id >= 0x68 && id <= 0x6D) {
+                // V-Pot assignment soft keys (0x68 = V-POT top, 0x69-0x6D =
+                // Soft Keys 1-5). Any of these returns from PAN override
+                // back to automatic plug-in-param mode. Specific per-key
+                // page assignment is a Phase-2 (Config UI) feature; for
+                // now we just clear the pan override.
+                if (pressed && g_forcePan.load()) {
+                    g_forcePan.store(false);
+                    g_pageDirty.store(true);
+                }
+                handledNatively = true;
+            } else if (id == 0x52 || id == 0x53) {
+                // Page ← (0x52) / Page → (0x53). Shifts the plugin-param
+                // page index that `pushZonesForVisibleSlots` reads. Clamped
+                // at 0..31 — the longest PluginMap slot list (CS2) has 32
+                // entries; plugins with fewer slots just show blank on
+                // pages past their end.
+                if (pressed) {
+                    const int delta = (id == 0x53) ? 1 : -1;
+                    int next = g_pageIdx.load() + delta;
+                    if (next < 0) next = 0;
+                    if (next > 31) next = 31;
+                    if (next != g_pageIdx.exchange(next)) {
+                        g_pageDirty.store(true);
                     }
                 }
                 handledNatively = true;
@@ -1053,6 +1170,63 @@ std::array<std::string, 8> g_lastSlotLabel{};
 std::array<std::string, 8> g_lastCsType{};
 std::array<std::string, 8> g_lastValueLine{};
 std::array<std::string, 8> g_lastFaderDb{};
+std::array<std::string, 8> g_lastChanNum{};
+std::array<uint16_t, 8>    g_lastVPotBar{};      // 16-bit LE per strip
+bool                       g_vpotBarInit{false};
+
+// Resolve the LinkSlot for one visible strip at the current page index.
+// Returns nullptr when:
+//   - no track
+//   - PAN mode is forced globally (treat every strip as if it had no plug-in)
+//   - the track's plug-in isn't in our PluginMap registry
+//   - the current page index is past the plug-in's slot count (e.g. BC2
+//     has 7 slots, paging further reveals pan fallback)
+// Must be called on the main thread — touches REAPER API.
+const uf8::LinkSlot* slotForStrip(MediaTrack* tr, int pageIdx,
+                                  int* outFxIdx)
+{
+    if (!tr) return nullptr;
+    if (g_forcePan.load()) return nullptr;
+    auto match = uf8::lookupPluginOnTrack(tr);
+    if (!match.map) return nullptr;
+    if (pageIdx < 0 || static_cast<size_t>(pageIdx) >= match.map->slots.size()) {
+        return nullptr;
+    }
+    if (outFxIdx) *outFxIdx = match.fxIndex;
+    return &match.map->slots[pageIdx];
+}
+
+// Map a normalised 0..1 to a V-Pot readout-bar 16-bit value. SSL 360°
+// encodes the bar as 2 bytes LE per strip in a FF 66 11 0F broadcast.
+// Working theory (cap20, 2026-04-21): byte[0] is a LED bitmask where
+// bits 0..7 correspond to the 8 LED segments. "Bar fill up to N" =
+// (1 << N) - 1. Linear interpretation (byte[0] = round(v * 255)) didn't
+// render anything in a live test — the firmware likely only accepts
+// specific bit patterns. Needs cap24 to confirm; for now we stay close
+// to the bit-mask theory and let the user report back.
+uint16_t vpotPosFromNormalized(double v)
+{
+    if (v < 0.0) v = 0.0;
+    if (v > 1.0) v = 1.0;
+    int n = static_cast<int>(v * 8.0 + 0.5);
+    if (n < 0) n = 0;
+    if (n > 8) n = 8;
+    // Build a "fill from left" bitmask: n=0 empty, n=8 all 8 bits lit.
+    uint16_t mask = static_cast<uint16_t>((n == 8) ? 0xFF : ((1u << n) - 1u));
+    return mask;
+}
+
+// Pan in [-1, +1] → V-Pot bar 0..255 with centre at bit-4.
+uint16_t vpotPosFromPan(double pan)
+{
+    if (pan < -1.0) pan = -1.0;
+    if (pan >  1.0) pan =  1.0;
+    int n = static_cast<int>((pan + 1.0) * 4.0 + 0.5);
+    if (n < 0) n = 0;
+    if (n > 8) n = 8;
+    uint16_t mask = static_cast<uint16_t>((n == 8) ? 0xFF : ((1u << n) - 1u));
+    return mask;
+}
 
 void pushZonesForVisibleSlots()
 {
@@ -1060,6 +1234,9 @@ void pushZonesForVisibleSlots()
 
     const int trackCount = CountTracks(nullptr);
     const int bankOffset = g_bankOffset.load();
+    const int pageIdx    = g_pageIdx.load();
+
+    std::array<uint16_t, 8> vpotBar{};
 
     // Full re-push on a bank change — every cached "last" value refers
     // to a different track now, so dedup would suppress legitimate
@@ -1067,14 +1244,25 @@ void pushZonesForVisibleSlots()
     // re-sync SOLO/MUTE/SEL/ARM LEDs to the new bank's tracks, since
     // REAPER only calls SetSurface* on actual state changes, not on
     // bank shifts.
+    //
+    // Same story for page changes: every strip's Parameter Label and
+    // Value Line now refer to a different plugin slot, so dedup must
+    // re-fire the pushes.
     const bool bankChanged = g_bankDirty.exchange(false);
+    const bool pageChanged = g_pageDirty.exchange(false);
+    if (pageChanged) {
+        g_lastSlotLabel.fill({});
+        g_lastValueLine.fill({});
+    }
     if (bankChanged) {
         g_lastTrackName.fill({});
         g_lastSlotLabel.fill({});
         g_lastCsType.fill({});
         g_lastValueLine.fill({});
         g_lastFaderDb.fill({});
+        g_lastChanNum.fill({});
         g_lastFaderPb.fill(0xFFFF);
+        g_vpotBarInit = false;
         if (g_sync) g_sync->invalidate();
 
         for (int s = 0; s < 8; ++s) {
@@ -1084,14 +1272,14 @@ void pushZonesForVisibleSlots()
             const bool mute = t && GetMediaTrackInfo_Value(t, "B_MUTE")     > 0.5;
             const bool sel  = t && GetMediaTrackInfo_Value(t, "I_SELECTED") > 0.5;
             const bool arm  = t && GetMediaTrackInfo_Value(t, "I_RECARM")   > 0.5;
-            if (g_midi) {
-                const uint8_t msgs[4][3] = {
-                    {0x90, uint8_t(0x08 + s), solo ? uint8_t(0x7F) : uint8_t(0x00)},
-                    {0x90, uint8_t(0x10 + s), mute ? uint8_t(0x7F) : uint8_t(0x00)},
-                    {0x90, uint8_t(0x18 + s), sel  ? uint8_t(0x7F) : uint8_t(0x00)},
-                    {0x90, uint8_t(0x00 + s), arm  ? uint8_t(0x7F) : uint8_t(0x00)},
-                };
-                for (auto& m : msgs) g_midi->sendToUf8(std::span<const uint8_t>(m, 3));
+            // LED bank re-sync: push SEL/MUTE/SOLO for each strip's new
+            // track. ARM LED ID mapping still unverified (cap23b needed)
+            // so it's gated inside sendLed itself.
+            if (g_dev) {
+                g_dev->send(uf8::buildLedCommand(ledIdFor(LedClass::Sel,  s), sel));
+                g_dev->send(uf8::buildLedCommand(ledIdFor(LedClass::Mute, s), mute));
+                g_dev->send(uf8::buildLedCommand(ledIdFor(LedClass::Solo, s), solo));
+                (void)arm;
             }
         }
     }
@@ -1104,9 +1292,24 @@ void pushZonesForVisibleSlots()
         // REAPER's track pointer back to a strip index.
         g_slotTrack[s] = tr;
 
-        // Channel Strip Type zone: SSL plug-in short name if present, else
-        // a 4-char REAPER mnemonic ("RPR ").
-        std::string csType = tr ? sslPluginShortName(tr) : std::string{};
+        // Resolve the SSL plug-in (if any) and the currently-paged slot
+        // for this strip. `slot == nullptr` means "no SSL plug-in on
+        // this track" OR "plug-in has fewer slots than the current page
+        // demands" (e.g. BC2 on page 8 — only 7 slots exist). In both
+        // cases we fall back to the REAPER-native display (track name +
+        // volume).
+        int fxIdx = -1;
+        const uf8::LinkSlot* slot = slotForStrip(tr, pageIdx, &fxIdx);
+        const uf8::PluginMap* map = nullptr;
+        if (slot) {
+            auto mm = uf8::lookupPluginOnTrack(tr);
+            map = mm.map;
+        }
+
+        // Channel Strip Type zone: the plug-in's short name if recognised,
+        // else a 4-char REAPER mnemonic ("RPR ").
+        std::string csType = map ? std::string(map->displayShort)
+                                 : std::string{};
         if (csType.empty()) csType = "RPR ";
         csType.resize(std::min<size_t>(csType.size(), 4), ' ');
         while (csType.size() < 4) csType += ' ';
@@ -1115,13 +1318,35 @@ void pushZonesForVisibleSlots()
             g_dev->send(uf8::buildChannelStripType(static_cast<uint8_t>(s), csType));
         }
 
-        // Parameter Label (Currently Selected Parameter zone) — already
-        // doubled as the "populate slot" activation flag; drive it with
-        // the track name or SSL plug-in short name.
-        std::string label = slotLabelForVisibleSlot(s);
+        // Parameter Label (Currently Selected Parameter zone) — also the
+        // "populate slot" flag that gates color-bar rendering. When an
+        // SSL plug-in is active, use the slot legend ("LPF", "HF", …);
+        // otherwise fall back to track name / CH N.
+        std::string label;
+        if (slot) {
+            label = slot->legend;
+        } else {
+            label = slotLabelForVisibleSlot(s);
+        }
         if (label != g_lastSlotLabel[s]) {
             g_lastSlotLabel[s] = label;
             g_dev->send(uf8::buildPluginSlotName(static_cast<uint8_t>(s), label));
+        }
+
+        // Channel Number Zone — the tiny digit top-left of each strip's
+        // color bar. REAPER track index is 0-based; UF8 expects 1-based
+        // ASCII. Empty slot → empty string (clears the digit).
+        {
+            std::string chan;
+            if (realSlot < trackCount) {
+                char buf[8];
+                std::snprintf(buf, sizeof(buf), "%d", realSlot + 1);
+                chan = buf;
+            }
+            if (chan != g_lastChanNum[s]) {
+                g_lastChanNum[s] = chan;
+                g_dev->send(uf8::buildChannelNumber(static_cast<uint8_t>(s), chan));
+            }
         }
 
         if (!tr) {
@@ -1129,7 +1354,18 @@ void pushZonesForVisibleSlots()
                 g_lastTrackName[s].clear();
                 g_dev->send(uf8::buildStripTextUpper(static_cast<uint8_t>(s), ""));
             }
+            vpotBar[s] = 0;
             continue;
+        }
+
+        // V-Pot Readout Bar position. Plugin param → normalised position;
+        // otherwise centre-mapped pan (-1..+1 → 0..14).
+        if (slot && fxIdx >= 0) {
+            const double norm = TrackFX_GetParamNormalized(tr, fxIdx, slot->vst3Param);
+            vpotBar[s] = vpotPosFromNormalized(slot->inverted ? 1.0 - norm : norm);
+        } else {
+            const double pan = GetMediaTrackInfo_Value(tr, "D_PAN");
+            vpotBar[s] = vpotPosFromPan(pan);
         }
 
         // Upper scribble row — REAPER track name (max 7 chars).
@@ -1173,15 +1409,48 @@ void pushZonesForVisibleSlots()
             }
         }
 
-        // Value Line — "Vol         -6.0dB" format, single combined row.
-        std::string valLine = composeValueLine("Vol",
-            dbStr == "-inf" ? std::string("-inf dB") : dbStr + "dB");
+        // Value Line — for SSL plug-ins: slot name + formatted param value
+        // ("HF Freq    8.00kHz"). Otherwise: track volume ("Vol   -6.0dB").
+        std::string valLine;
+        if (slot && fxIdx >= 0) {
+            char paramBuf[64] = {0};
+            const double norm = TrackFX_GetParamNormalized(tr, fxIdx, slot->vst3Param);
+            TrackFX_FormatParamValueNormalized(tr, fxIdx, slot->vst3Param,
+                                               norm, paramBuf, sizeof(paramBuf));
+            std::string valStr(paramBuf);
+            // SSL plug-ins format corner values like "-∞ dB" with UTF-8
+            // multi-byte runes that the UF8 LCD can't render (and which
+            // glitch the display). Squash anything non-printable-ASCII
+            // to '-' so the character count and cursor position stay
+            // correct. Trim leading pad spaces while we're at it.
+            for (auto& c : valStr) {
+                const unsigned char u = static_cast<unsigned char>(c);
+                if (u < 0x20 || u > 0x7E) c = '-';
+            }
+            while (!valStr.empty() && valStr.front() == ' ') valStr.erase(0, 1);
+            valLine = composeValueLine(slot->name, valStr);
+        } else {
+            valLine = composeValueLine("Vol",
+                dbStr == "-inf" ? std::string("-inf dB") : dbStr + "dB");
+        }
         if (valLine != g_lastValueLine[s]) {
             g_lastValueLine[s] = valLine;
             g_dev->send(uf8::buildValueLine(static_cast<uint8_t>(s), valLine));
         }
     }
     g_faderPbInit = true;
+
+    // V-Pot Readout Bar (FF 66 11 0F). Command + byte layout confirmed
+    // in cap20 but the per-strip 16-bit value encoding still eludes us:
+    //   - Linear byte[0] 0..255 → flicker within a narrow range
+    //   - Bit-mask (1<<n)-1 pattern → renders nothing
+    // DISABLED pending cap24: record SSL 360° with plug-in params at
+    // specific normalised values (not just V-Pot rotation deltas) to
+    // cross-reference. Keep the computation intact so the dedup state
+    // stays consistent for when we re-enable.
+    (void)vpotBar;
+    (void)g_lastVPotBar;
+    (void)g_vpotBarInit;
 }
 
 void commitDebouncedTouchReleases()

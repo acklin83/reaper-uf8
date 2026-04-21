@@ -175,6 +175,50 @@ std::vector<uint8_t> buildValueLine(uint8_t strip, std::string_view text)
     return frame;
 }
 
+std::vector<uint8_t> buildLedCommand(uint8_t ledId, bool on)
+{
+    // FF 3B 03 <id> 00 <state> CKSUM
+    std::vector<uint8_t> frame{0xFF, 0x3B, 0x03, ledId, 0x00, uint8_t(on ? 0x01 : 0x00)};
+    std::span<const uint8_t> payload{frame.data() + 1, frame.size() - 1};
+    frame.push_back(checksum(payload));
+    return frame;
+}
+
+std::vector<uint8_t> buildChannelNumber(uint8_t strip, std::string_view digits)
+{
+    // FF 66 <len> 14 <strip> <N ASCII> CKSUM  where len = N + 2
+    const size_t N = digits.size();
+    const uint8_t len = static_cast<uint8_t>(N + 2);
+    std::vector<uint8_t> frame;
+    frame.reserve(5 + N);
+    frame.push_back(kFrameMagic);
+    frame.push_back(0x66);
+    frame.push_back(len);
+    frame.push_back(0x14);
+    frame.push_back(strip);
+    for (char c : digits) frame.push_back(static_cast<uint8_t>(c));
+    std::span<const uint8_t> payload{frame.data() + 1, frame.size() - 1};
+    frame.push_back(checksum(payload));
+    return frame;
+}
+
+std::vector<uint8_t> buildVPotReadoutBar(const std::array<uint16_t, kStripCount>& positions)
+{
+    // Frame: FF 66 11 0F <16 bytes: 8 × 2-byte LE per strip> CKSUM (20 bytes)
+    std::vector<uint8_t> frame;
+    frame.reserve(20);
+    frame.push_back(kFrameMagic);
+    const std::array<uint8_t, 3> head{0x66, 0x11, 0x0F};
+    for (auto b : head) frame.push_back(b);
+    for (auto p : positions) {
+        frame.push_back(static_cast<uint8_t>(p & 0xFF));
+        frame.push_back(static_cast<uint8_t>((p >> 8) & 0xFF));
+    }
+    std::span<const uint8_t> payload{frame.data() + 1, frame.size() - 1};
+    frame.push_back(checksum(payload));
+    return frame;
+}
+
 std::vector<uint8_t> buildFaderDbReadout(uint8_t strip, std::string_view fourChars)
 {
     // FF 66 0A 0C <strip> <4 bytes, NUL-padded> 00 00 "dB" CKSUM    (14 bytes)

@@ -180,8 +180,9 @@ page 153). Commands decoded 2026-04-20 from cap14a–cap18:
 | Currently Selected Parameter | `FF 66 <N+2> 04 <strip> <N ASCII> CKSUM` | 5+N B | "BYPASS", "LF FREQ", "COMP RATIO" |
 | Value Line | `FF 66 15 0E <strip> <19 ASCII> CKSUM` | 24 B | Combined label+value: "In Trim       0.0dB" |
 | O/PdB Fader Readout | `FF 66 0A 0C <strip> <4 ASCII> 00 00 "dB" CKSUM` | 14 B | Fader dB — `64 42` = "dB" fixed |
-| V-Pot Readout Bar | `FF 66 09 0D <8 bytes> CKSUM` | 13 B | Broadcast: 1 byte per strip |
-| Fader / meter bar | `FF 66 11 0F <16 bytes> CKSUM` | 20 B | Broadcast: 2 bytes per strip (8 × 16-bit) |
+| V-Pot Readout Bar | `FF 66 11 0F <16 bytes> CKSUM` | 20 B | Broadcast: 2 bytes LE per strip; byte[0] = position 0..255, byte[1] usually 0 |
+| Channel Number Zone | `FF 66 <len> 14 <strip> <N ASCII> CKSUM` | 5+N B | `len = N+2`; 1..9 single digit, 10..99 two digits |
+| Per-strip LED (SEL/MUTE/SOLO) | `FF 3B 03 <id> 00 <state> CKSUM` | 7 B | state 0x01=on, 0x00=off. `id = strip * 3 + type` with type 0=SEL, 1=MUTE, 2=SOLO → IDs 0x00..0x17. REC ARM: probably `0x18+strip` but not captured in cap23 (UF8 REC selection mode was not active); disabled in code until verified. |
 | TrkNam (big) | `FF 66 <N+2> 0B <strip> <N ASCII> CKSUM` | 5+N B | Driven via MCU scribble-strip sysex pass-through |
 | Fader motor | `FF 1E 03 <strip> <LSB> <MSB> CKSUM` | 7 B | Bidirectional (host→UF8 = set position, UF8→host = user touch) |
 | Motor limp | `FF 1D 02 <strip> <01\|00> CKSUM` | 6 B | 01 = motor active, 00 = user controls |
@@ -220,3 +221,7 @@ and can misroute colors.
 | 2026-04-20 | cap17_pm_gain_reduction.pcap | Inconclusive — audio didn't play through comp. Only `FF 13 04` (not a meter). |
 | 2026-04-20 | cap18_pm_cs_type.pcap | **Channel Strip Type zone**: `FF 66 06 17 <strip> <4 ASCII>` — "CS 2", "4K B", "4K E". |
 | 2026-04-20 | cap19_pm_bank_position.pcap | No bank shift captured (only DYN page shifts); Position indicator still TBD. |
+| 2026-04-21 | cap20_vpot_bar.pcapng | **V-Pot Readout Bar** = `FF 66 11 0F <16 bytes>` (20 B broadcast, 2 bytes LE per strip). Previous `FF 66 09 0D` attempt was wrong command entirely — it's sent rarely on mode switches, not V-Pot rotation. |
+| 2026-04-21 | cap21_chan_no.pcapng | **Channel Number Zone** = `FF 66 <len> 14 <strip> <N ASCII>` — the small top-left digit in color bar. Sent per strip after each BANK → / BANK ←. |
+| 2026-04-21 | cap22_leds.pcapng | **Per-strip button LEDs** = `FF 3B 03 <id> 00 <state>` (7 B). Captured while UF8 in DAW Layer + REAPER Mackie Control Universal sending state changes. Initial MCU-note-style mapping guess was WRONG. |
+| 2026-04-21 | cap23_led_enum.pcapng | **LED ID map decoded**: `id = strip * 3 + type`, type 0=SEL, 1=MUTE, 2=SOLO (IDs 0x00..0x17). Three passes through 8 tracks each were visible as 3 × 8 events. REC ARM still unverified — was UF8-only mode during cap23, wasn't isolated. |

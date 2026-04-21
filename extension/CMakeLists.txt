@@ -55,6 +55,7 @@ add_library(reaper_uf8 MODULE
     src/main.cpp
     src/Protocol.cpp
     src/Palette.cpp
+    src/PluginMap.cpp
     src/UF8Device.cpp
     src/ColorSync.cpp
     src/MidiBridge.cpp

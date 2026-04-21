@@ -106,11 +106,45 @@ std::vector<uint8_t> buildPluginSlotName(uint8_t strip, std::string_view text);
 //   FF 66 06 17 <strip> <4 ASCII chars> CKSUM       (9 bytes)
 std::vector<uint8_t> buildChannelStripType(uint8_t strip, std::string_view fourChars);
 
+// Per-strip button LEDs (SOLO / CUT / SEL / REC ARM).
+//   FF 3B 03 <led_id> 00 <state> CKSUM    (7 bytes)
+// `state`: 0x01 = on, 0x00 = off. `led_id` follows MCU-note convention
+// best-guess mapping until more captures narrow it down:
+//   0x00..0x07 = REC ARM strip 0..7
+//   0x08..0x0F = SOLO    strip 0..7
+//   0x10..0x17 = MUTE    strip 0..7
+//   0x18..0x1F = SELECT  strip 0..7
+// Format decoded from cap22_leds (2026-04-21) by triggering REAPER
+// mixer state changes while UF8 in DAW Layer. ID map not yet
+// cross-verified against every button — refine with systematic cap23.
+std::vector<uint8_t> buildLedCommand(uint8_t ledId, bool on);
+
+// Channel Number Zone — the small numeric digit top-left of each scribble
+// strip's color bar (REAPER track index rendered as ASCII digits).
+//   FF 66 <len> 14 <strip> <N ASCII chars> CKSUM    (len = N + 2)
+// Variable length: 1..9 = single digit, 10..99 = two digits, 100+ = three.
+// Decoded from cap21_chan_no (2026-04-21) by capturing BANK ←/→ events.
+std::vector<uint8_t> buildChannelNumber(uint8_t strip, std::string_view digits);
+
 // Value Line — combined parameter name + value on one row, 19 chars wide.
 // Left-justified name, right-justified value, spaces in between.
 // Example: "In Trim       0.0dB", "HF Freq     8.00kHz".
 //   FF 66 15 0E <strip> <19 ASCII chars> CKSUM      (24 bytes)
 std::vector<uint8_t> buildValueLine(uint8_t strip, std::string_view nineteenChars);
+
+// V-Pot Readout Bar — the horizontal bar under each scribble strip that
+// shows the V-Pot's current position.
+//
+// SSL 360° uses `FF 66 11 0F <16 bytes> CKSUM` (20 B broadcast). Two
+// bytes per strip, little-endian, 8 strips. First byte = position 0..255,
+// second byte = mode flag (0x00 during V-Pot motion; various values seen
+// during PM-layer init). Confirmed by cap20 capture on 2026-04-21 — SSL
+// 360° fires this command *only* when the V-Pot rotates, and updates
+// just the active strip's 2 bytes while zeroing the rest.
+//
+// Earlier prototype used `FF 66 09 0D <8 bytes>` which turned out to be
+// something else entirely (sent on soft-key mode changes, not V-Pot motion).
+std::vector<uint8_t> buildVPotReadoutBar(const std::array<uint16_t, kStripCount>& positions);
 
 // O/PdB Fader Readout — the big fader-dB number.
 // Format places a 4-char value field (e.g. "-0.1", "0.0", "12.0") followed
