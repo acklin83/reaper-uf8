@@ -55,10 +55,52 @@ Sent ~500 Hz when nothing happens.
 ### `31 60 FF 22 03 <button_id> 00 <state> CKSUM` (9 B payload, 36-byte frame) — button event
 Format:
 - `22 03` — button-event command type
-- `button_id` — observed `0x78` (BANK→), `0x79` (BANK←). Other buttons TBD.
+- `button_id` — see table below
 - `state` — `0x01` pressed, `0x00` released
 
 Checksum verified: `22+03+78+00+01 = 0x9E` ✓
+
+#### Full PM-mode button ID map (captured 2026-04-21 on a physical UF8)
+
+Per-strip buttons use strip index `N` = 0..7 (left → right).
+
+| Group | Button | ID formula | Strip 0 | Strip 7 |
+|-------|--------|------------|---------|---------|
+| Per-strip | V-Pot Push | `0x08 + N` | `0x08` | `0x0F` |
+| Per-strip | Top Soft-key (above scribble) | `0x18 + N` | `0x18` | `0x1F` |
+| Per-strip | SOLO | `0x20 + 3N` | `0x20` | `0x35` |
+| Per-strip | CUT (Mute) | `0x21 + 3N` | `0x21` | `0x36` |
+| Per-strip | SEL (Select) | `0x22 + 3N` | `0x22` | `0x37` |
+
+Global buttons (fixed IDs):
+
+| Button | ID | Button | ID |
+|--------|----|--------|----|
+| Layer 1 | `0x40` | Layer 2 | `0x41` |
+| Layer 3 | `0x42` | 360 (Settings) | `0x46` |
+| Send/Plugin 1 | `0x48` | Send/Plugin 2 | `0x49` |
+| Send/Plugin 3 | `0x4A` | Send/Plugin 4 | `0x4B` |
+| Send/Plugin 5 | `0x4C` | Send/Plugin 6 | `0x4D` |
+| Send/Plugin 7 | `0x4E` | Send/Plugin 8 | `0x4F` |
+| Plugin | `0x50` | Channel | `0x51` |
+| Page ← | `0x52` | Page → | `0x53` |
+| Flip | `0x54` | Automation Off | `0x58` |
+| Read | `0x59` | Write | `0x5A` |
+| Trim | `0x5B` | Latch | `0x5C` |
+| Touch | `0x5D` | V-POT (top soft right) | `0x68` |
+| Soft-key 1 (top right) | `0x69` | 2 | `0x6A` |
+| 3 | `0x6B` | 4 | `0x6C` |
+| 5 | `0x6D` | PAN | `0x6E` |
+| Fine / Shift | `0x6F` | Norm / Clear | `0x70` |
+| Rec / ALL | `0x71` | Auto / Zero | `0x72` |
+| Nav | `0x73` | Nudge | `0x74` |
+| Focus | `0x75` | Channel Encoder Push | `0x76` |
+| Bank ← | `0x78` | Bank → | `0x79` |
+| Zoom ↑ | `0x7A` | Zoom ← | `0x7B` |
+| Zoom Center | `0x7C` | Zoom → | `0x7D` |
+| Zoom ↓ | `0x7E` | | |
+
+Note: the UF8 firmware re-uses some MCU-standard IDs for non-MCU functions. The top soft-key range `0x18..0x1F` is MCU-SELECT in DAW/MCU mode but is the per-strip parameter-page key in PM mode — do not forward it blindly as MCU SELECT.
 
 ## Color palette (16 indices, 0x00-0x0F hypothesis)
 
