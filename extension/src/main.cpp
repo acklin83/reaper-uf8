@@ -63,6 +63,19 @@ public:
 // by the timer; main-thread-only.
 std::array<MediaTrack*, 8> g_slotTrack{};
 
+// Bank offset in 8-strip windows. Bank Left/Right shift by 8; scroll
+// wheel (once implemented) will shift by 1. Clamped in [0, max track
+// count − 1] so the last bank can end partially empty. Written from
+// the USB-input thread on Bank-button press and consumed on the main
+// thread by the timer.
+std::atomic<int> g_bankOffset{0};
+
+// When the bank offset changes the motor-echo dedup and ColorSync
+// dedup both need a full re-push on the next timer tick, since every
+// slot now points at a different track. Set by bank-shift, consumed
+// by the timer.
+std::atomic<bool> g_bankDirty{false};
+
 // Read the "UI" volume for a track — reflects the same value the REAPER
 // mixer displays, including automation playback and the effect of a
 // just-applied CSurf_OnVolumeChange. Safer than GetMediaTrackInfo_Value
@@ -88,6 +101,7 @@ struct PendingInput {
         VolumeAbs,       // value = linear volume (1.0 == 0 dB)
         PanDelta,        // value = signed pan delta (−1..+1 is full sweep)
         PanCenter,       // reset pan to 0 (center)
+        SelectRelative,  // value = signed track-index delta (channel encoder)
     };
     Kind    kind;
     uint8_t strip;
@@ -98,6 +112,45 @@ struct PendingInput {
 // main thread in drainInputQueue(). Atomic read/write is sufficient since
 // each modifier is a single bool.
 std::atomic<bool> g_shiftHeld{false};
+
+// Fractional accumulator for the channel encoder. The UF8 emits several
+// events per physical detent (each with speed 1-2), so we average
+// ~5 events per click; raw per-event signed6 value gets scaled down
+// and integer track-deltas are consumed when the accumulator crosses
+// ±1. Main-thread only.
+double g_selectAccum = 0.0;
+constexpr double kChannelEncoderScale = 4.0;
+
+// When set, the Channel-Encoder Select also shifts the UF8 bank and the
+// REAPER MCP scroll so the newly-selected track stays visible. Planned
+// as a user-facing settings option (see memory backlog); currently
+// hard-coded ON because the mixer-follow behaviour is what makes the
+// wheel feel right in every test session.
+constexpr bool kSelectFollowsMixer = true;
+
+void followSelectedInMixer(MediaTrack* tr)
+{
+    if (!kSelectFollowsMixer || !tr) return;
+
+    // REAPER MCP: scroll so the selected track becomes leftmost (or
+    // stays within the visible range if REAPER decides to keep context).
+    SetMixerScroll(tr);
+
+    // UF8 bank: if the selected track is outside the current 8-wide
+    // window, snap the window so it's included.
+    const int trackCount = CountTracks(nullptr);
+    int idx = -1;
+    for (int t = 0; t < trackCount; ++t) {
+        if (GetTrack(nullptr, t) == tr) { idx = t; break; }
+    }
+    if (idx < 0) return;
+
+    int bank = g_bankOffset.load();
+    if (idx < bank || idx >= bank + 8) {
+        bank = (idx / 8) * 8;
+        if (bank != g_bankOffset.exchange(bank)) g_bankDirty.store(true);
+    }
+}
 std::mutex                  g_inQueueMutex;
 std::vector<PendingInput>   g_inQueue;
 
@@ -125,15 +178,50 @@ void drainInputQueue()
         local.swap(g_inQueue);
     }
     const int trackCount = CountTracks(nullptr);
+    const int bankOffset = g_bankOffset.load();
     for (const auto& e : local) {
-        if (e.strip >= trackCount) continue;
-        MediaTrack* tr = GetTrack(nullptr, e.strip);
+        // Global-scope events (no strip) are dispatched before the
+        // per-strip track resolution below.
+        if (e.kind == PendingInput::SelectRelative) {
+            if (trackCount == 0) continue;
+            // Accumulate scaled fractional deltas — the UF8 emits
+            // multiple events per physical detent, so we divide each
+            // per-event magnitude and only consume whole-track steps.
+            g_selectAccum += e.value / kChannelEncoderScale;
+            int step = 0;
+            if (g_selectAccum >=  1.0) { step = static_cast<int>(g_selectAccum);        g_selectAccum -= step; }
+            if (g_selectAccum <= -1.0) { step = static_cast<int>(g_selectAccum);        g_selectAccum -= step; }
+            if (step == 0) continue;
+
+            int cur = -1;
+            for (int t = 0; t < trackCount; ++t) {
+                if (GetMediaTrackInfo_Value(GetTrack(nullptr, t), "I_SELECTED") > 0.5) {
+                    cur = t;
+                    break;
+                }
+            }
+            int next = (cur >= 0 ? cur : 0) + step;
+            if (next < 0) next = 0;
+            if (next > trackCount - 1) next = trackCount - 1;
+            if (MediaTrack* tr = GetTrack(nullptr, next)) {
+                SetOnlyTrackSelected(tr);
+                followSelectedInMixer(tr);
+            }
+            continue;
+        }
+
+        const int slot = e.strip + bankOffset;
+        if (slot >= trackCount) continue;
+        MediaTrack* tr = GetTrack(nullptr, slot);
         if (!tr) continue;
         switch (e.kind) {
             case PendingInput::SoloToggle:     CSurf_OnSoloChange(tr, -1); break;
             case PendingInput::MuteToggle:     CSurf_OnMuteChange(tr, -1); break;
             case PendingInput::SelectToggle:   CSurf_OnSelectedChange(tr, -1); break;
-            case PendingInput::SelectExclusive: SetOnlyTrackSelected(tr); break;
+            case PendingInput::SelectExclusive:
+                SetOnlyTrackSelected(tr);
+                followSelectedInMixer(tr);
+                break;
             case PendingInput::VolumeAbs:
                 // CSurf_OnVolumeChange applies the user's new position to
                 // the track AND broadcasts to other surfaces. We do not
@@ -361,7 +449,20 @@ void onUf8Input(const uint8_t* data, size_t len)
             case 0x33: frameSize = 6; break;   // pressure sensor (TBD)
             default:   frameSize = 0; break;
         }
-        if (frameSize == 0 || i + frameSize > len) { ++i; continue; }
+        if (frameSize == 0 || i + frameSize > len) {
+            // Log the first few bytes of anything we didn't recognise so
+            // unknown events (e.g. channel-encoder rotation) can be
+            // reverse-engineered by turning the control with logging on.
+            if (FILE* f = std::fopen("/tmp/reaper_uf8_unknown.log", "a")) {
+                std::fprintf(f, "unknown:");
+                const size_t show = std::min<size_t>(len - i, 12);
+                for (size_t k = 0; k < show; ++k) std::fprintf(f, " %02X", data[i + k]);
+                std::fprintf(f, "\n");
+                std::fclose(f);
+            }
+            ++i;
+            continue;
+        }
 
         // Dispatch by command.
         if (cmd == 0x21 && data[i + 2] == 0x03) {
@@ -416,6 +517,23 @@ void onUf8Input(const uint8_t* data, size_t len)
                 // Fine / Shift modifier — track state so SEL can distinguish
                 // exclusive (plain) from additive (Shift) selection.
                 g_shiftHeld.store(pressed);
+                handledNatively = true;
+            } else if (id == 0x78 || id == 0x79) {
+                // Bank ← (0x78) / Bank → (0x79). 8-strip scroll, clamped
+                // so the bank start can go from 0 up to max(0, tracks-1).
+                // Allowing up to tracks-1 means the last bank can end
+                // with empty slots rather than snapping short of the end.
+                if (pressed) {
+                    const int delta      = (id == 0x79) ? 8 : -8;
+                    const int trackCount = CountTracks(nullptr);
+                    const int maxStart   = trackCount > 1 ? trackCount - 1 : 0;
+                    int next = g_bankOffset.load() + delta;
+                    if (next < 0)        next = 0;
+                    if (next > maxStart) next = maxStart;
+                    if (next != g_bankOffset.exchange(next)) {
+                        g_bankDirty.store(true);
+                    }
+                }
                 handledNatively = true;
             } else if (id >= 0x08 && id <= 0x0F) {
                 // V-Pot push. In Pan mode (currently the only mode we
@@ -496,12 +614,19 @@ void onUf8Input(const uint8_t* data, size_t len)
             // UF8 by capturing slow CW vs. CCW rotations.
             const uint8_t strip = data[i + 3];
             const uint8_t raw   = data[i + 4];
+            int8_t signed6 = static_cast<int8_t>(raw & 0x3F);
+            if (signed6 & 0x20) signed6 |= 0xC0;   // sign-extend from 6 bits
             if (strip < 8) {
-                int8_t signed6 = static_cast<int8_t>(raw & 0x3F);
-                if (signed6 & 0x20) signed6 |= 0xC0;   // sign-extend from 6 bits
+                // Per-strip V-Pot — currently wired to track pan.
                 // Scale: single detent = 1/128 of full pan range (≈0.78 %).
                 const double delta = static_cast<double>(signed6) / 128.0;
                 queueInput({PendingInput::PanDelta, strip, delta});
+            } else if (strip == 0x08) {
+                // Channel encoder (the wheel right of the strips, between
+                // Bank and Nav/Nudge/Focus). Selects the previous/next
+                // REAPER track; each detent = one track step.
+                queueInput({PendingInput::SelectRelative, 0,
+                            static_cast<double>(signed6)});
             }
         }
         // cmd 0x33 (v-pot push?) skipped — need more samples to verify
@@ -605,8 +730,9 @@ void onMidiFromReaper(std::span<const uint8_t> bytes)
 uint32_t reaperColorForVisibleSlot(int slot)
 {
     const int trackCount = CountTracks(nullptr);
-    if (slot >= trackCount) return 0;
-    MediaTrack* tr = GetTrack(nullptr, slot);
+    const int realSlot = slot + g_bankOffset.load();
+    if (realSlot >= trackCount) return 0;
+    MediaTrack* tr = GetTrack(nullptr, realSlot);
     if (!tr) return 0;
     // REAPER returns native color as int. Bit 0x1000000 is "color set";
     // low 24 bits are 0xBBGGRR on Windows, 0xRRGGBB on mac/Linux via the
@@ -657,12 +783,13 @@ std::string sslPluginShortName(MediaTrack* tr)
 std::string slotLabelForVisibleSlot(int slot)
 {
     const int trackCount = CountTracks(nullptr);
-    if (slot >= trackCount) {
+    const int realSlot   = slot + g_bankOffset.load();
+    if (realSlot >= trackCount) {
         char fallback[8];
-        std::snprintf(fallback, sizeof(fallback), "CH %d", slot + 1);
+        std::snprintf(fallback, sizeof(fallback), "CH %d", realSlot + 1);
         return fallback;
     }
-    MediaTrack* tr = GetTrack(nullptr, slot);
+    MediaTrack* tr = GetTrack(nullptr, realSlot);
     if (!tr) return "";
 
     if (auto ssl = sslPluginShortName(tr); !ssl.empty()) return ssl;
@@ -675,7 +802,7 @@ std::string slotLabelForVisibleSlot(int slot)
         return s;
     }
     char fallback[8];
-    std::snprintf(fallback, sizeof(fallback), "CH %d", slot + 1);
+    std::snprintf(fallback, sizeof(fallback), "CH %d", realSlot + 1);
     return fallback;
 }
 
@@ -731,9 +858,24 @@ void pushZonesForVisibleSlots()
     if (!g_dev || !g_dev->isOpen()) return;
 
     const int trackCount = CountTracks(nullptr);
+    const int bankOffset = g_bankOffset.load();
+
+    // Full re-push on a bank change — every cached "last" value refers
+    // to a different track now, so dedup would suppress legitimate
+    // updates for a few ticks until each value happens to drift.
+    if (g_bankDirty.exchange(false)) {
+        g_lastTrackName.fill({});
+        g_lastSlotLabel.fill({});
+        g_lastCsType.fill({});
+        g_lastValueLine.fill({});
+        g_lastFaderDb.fill({});
+        g_lastFaderPb.fill(0xFFFF);
+        if (g_sync) g_sync->invalidate();
+    }
 
     for (int s = 0; s < 8; ++s) {
-        MediaTrack* tr = (s < trackCount) ? GetTrack(nullptr, s) : nullptr;
+        const int realSlot = s + bankOffset;
+        MediaTrack* tr = (realSlot < trackCount) ? GetTrack(nullptr, realSlot) : nullptr;
 
         // Keep the slot→track mapping fresh so GetTouchState can map
         // REAPER's track pointer back to a strip index.
@@ -775,7 +917,7 @@ void pushZonesForVisibleSlots()
             if (n.size() > 7) n.resize(7);
             if (n.empty()) {
                 char fallback[8];
-                std::snprintf(fallback, sizeof(fallback), "CH %d", s + 1);
+                std::snprintf(fallback, sizeof(fallback), "CH %d", realSlot + 1);
                 n = fallback;
             }
             if (n != g_lastTrackName[s]) {
