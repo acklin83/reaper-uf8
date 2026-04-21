@@ -1,5 +1,7 @@
 # CLAUDE.md — reaper-uf8
 
+> Public / product name: **Rea-Sixty** (REAPER + 360). Repo stays `reaper-uf8` for historical reasons. See `README.md`.
+
 ## What This Is
 A REAPER extension that sends REAPER track colors natively to the SSL UF8 Scribble Strips — without requiring an SSL plugin on every track.
 
