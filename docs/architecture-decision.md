@@ -119,3 +119,7 @@ REAPER  <->  CSI  <->  virtual MCU MIDI  <->  reaper-uf8  <->  UF8
   REAPER-specific; no abstraction layer.
 - No CSI compatibility fallback. Once direct calls cover a feature,
   the MCU path is deleted.
+
+## Related
+- User-facing button/V-Pot/softkey configuration is covered in
+  [`bindings.md`](bindings.md).
