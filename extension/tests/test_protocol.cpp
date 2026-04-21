@@ -117,16 +117,18 @@ int main()
     }
 
     // --- Palette quantization (verified against on-device uf8_palette_probe
-    // 2026-04-20). Indices 0x00-0x0B are usable; 0x0C-0x0F render as off.
-    EXPECT(quantize(0xFF0000) == 0x01);   // pure red
-    EXPECT(quantize(0x00FF00) == 0x02);   // pure green
-    EXPECT(quantize(0x0000FF) == 0x03);   // pure blue
-    EXPECT(quantize(0xFF8000) == 0x07);   // orange
-    // Yellow has no direct palette match; should prefer lime (0x06) or
-    // orange (0x07) — both close in perceptual space.
+    // 2026-04-21 re-sweep). 0x00 is off, 0x01..0x0B are the 11 usable
+    // colors, 0x0C..0x0F render as off.
+    EXPECT(quantize(0xFF0000) == 0x02);   // pure red
+    EXPECT(quantize(0x00FF00) == 0x03);   // pure green
+    EXPECT(quantize(0x0000FF) == 0x04);   // deep blue
+    EXPECT(quantize(0x00FFFF) == 0x05);   // cyan
+    EXPECT(quantize(0x80FF00) == 0x07);   // lime
+    // Yellow has no direct palette match; should prefer lime (0x07) or
+    // pale green (0x0A).
     {
         auto q = quantize(0xFFFF00);
-        EXPECT(q == 0x06 || q == 0x07);
+        EXPECT(q == 0x07 || q == 0x0A);
     }
 
     std::printf("OK — all checks passed\n");

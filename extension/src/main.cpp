@@ -28,6 +28,10 @@
 #include <cmath>
 #include <string>
 
+#ifdef __APPLE__
+#include <ApplicationServices/ApplicationServices.h>
+#endif
+
 #include "ColorSync.h"
 #include "HidDevice.h"
 #include "MidiBridge.h"
@@ -101,24 +105,47 @@ struct PendingInput {
         VolumeAbs,       // value = linear volume (1.0 == 0 dB)
         PanDelta,        // value = signed pan delta (−1..+1 is full sweep)
         PanCenter,       // reset pan to 0 (center)
-        SelectRelative,  // value = signed track-index delta (channel encoder)
+        SelectRelative,  // value = signed track-index delta (channel encoder, Nav mode)
+        PlayheadNudge,   // value = signed seconds delta (channel encoder, Nudge mode)
+        MouseScroll,     // value = signed scroll delta (channel encoder, Focus mode)
+        MainAction,      // value = REAPER action ID (Main_OnCommand)
+        AutomationMode,  // value = REAPER automation mode (0..4) on selected track
+        FocusSelected,   // re-scroll REAPER MCP + UF8 bank to currently selected track
     };
     Kind    kind;
     uint8_t strip;
     double  value;
 };
 
+// Encoder-mode state. Default = Nav (= track select) matching the UF8's
+// out-of-box feel. Toggled by the NAV (0x73), NUDGE (0x74), FOCUS (0x75)
+// buttons and pushed back to Nav by the channel-encoder push (0x76).
+enum class EncoderMode : uint8_t { Nav, Nudge, Focus };
+std::atomic<EncoderMode> g_encoderMode{EncoderMode::Nav};
+
+// Nudge step per physical detent (seconds). User-settings-facing later;
+// hard-coded for now.
+constexpr double kNudgeSecondsPerStep = 1.0;
+
+// Follow mode: when a track becomes selected, either snap the UF8 bank
+// to the 8-wide bucket that contains it (BucketSnap) or make the
+// selected track always the leftmost strip (LeftmostStrip). Same
+// setting applies to REAPER MCP scroll. User-settings-facing later.
+enum class FollowMode : uint8_t { BucketSnap, LeftmostStrip };
+std::atomic<FollowMode> g_followMode{FollowMode::BucketSnap};
+
 // Global modifier-key state, set from the USB-input thread, read from the
 // main thread in drainInputQueue(). Atomic read/write is sufficient since
 // each modifier is a single bool.
 std::atomic<bool> g_shiftHeld{false};
 
-// Fractional accumulator for the channel encoder. The UF8 emits several
-// events per physical detent (each with speed 1-2), so we average
-// ~5 events per click; raw per-event signed6 value gets scaled down
-// and integer track-deltas are consumed when the accumulator crosses
-// ±1. Main-thread only.
+// Fractional accumulators for the channel encoder. The UF8 emits
+// several events per physical detent (each with speed 1-2), so we
+// divide by the scale and only consume whole integer steps. Separate
+// accumulators per mode so mode switches don't bleed fractional state
+// across. Main-thread only.
 double g_selectAccum = 0.0;
+double g_nudgeAccum  = 0.0;
 constexpr double kChannelEncoderScale = 4.0;
 
 // When set, the Channel-Encoder Select also shifts the UF8 bank and the
@@ -136,8 +163,6 @@ void followSelectedInMixer(MediaTrack* tr)
     // stays within the visible range if REAPER decides to keep context).
     SetMixerScroll(tr);
 
-    // UF8 bank: if the selected track is outside the current 8-wide
-    // window, snap the window so it's included.
     const int trackCount = CountTracks(nullptr);
     int idx = -1;
     for (int t = 0; t < trackCount; ++t) {
@@ -146,11 +171,34 @@ void followSelectedInMixer(MediaTrack* tr)
     if (idx < 0) return;
 
     int bank = g_bankOffset.load();
-    if (idx < bank || idx >= bank + 8) {
-        bank = (idx / 8) * 8;
-        if (bank != g_bankOffset.exchange(bank)) g_bankDirty.store(true);
+    if (g_followMode.load() == FollowMode::LeftmostStrip) {
+        // Selected track always at strip 0. Clamp so we don't scroll
+        // past the last track.
+        bank = idx;
+        if (bank > trackCount - 1) bank = trackCount > 0 ? trackCount - 1 : 0;
+    } else {
+        // Bucket snap: only shift if the selection fell outside the
+        // current 8-wide window.
+        if (idx < bank || idx >= bank + 8) bank = (idx / 8) * 8;
     }
+    if (bank != g_bankOffset.exchange(bank)) g_bankDirty.store(true);
 }
+
+// Synthesise a mouse-wheel scroll event at the cursor's current screen
+// position so the "Focus" encoder mode emulates a real scroll wheel —
+// hover the mouse over a plug-in parameter and spin the encoder.
+#ifdef __APPLE__
+void emitMouseScroll(int32_t delta)
+{
+    CGEventRef ev = CGEventCreateScrollWheelEvent(
+        nullptr, kCGScrollEventUnitLine, 1, delta);
+    if (!ev) return;
+    CGEventPost(kCGHIDEventTap, ev);
+    CFRelease(ev);
+}
+#else
+void emitMouseScroll(int32_t) {}   // non-macOS: TBD
+#endif
 std::mutex                  g_inQueueMutex;
 std::vector<PendingInput>   g_inQueue;
 
@@ -182,6 +230,39 @@ void drainInputQueue()
     for (const auto& e : local) {
         // Global-scope events (no strip) are dispatched before the
         // per-strip track resolution below.
+        if (e.kind == PendingInput::MainAction) {
+            Main_OnCommand(static_cast<int>(e.value), 0);
+            continue;
+        }
+        if (e.kind == PendingInput::AutomationMode) {
+            if (MediaTrack* tr = GetSelectedTrack(nullptr, 0)) {
+                SetTrackAutomationMode(tr, static_cast<int>(e.value));
+            }
+            continue;
+        }
+        if (e.kind == PendingInput::FocusSelected) {
+            if (MediaTrack* tr = GetSelectedTrack(nullptr, 0)) {
+                followSelectedInMixer(tr);
+            }
+            continue;
+        }
+        if (e.kind == PendingInput::PlayheadNudge) {
+            g_nudgeAccum += e.value / kChannelEncoderScale;
+            int step = 0;
+            if (g_nudgeAccum >=  1.0) { step = static_cast<int>(g_nudgeAccum); g_nudgeAccum -= step; }
+            if (g_nudgeAccum <= -1.0) { step = static_cast<int>(g_nudgeAccum); g_nudgeAccum -= step; }
+            if (step != 0) {
+                const double cur = GetCursorPosition();
+                SetEditCurPos(cur + step * kNudgeSecondsPerStep, true, false);
+            }
+            continue;
+        }
+        if (e.kind == PendingInput::MouseScroll) {
+            // Mouse-wheel feels natural with per-event events: high rate
+            // produces fast scroll, low rate slow. No accumulation.
+            emitMouseScroll(static_cast<int32_t>(e.value));
+            continue;
+        }
         if (e.kind == PendingInput::SelectRelative) {
             if (trackCount == 0) continue;
             // Accumulate scaled fractional deltas — the UF8 emits
@@ -518,6 +599,61 @@ void onUf8Input(const uint8_t* data, size_t len)
                 // exclusive (plain) from additive (Shift) selection.
                 g_shiftHeld.store(pressed);
                 handledNatively = true;
+            } else if (id == 0x73) {
+                if (pressed) g_encoderMode.store(EncoderMode::Nav);
+                handledNatively = true;
+            } else if (id == 0x74) {
+                if (pressed) g_encoderMode.store(EncoderMode::Nudge);
+                handledNatively = true;
+            } else if (id == 0x75) {
+                if (pressed) g_encoderMode.store(EncoderMode::Focus);
+                handledNatively = true;
+            } else if (id == 0x76) {
+                // Channel Encoder Push — UF8 default is "return to
+                // CHANNEL mode" (the track-selection default). We map it
+                // to the same: flip the encoder back into Nav mode.
+                if (pressed) g_encoderMode.store(EncoderMode::Nav);
+                handledNatively = true;
+            } else if (id >= 0x58 && id <= 0x5D) {
+                // Automation keys. REAPER modes: 0 Trim, 1 Read,
+                // 2 Touch, 3 Write, 4 Latch. UF8 Off/Trim both map to
+                // Trim (REAPER has no separate "Off"); can be disambig
+                // later via the Phase-2 settings page.
+                static constexpr int kModeById[6] = {
+                    /*0x58 Off  */ 0,
+                    /*0x59 Read */ 1,
+                    /*0x5A Wri  */ 3,
+                    /*0x5B Trim */ 0,
+                    /*0x5C Latc */ 4,
+                    /*0x5D Touc */ 2,
+                };
+                if (pressed) {
+                    queueInput({PendingInput::AutomationMode, 0,
+                                static_cast<double>(kModeById[id - 0x58])});
+                }
+                handledNatively = true;
+            } else if (id == 0x7A || id == 0x7B || id == 0x7C
+                    || id == 0x7D || id == 0x7E) {
+                // Zoom pad. 4 arrows zoom horizontally/vertically; the
+                // centre (0x7C) fits the project to window. These are
+                // wired to REAPER's built-in zoom actions via
+                // Main_OnCommand on press only (repeat-on-hold is not
+                // yet implemented — single press = single zoom step).
+                if (pressed) {
+                    int action = 0;
+                    switch (id) {
+                        case 0x7A: action = 40112; break;  // Zoom in vertical
+                        case 0x7E: action = 40111; break;  // Zoom out vertical
+                        case 0x7B: action = 1011;  break;  // Zoom out horizontal
+                        case 0x7D: action = 1012;  break;  // Zoom in horizontal
+                        case 0x7C: action = 40295; break;  // Zoom to project
+                    }
+                    if (action) {
+                        queueInput({PendingInput::MainAction, 0,
+                                    static_cast<double>(action)});
+                    }
+                }
+                handledNatively = true;
             } else if (id == 0x78 || id == 0x79) {
                 // Bank ← (0x78) / Bank → (0x79). 8-strip scroll, clamped
                 // so the bank start can go from 0 up to max(0, tracks-1).
@@ -622,11 +758,24 @@ void onUf8Input(const uint8_t* data, size_t len)
                 const double delta = static_cast<double>(signed6) / 128.0;
                 queueInput({PendingInput::PanDelta, strip, delta});
             } else if (strip == 0x08) {
-                // Channel encoder (the wheel right of the strips, between
-                // Bank and Nav/Nudge/Focus). Selects the previous/next
-                // REAPER track; each detent = one track step.
-                queueInput({PendingInput::SelectRelative, 0,
-                            static_cast<double>(signed6)});
+                // Channel encoder — behaviour depends on the current
+                // encoder mode. In all modes we pass the raw signed6
+                // value; the drain accumulates fractional progress so
+                // multi-event physical detents collapse to one step.
+                switch (g_encoderMode.load()) {
+                    case EncoderMode::Nav:
+                        queueInput({PendingInput::SelectRelative, 0,
+                                    static_cast<double>(signed6)});
+                        break;
+                    case EncoderMode::Nudge:
+                        queueInput({PendingInput::PlayheadNudge, 0,
+                                    static_cast<double>(signed6)});
+                        break;
+                    case EncoderMode::Focus:
+                        queueInput({PendingInput::MouseScroll, 0,
+                                    static_cast<double>(signed6)});
+                        break;
+                }
             }
         }
         // cmd 0x33 (v-pot push?) skipped — need more samples to verify

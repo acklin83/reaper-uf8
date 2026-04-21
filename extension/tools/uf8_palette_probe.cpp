@@ -125,10 +125,9 @@ int main()
         }
         sendVec(h, colorFrame);
 
-        std::printf("idx=0x%02X  (enter=next, q=quit)\n", idx);
+        std::printf(">>> idx=0x%02X — observe color on UF8 (5 s)\n", idx);
         std::fflush(stdout);
-        int c = std::getchar();
-        if (c == 'q' || c == 'Q') break;
+        std::this_thread::sleep_for(std::chrono::seconds(5));
     }
 
     g_stop = true;

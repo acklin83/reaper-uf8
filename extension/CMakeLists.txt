@@ -64,7 +64,10 @@ add_library(reaper_uf8 MODULE
 target_link_libraries(reaper_uf8 PRIVATE PkgConfig::HIDAPI)
 
 if(APPLE)
-    target_link_libraries(reaper_uf8 PRIVATE "-framework CoreMIDI" "-framework CoreFoundation")
+    target_link_libraries(reaper_uf8 PRIVATE
+        "-framework CoreMIDI"
+        "-framework CoreFoundation"
+        "-framework ApplicationServices")
 endif()
 
 target_include_directories(reaper_uf8 PRIVATE

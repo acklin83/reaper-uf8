@@ -8,26 +8,27 @@ namespace uf8 {
 namespace {
 
 // Reference RGB for each palette index — identified by direct on-device
-// probe (uf8_palette_probe, 2026-04-20). The UF8 exposes 12 usable colors;
-// indices 0x0C..0x0F render as black/off and are excluded from quantization.
+// probe (uf8_palette_probe, re-run 2026-04-21 after the original sweep
+// produced shifted mappings). 0x00 is off on this hardware; 0x01..0x0B
+// are the 11 usable colors; 0x0C..0x0F render black/off and are skipped
+// during quantization.
 //
-// RGB values are approximations of what the UF8 LCD shows — close enough
-// for Euclidean-distance nearest-match. A lab-grade spectrometer sweep
-// could refine these but the perceptual mapping works for the REAPER
-// color picker's typical output.
+// RGB values are eyeballed approximations of what the UF8 LCD shows —
+// accurate enough for Euclidean-distance nearest-match on the REAPER
+// track-color picker's typical output.
 constexpr std::array<Rgb, 16> kPalette{{
-    {0xFF, 0x80, 0xFF},  // 0x00  hellviolet — light magenta
-    {0xFF, 0x00, 0x00},  // 0x01  rot
-    {0x00, 0xFF, 0x00},  // 0x02  grün
-    {0x00, 0x00, 0xFF},  // 0x03  blau
-    {0x00, 0xFF, 0xFF},  // 0x04  hellblau — cyan
-    {0x80, 0x00, 0xFF},  // 0x05  violett — purple
-    {0x80, 0xFF, 0x00},  // 0x06  hellgrün — lime
-    {0xFF, 0x80, 0x00},  // 0x07  orange (dunkel)
-    {0x40, 0x00, 0xFF},  // 0x08  blauviolet — deeper blue-purple
-    {0x80, 0xFF, 0x80},  // 0x09  hellgrün (hell) — pale green
-    {0xFF, 0x00, 0xFF},  // 0x0A  violet (magenta)
-    {0x40, 0x80, 0xFF},  // 0x0B  blau (variant) — mid-light blue
+    {0x00, 0x00, 0x00},  // 0x00  OFF
+    {0xA0, 0xA0, 0xFF},  // 0x01  light blue / light violet
+    {0xFF, 0x00, 0x00},  // 0x02  red
+    {0x00, 0xFF, 0x00},  // 0x03  bright green
+    {0x00, 0x00, 0xFF},  // 0x04  deep blue
+    {0x00, 0xFF, 0xFF},  // 0x05  cyan
+    {0xC0, 0x00, 0xFF},  // 0x06  violet (purple)
+    {0x80, 0xFF, 0x00},  // 0x07  lime green
+    {0x80, 0x40, 0x00},  // 0x08  dark orange / brown
+    {0x40, 0x00, 0xFF},  // 0x09  blue leaning violet
+    {0xA0, 0xFF, 0xA0},  // 0x0A  pale light green
+    {0xC0, 0x80, 0xFF},  // 0x0B  lighter violet
     {0x00, 0x00, 0x00},  // 0x0C  OFF
     {0x00, 0x00, 0x00},  // 0x0D  OFF
     {0x00, 0x00, 0x00},  // 0x0E  OFF
@@ -35,7 +36,7 @@ constexpr std::array<Rgb, 16> kPalette{{
 }};
 
 constexpr std::array<bool, 16> kHasEntry{{
-    true,  true,  true,  true,  true,  true,
+    false, true,  true,  true,  true,  true,
     true,  true,  true,  true,  true,  true,
     false, false, false, false
 }};
