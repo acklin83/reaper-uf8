@@ -20,6 +20,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <mutex>
+#include <vector>
 
 #include <algorithm>
 #include <cctype>
@@ -38,6 +40,159 @@ std::unique_ptr<uf8::UF8Device>   g_dev;
 std::unique_ptr<uf8::ColorSync>   g_sync;
 std::unique_ptr<uf8::MidiBridge>  g_midi;
 std::unique_ptr<uf8::HidDevice>   g_hid;
+
+// IReaperControlSurface subclass registered as a full control surface
+// class ("Rea-Sixty") so users see and add it like any other surface.
+// GetTouchState lets Touch-mode automation see the user is holding the
+// fader; SetSurfaceVolume is how REAPER notifies us of the current
+// track volume during automation playback.
+class ReaSixtySurface : public IReaperControlSurface {
+public:
+    ReaSixtySurface();
+    ~ReaSixtySurface() override;
+
+    const char* GetTypeString()   override { return "REASIXTY"; }
+    const char* GetDescString()   override { return "Rea-Sixty"; }
+    const char* GetConfigString() override { return "0 0"; }
+
+    bool GetTouchState(MediaTrack* tr, int isPan) override;
+};
+
+// Per-slot MediaTrack cache so GetTouchState can map REAPER's track
+// pointer back to a strip index without a linear scan each call. Filled
+// by the timer; main-thread-only.
+std::array<MediaTrack*, 8> g_slotTrack{};
+
+// Read the "UI" volume for a track — reflects the same value the REAPER
+// mixer displays, including automation playback and the effect of a
+// just-applied CSurf_OnVolumeChange. Safer than GetMediaTrackInfo_Value
+// for motor-echo purposes. Same pattern CSI uses.
+double uiVolLinear(MediaTrack* tr)
+{
+    double vol = 1.0;
+    double pan = 0.0;
+    GetTrackUIVolPan(tr, &vol, &pan);
+    return vol;
+}
+
+// REAPER's C API expects calls on the main thread. The UF8 input handler
+// runs on libusb's transfer-callback thread, so per-strip input events
+// (buttons / fader / v-pot) are pushed into this queue and drained in
+// onTimer(), which REAPER invokes on the main thread at ~30 Hz.
+struct PendingInput {
+    enum Kind : uint8_t {
+        SoloToggle,
+        MuteToggle,
+        SelectToggle,    // additive (Shift held) — toggles selection on this track
+        SelectExclusive, // no modifier — selects only this track
+        VolumeAbs,       // value = linear volume (1.0 == 0 dB)
+        PanDelta,        // value = signed pan delta (−1..+1 is full sweep)
+        PanCenter,       // reset pan to 0 (center)
+    };
+    Kind    kind;
+    uint8_t strip;
+    double  value;
+};
+
+// Global modifier-key state, set from the USB-input thread, read from the
+// main thread in drainInputQueue(). Atomic read/write is sufficient since
+// each modifier is a single bool.
+std::atomic<bool> g_shiftHeld{false};
+std::mutex                  g_inQueueMutex;
+std::vector<PendingInput>   g_inQueue;
+
+void queueInput(PendingInput e)
+{
+    std::lock_guard<std::mutex> lk(g_inQueueMutex);
+    // Coalesce volume updates: only the latest absolute position matters,
+    // so collapse runs of fader events into a single pending entry per strip.
+    if (e.kind == PendingInput::VolumeAbs) {
+        for (auto& p : g_inQueue) {
+            if (p.kind == PendingInput::VolumeAbs && p.strip == e.strip) {
+                p.value = e.value;
+                return;
+            }
+        }
+    }
+    g_inQueue.push_back(e);
+}
+
+void drainInputQueue()
+{
+    std::vector<PendingInput> local;
+    {
+        std::lock_guard<std::mutex> lk(g_inQueueMutex);
+        local.swap(g_inQueue);
+    }
+    const int trackCount = CountTracks(nullptr);
+    for (const auto& e : local) {
+        if (e.strip >= trackCount) continue;
+        MediaTrack* tr = GetTrack(nullptr, e.strip);
+        if (!tr) continue;
+        switch (e.kind) {
+            case PendingInput::SoloToggle:     CSurf_OnSoloChange(tr, -1); break;
+            case PendingInput::MuteToggle:     CSurf_OnMuteChange(tr, -1); break;
+            case PendingInput::SelectToggle:   CSurf_OnSelectedChange(tr, -1); break;
+            case PendingInput::SelectExclusive: SetOnlyTrackSelected(tr); break;
+            case PendingInput::VolumeAbs:
+                // CSurf_OnVolumeChange applies the user's new position to
+                // the track AND broadcasts to other surfaces. We do not
+                // cache the value — motor echo reads GetTrackUIVolPan
+                // on each tick so it always reflects whatever REAPER
+                // actually has (including envelope playback).
+                CSurf_OnVolumeChange(tr, e.value, false);
+                break;
+            case PendingInput::PanDelta: {
+                // CSurf_OnPanChange(tr, delta, relative=true) routes through
+                // REAPER's surface system and clamps; do it explicitly for
+                // predictable behavior when no CSurf-class owner exists.
+                const double cur = GetMediaTrackInfo_Value(tr, "D_PAN");
+                double next = cur + e.value;
+                if (next >  1.0) next =  1.0;
+                if (next < -1.0) next = -1.0;
+                SetMediaTrackInfo_Value(tr, "D_PAN", next);
+                break;
+            }
+            case PendingInput::PanCenter:
+                SetMediaTrackInfo_Value(tr, "D_PAN", 0.0);
+                break;
+        }
+    }
+}
+
+// UF8 fader-top dB value. The MCU-compatible top on UF8 is +10 dB
+// (different from REAPER's default slider top of +12 dB). Mapping pb14
+// through REAPER's slider law directly puts the UF8 0-dB tick ≈ +2.25 dB
+// hotter in REAPER; scaling to DB2SLIDER(+10) fixes the round-trip so
+// physical 0-dB on the UF8 matches 0-dB in REAPER.
+constexpr double kUf8FaderTopDb = 10.0;
+
+// Convert a 14-bit MCU pitch-bend value (0..16383) to a linear REAPER
+// volume (1.0 == 0 dB) via REAPER's own slider curve, scaled so pb14
+// = 16383 maps to kUf8FaderTopDb.
+double pbToLinearVolume(uint16_t pb14)
+{
+    if (pb14 == 0) return 0.0;
+    const double topSlider = DB2SLIDER(kUf8FaderTopDb);
+    const double slider    = static_cast<double>(pb14) / 16383.0 * topSlider;
+    const double db        = SLIDER2DB(slider);
+    return std::pow(10.0, db / 20.0);
+}
+
+// Inverse of pbToLinearVolume. Used to echo REAPER volume back onto the
+// UF8 motor so the physical fader follows mouse edits in the DAW.
+uint16_t linearVolumeToPb(double linear)
+{
+    if (!(linear > 0.0)) return 0;                  // catches 0 and NaN
+    const double db        = 20.0 * std::log10(linear);
+    const double slider    = DB2SLIDER(db);
+    const double topSlider = DB2SLIDER(kUf8FaderTopDb);
+    if (!(topSlider > 0.0)) return 0;
+    double pb = slider / topSlider * 16383.0;
+    if (pb < 0)       pb = 0;
+    if (pb > 16383.0) pb = 16383.0;
+    return static_cast<uint16_t>(pb + 0.5);
+}
 
 // Parse a UF8 vendor-USB IN report and, when it's an input event, convert
 // to the equivalent MCU MIDI message and push it back up to REAPER via the
@@ -66,13 +221,109 @@ std::unique_ptr<uf8::HidDevice>   g_hid;
 //   - On touch-release IN event: do NOTHING immediately.
 //   - The REAPER timer (30 Hz) emits Note-off when (now - lastPress)
 //     exceeds the hold threshold, which means the user really let go.
-std::array<std::atomic<bool>, 8>          g_touchReported{};
-std::array<std::chrono::steady_clock::time_point, 8> g_touchLastPress{};
-constexpr auto kTouchHoldThreshold = std::chrono::milliseconds(300);
+// Touch-state is debounced because the UF8 capacitive sensor bounces
+// (~9 press+release pairs per second during a sustained touch — confirmed
+// in captures). Press events commit immediately so the motor releases
+// right as the user grabs the fader; release events are deferred until
+// the sensor has stayed quiet for kTouchDebounceQuiet — if any press
+// arrives during that window the release is cancelled.
+std::array<std::atomic<bool>, 8>                       g_touchReported{};
+std::array<std::atomic<bool>, 8>                       g_touchReleasePending{};
+std::array<std::chrono::steady_clock::time_point, 8>   g_touchLastPress{};
+constexpr auto kTouchDebounceQuiet = std::chrono::milliseconds(150);
+
+bool ReaSixtySurface::GetTouchState(MediaTrack* tr, int isPan)
+{
+    if (isPan != 0) return false;   // fader touch only
+    for (int s = 0; s < 8; ++s) {
+        if (!g_touchReported[s].load()) continue;
+        if (g_slotTrack[s] == tr) return true;
+    }
+    return false;
+}
+
+// Device lifecycle: the surface instance owns the UF8 connection and the
+// timer registration. REAPER creates the instance when the user adds
+// "Rea-Sixty" in Control Surface settings, and destroys it on removal or
+// on shutdown.
+void onTimer();
+void onUf8Input(const uint8_t* data, size_t len);
+void onMidiFromReaper(std::span<const uint8_t> bytes);
+
+ReaSixtySurface::ReaSixtySurface()
+{
+    // Open the virtual MIDI ports first — harmless if unused, and keeps
+    // the legacy MCU-SysEx scribble pipe available for anyone still
+    // running CSI alongside us.
+    g_midi = std::make_unique<uf8::MidiBridge>();
+    if (g_midi->open("reaper_uf8")) {
+        g_midi->setIncomingHandler(onMidiFromReaper);
+    }
+
+    g_dev = std::make_unique<uf8::UF8Device>();
+    if (!g_dev->open()) {
+        ShowConsoleMsg(("Rea-Sixty: " + g_dev->lastError() + "\n").c_str());
+        g_dev.reset();
+        return;
+    }
+    g_sync = std::make_unique<uf8::ColorSync>(*g_dev);
+    g_sync->invalidate();
+    g_dev->setRawInputHandler(onUf8Input);
+
+    // Zero the fader positions captured in the layer-replay blob (which
+    // still hold the SSL session's fader values at capture time). The
+    // timer will snap every slot to its real REAPER volume on the first
+    // tick, but until then we want a clean 0 dB rest position rather
+    // than the ghosted levels from the capture.
+    const uint16_t pb0dB = linearVolumeToPb(1.0);
+    const uint8_t  lsb   = static_cast<uint8_t>(pb0dB & 0x7F);
+    const uint8_t  msb   = static_cast<uint8_t>((pb0dB >> 7) & 0x7F);
+    for (uint8_t s = 0; s < 8; ++s) {
+        g_dev->send(uf8::buildFaderPosition(s, lsb, msb));
+    }
+
+    plugin_register("timer", reinterpret_cast<void*>(onTimer));
+}
+
+ReaSixtySurface::~ReaSixtySurface()
+{
+    plugin_register("-timer", reinterpret_cast<void*>(onTimer));
+    g_sync.reset();
+    if (g_midi) g_midi->close();
+    g_midi.reset();
+    if (g_dev) g_dev->close();
+    g_dev.reset();
+    g_slotTrack.fill(nullptr);
+}
+
+IReaperControlSurface* createReaSixty(const char* /*type*/, const char* /*config*/,
+                                      int* /*errStats*/)
+{
+    return new ReaSixtySurface();
+}
+
+HWND reaSixtyShowConfig(const char* /*type*/, HWND /*parent*/, const char* /*config*/)
+{
+    // No user-configurable options yet — we auto-detect the USB device.
+    return nullptr;
+}
+
+reaper_csurf_reg_t g_csurfReg = {
+    "REASIXTY",
+    "Rea-Sixty",
+    createReaSixty,
+    reaSixtyShowConfig,
+};
 
 // De-dup for pitch-bend so REAPER's motor echo doesn't re-trigger us.
 std::array<std::atomic<uint8_t>, 8> g_lastMsbOut{};
 std::array<std::atomic<uint8_t>, 8> g_lastLsbOut{};
+
+// Last fader motor position we actually wrote to the UF8 — lets the timer
+// dedup motor-echo pushes, and lets the touch-release handler prime the
+// firmware with the user's new position before re-enabling the motor.
+std::array<uint16_t, 8>             g_lastFaderPb{};
+bool                                g_faderPbInit{false};
 
 void onUf8Input(const uint8_t* data, size_t len)
 {
@@ -116,61 +367,141 @@ void onUf8Input(const uint8_t* data, size_t len)
         if (cmd == 0x21 && data[i + 2] == 0x03) {
             // Fader position: FF 21 03 strip A B cksum
             // A = MCU LSB (high bit is a flag, masked), B = MCU MSB.
-            // Only forward while the user is currently holding the fader
-            // (debounced touch state) AND the value actually changed —
-            // otherwise REAPER's motor-echo feedback loop would tank the
-            // fader down.
+            // Native route: push into the input queue as an absolute volume
+            // (coalesced by strip) — the timer will apply it to the track.
+            // We only queue while the user is actively touching the fader,
+            // so REAPER's motor echo doesn't feed back.
             const uint8_t strip = data[i + 3];
             if (strip < 8 && g_touchReported[strip].load()) {
                 const uint8_t lsb = data[i + 4] & 0x7F;
                 const uint8_t msb = data[i + 5] & 0x7F;
+                const uint16_t pb14 = static_cast<uint16_t>(lsb | (msb << 7));
                 const uint8_t prevMsb = g_lastMsbOut[strip].load();
                 const uint8_t prevLsb = g_lastLsbOut[strip].load();
                 const int lsbDelta = std::abs(int(lsb) - int(prevLsb));
                 if (msb != prevMsb || lsbDelta >= 4) {
                     g_lastMsbOut[strip].store(msb);
                     g_lastLsbOut[strip].store(lsb);
-                    const uint8_t mcu[3] = {static_cast<uint8_t>(0xE0 | strip), lsb, msb};
-                    g_midi->send(std::span<const uint8_t>(mcu, 3));
+                    queueInput({PendingInput::VolumeAbs, strip, pbToLinearVolume(pb14)});
                 }
             }
         } else if (cmd == 0x22 && data[i + 2] == 0x03) {
             // Button: FF 22 03 id 00 state cksum
+            //
+            // UF8 PM-mode button ID map (see docs/protocol-notes.md). The
+            // firmware does NOT follow the MCU-standard per-strip layout —
+            // for example 0x18..0x1F are the top soft-keys above each
+            // scribble, not MCU SELECT.
+            //
+            // Per-strip:
+            //   0x08..0x0F  V-Pot push           (stride 1)
+            //   0x18..0x1F  Top soft-key         (stride 1)
+            //   0x20..0x37  SOLO/CUT/SEL         (3-byte group per strip)
+            //
+            // Global buttons live at 0x40..0x7E (see docs/protocol-notes.md).
+            //
+            // In PM mode REAPER's MCU surface (CSI) is not the active target,
+            // so per-strip SOLO/CUT/SEL are routed via the REAPER API
+            // directly on press-edge. Top soft-keys are swallowed (otherwise
+            // they'd fire MCU SELECT). Everything else still falls through
+            // to MCU passthrough so CSI mappings for global functions keep
+            // working.
             const uint8_t id    = data[i + 3];
             const uint8_t state = data[i + 5];
-            const uint8_t mcu[3] = {0x90, id, state ? uint8_t{0x7F} : uint8_t{0x00}};
-            g_midi->send(std::span<const uint8_t>(mcu, 3));
+            const bool pressed  = state == 0x01;
+
+            bool handledNatively = false;
+
+            if (id == 0x6F) {
+                // Fine / Shift modifier — track state so SEL can distinguish
+                // exclusive (plain) from additive (Shift) selection.
+                g_shiftHeld.store(pressed);
+                handledNatively = true;
+            } else if (id >= 0x08 && id <= 0x0F) {
+                // V-Pot push. In Pan mode (currently the only mode we
+                // implement for the V-Pot) a push resets pan to center.
+                if (pressed) {
+                    queueInput({PendingInput::PanCenter,
+                                static_cast<uint8_t>(id - 0x08), 0.0});
+                }
+                handledNatively = true;
+            } else if (id >= 0x20 && id <= 0x37) {
+                const uint8_t strip = static_cast<uint8_t>((id - 0x20) / 3);
+                const int which     = (id - 0x20) % 3;   // 0=SOLO 1=CUT 2=SEL
+                if (pressed) {
+                    PendingInput::Kind k = PendingInput::SoloToggle;
+                    if (which == 1) {
+                        k = PendingInput::MuteToggle;
+                    } else if (which == 2) {
+                        k = g_shiftHeld.load() ? PendingInput::SelectToggle
+                                               : PendingInput::SelectExclusive;
+                    }
+                    queueInput({k, strip, 0.0});
+                }
+                handledNatively = true;
+            } else if (id >= 0x18 && id <= 0x1F) {
+                // Top soft-key above the scribble. PM-mode-specific (selects
+                // what the V-Pot controls on SSL plug-ins). We have no
+                // equivalent yet — swallow so the firmware's MCU-SELECT
+                // overlap doesn't leak to REAPER.
+                handledNatively = true;
+            }
+
+            if (!handledNatively) {
+                const uint8_t mcu[3] = {0x90, id, pressed ? uint8_t{0x7F} : uint8_t{0x00}};
+                g_midi->send(std::span<const uint8_t>(mcu, 3));
+            }
         } else if (cmd == 0x20 && data[i + 2] == 0x02) {
             // Fader touch: FF 20 02 strip state cksum
             //
-            // Clean capacitive touch — hardware-debounced. On press we
-            // (1) send MCU Note-on 0x68+strip to REAPER so CSI knows the
-            //     fader is user-controlled,
-            // (2) send FF 1D 02 strip 00 to the UF8 so its motor releases
-            //     and the user's hand isn't fighting it.
-            // On release, mirror both.
+            // Capacitive touch — hardware-debounced. We track the state so
+            // fader-position events only apply while the user is touching
+            // (kills the motor-echo feedback loop), and release the motor
+            // so the user's hand isn't fighting it.
+            //
+            // Touch-mode automation recording would require the extension
+            // to register as an IReaperControlSurface and feed touch into
+            // REAPER's automation engine — that's a Phase-2 item. For now
+            // the touch state is purely local.
             const uint8_t strip = data[i + 3];
             const uint8_t state = data[i + 4];
             if (strip < 8) {
-                g_touchReported[strip].store(state != 0);
-                const uint8_t mcu[3] = {0x90, static_cast<uint8_t>(0x68 + strip),
-                                        state ? uint8_t{0x7F} : uint8_t{0x00}};
-                g_midi->send(std::span<const uint8_t>(mcu, 3));
-                if (g_dev) g_dev->send(uf8::buildMotorEnable(strip, state == 0));
+                // UF8 in PM mode does not auto-release the fader motor
+                // on capacitive touch (that behaviour is only present in
+                // DAW/MCU mode), so we send the motor-limp command
+                // ourselves. On press we disable immediately so the user
+                // isn't fighting the motor; on release we commit through
+                // a debounced two-phase sequence (position first, motor
+                // re-enable one timer tick later) to work around the
+                // firmware's tendency to drive toward its stale target
+                // between re-enable and the next position command.
+                if (state != 0) {
+                    g_touchLastPress[strip] = std::chrono::steady_clock::now();
+                    g_touchReleasePending[strip].store(false);
+                    if (!g_touchReported[strip].exchange(true)) {
+                        if (g_dev) g_dev->send(uf8::buildMotorEnable(strip, false));
+                    }
+                } else {
+                    g_touchReleasePending[strip].store(true);
+                }
             }
         } else if (cmd == 0x24 && data[i + 2] == 0x02) {
-            // V-pot rotation: FF 24 02 strip delta_raw cksum
-            // Convert to MCU CC: B0 <0x10+strip> <dir<<6 | speed>
-            // UF8 delta: low-nibble = speed; high-nibble presumably direction.
-            // Provisional mapping until we capture more data: bit 7 = direction.
+            // V-pot rotation: FF 24 02 strip raw cksum
+            //
+            // `raw` is a 6-bit signed detent delta (two's complement) in
+            // the low 6 bits:
+            //   0x01..0x1F =  +1 .. +31  (clockwise)
+            //   0x3F..0x20 =  -1 .. -32  (counter-clockwise)
+            // Bits 0x40/0x80 are unused — confirmed empirically on a live
+            // UF8 by capturing slow CW vs. CCW rotations.
             const uint8_t strip = data[i + 3];
             const uint8_t raw   = data[i + 4];
             if (strip < 8) {
-                const uint8_t speed = raw & 0x3F;
-                const bool dir_down = (raw & 0x40) != 0;
-                const uint8_t cc_val = dir_down ? (0x40 | speed) : speed;
-                const uint8_t mcu[3] = {0xB0, static_cast<uint8_t>(0x10 + strip), cc_val};
-                g_midi->send(std::span<const uint8_t>(mcu, 3));
+                int8_t signed6 = static_cast<int8_t>(raw & 0x3F);
+                if (signed6 & 0x20) signed6 |= 0xC0;   // sign-extend from 6 bits
+                // Scale: single detent = 1/128 of full pan range (≈0.78 %).
+                const double delta = static_cast<double>(signed6) / 128.0;
+                queueInput({PendingInput::PanDelta, strip, delta});
             }
         }
         // cmd 0x33 (v-pot push?) skipped — need more samples to verify
@@ -389,6 +720,7 @@ std::string composeValueLine(std::string_view label, std::string_view value)
 
 // Slot-level state caches — push only on change to avoid hammering the
 // OUT endpoint 30× per second.
+std::array<std::string, 8> g_lastTrackName{};
 std::array<std::string, 8> g_lastSlotLabel{};
 std::array<std::string, 8> g_lastCsType{};
 std::array<std::string, 8> g_lastValueLine{};
@@ -402,6 +734,10 @@ void pushZonesForVisibleSlots()
 
     for (int s = 0; s < 8; ++s) {
         MediaTrack* tr = (s < trackCount) ? GetTrack(nullptr, s) : nullptr;
+
+        // Keep the slot→track mapping fresh so GetTouchState can map
+        // REAPER's track pointer back to a strip index.
+        g_slotTrack[s] = tr;
 
         // Channel Strip Type zone: SSL plug-in short name if present, else
         // a 4-char REAPER mnemonic ("RPR ").
@@ -423,14 +759,53 @@ void pushZonesForVisibleSlots()
             g_dev->send(uf8::buildPluginSlotName(static_cast<uint8_t>(s), label));
         }
 
-        if (!tr) continue;
+        if (!tr) {
+            if (!g_lastTrackName[s].empty()) {
+                g_lastTrackName[s].clear();
+                g_dev->send(uf8::buildStripTextUpper(static_cast<uint8_t>(s), ""));
+            }
+            continue;
+        }
 
-        // O/PdB Fader Readout — track volume in dB.
-        const double volLin = GetMediaTrackInfo_Value(tr, "D_VOL");
+        // Upper scribble row — REAPER track name (max 7 chars).
+        {
+            char name[256] = {0};
+            GetSetMediaTrackInfo_String(tr, "P_NAME", name, false);
+            std::string n(name);
+            if (n.size() > 7) n.resize(7);
+            if (n.empty()) {
+                char fallback[8];
+                std::snprintf(fallback, sizeof(fallback), "CH %d", s + 1);
+                n = fallback;
+            }
+            if (n != g_lastTrackName[s]) {
+                g_lastTrackName[s] = n;
+                g_dev->send(uf8::buildStripTextUpper(static_cast<uint8_t>(s), n));
+            }
+        }
+
+        // O/PdB Fader Readout — track volume in dB. GetTrackUIVolPan
+        // returns the UI-displayed value (reflects playback automation),
+        // which is what we want on the UF8 display.
+        const double volLin = uiVolLinear(tr);
         std::string dbStr = formatDbReadout(volLin);
         if (dbStr != g_lastFaderDb[s]) {
             g_lastFaderDb[s] = dbStr;
             g_dev->send(uf8::buildFaderDbReadout(static_cast<uint8_t>(s), dbStr));
+        }
+
+        // Motor echo: push the fader target every tick, including during
+        // touch. While the motor is limp the firmware won't physically
+        // move the fader, but the target update still lands so the
+        // re-enable on release fires into an already-up-to-date target.
+        {
+            const uint16_t pb = linearVolumeToPb(volLin);
+            if (!g_faderPbInit || pb != g_lastFaderPb[s]) {
+                g_lastFaderPb[s] = pb;
+                const uint8_t lsb = static_cast<uint8_t>(pb & 0x7F);
+                const uint8_t msb = static_cast<uint8_t>((pb >> 7) & 0x7F);
+                g_dev->send(uf8::buildFaderPosition(static_cast<uint8_t>(s), lsb, msb));
+            }
         }
 
         // Value Line — "Vol         -6.0dB" format, single combined row.
@@ -441,10 +816,46 @@ void pushZonesForVisibleSlots()
             g_dev->send(uf8::buildValueLine(static_cast<uint8_t>(s), valLine));
         }
     }
+    g_faderPbInit = true;
+}
+
+void commitDebouncedTouchReleases()
+{
+    const auto now = std::chrono::steady_clock::now();
+    for (uint8_t s = 0; s < 8; ++s) {
+        if (!g_touchReleasePending[s].load()) continue;
+        if (now - g_touchLastPress[s] < kTouchDebounceQuiet) continue;
+        g_touchReleasePending[s].store(false);
+        if (!g_touchReported[s].exchange(false)) continue;
+
+        if (!g_dev) continue;
+        MediaTrack* tr = g_slotTrack[s];
+        if (!tr) continue;
+
+        // Firmware behaviour observed in PM mode: position commands sent
+        // while the motor is limp are silently discarded (the target
+        // remembered for the eventual re-enable is the last position
+        // pushed while the motor was active — i.e. the pre-touch value).
+        // Workaround: send enable first and immediately follow with the
+        // new position multiple times. The first hundred microseconds
+        // after enable the motor briefly heads toward its stale target;
+        // the rapid follow-up position commands flip the target before
+        // the fader has visibly moved.
+        const uint16_t pb  = linearVolumeToPb(uiVolLinear(tr));
+        const uint8_t  lsb = static_cast<uint8_t>(pb & 0x7F);
+        const uint8_t  msb = static_cast<uint8_t>((pb >> 7) & 0x7F);
+        g_dev->send(uf8::buildMotorEnable(s, true));
+        for (int i = 0; i < 3; ++i) {
+            g_dev->send(uf8::buildFaderPosition(s, lsb, msb));
+        }
+        g_lastFaderPb[s] = pb;
+    }
 }
 
 void onTimer()
 {
+    drainInputQueue();
+    commitDebouncedTouchReleases();
     if (g_sync) g_sync->refresh(reaperColorForVisibleSlot);
     pushZonesForVisibleSlots();
 }
@@ -455,50 +866,21 @@ extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(
     REAPER_PLUGIN_HINSTANCE hInstance, reaper_plugin_info_t* rec)
 {
     if (!rec) {
-        // Unload
-        plugin_register("-timer", reinterpret_cast<void*>(onTimer));
-        g_sync.reset();
-        if (g_hid) g_hid->close();
-        g_hid.reset();
-        if (g_midi) g_midi->close();
-        g_midi.reset();
-        if (g_dev) g_dev->close();
-        g_dev.reset();
+        // Unload. REAPER destroys our ReaSixtySurface instances (if any
+        // still exist) via IReaperControlSurface's virtual destructor;
+        // those destructors tear down the USB device and timer. Here we
+        // just un-register the class so no new instances can be created.
+        plugin_register("-csurf", &g_csurfReg);
         return 0;
     }
 
     if (rec->caller_version != REAPER_PLUGIN_VERSION) return 0;
     if (REAPERAPI_LoadAPI(rec->GetFunc) != 0) return 0;
 
-    // Open the virtual MIDI ports first — REAPER's control-surface layer
-    // picks these up during startup, so they need to exist before the
-    // user configures CSI to route to them.
-    g_midi = std::make_unique<uf8::MidiBridge>();
-    if (g_midi->open("reaper_uf8")) {
-        g_midi->setIncomingHandler(onMidiFromReaper);
-    } else {
-        ShowConsoleMsg("reaper_uf8: failed to open virtual MIDI ports\n");
-    }
-
-    g_dev = std::make_unique<uf8::UF8Device>();
-    if (!g_dev->open()) {
-        // Can't open UF8 — extension stays loaded so the user sees the
-        // error via ReaScript / console, but does nothing.
-        ShowConsoleMsg(("reaper_uf8: " + g_dev->lastError() + "\n").c_str());
-        return 1;
-    }
-    g_sync = std::make_unique<uf8::ColorSync>(*g_dev);
-    g_sync->invalidate();
-
-    // Route every vendor-USB IN packet through our MCU translator.
-    g_dev->setRawInputHandler(onUf8Input);
-
-    // HID is locked behind Input Monitoring on macOS and the fader/v-pot
-    // inputs we need are actually on vendor-USB EP 0x81 (parsed above).
-    // Keep the HidDevice class around for eventual cross-platform use but
-    // don't open it for now.
-
-    // Poll at ~30 Hz. REAPER's timer callback fires on the main thread.
-    plugin_register("timer", reinterpret_cast<void*>(onTimer));
+    // Register as a full control-surface class. The user adds a
+    // "Rea-Sixty" entry in Preferences → Control/OSC/Web; REAPER then
+    // calls createReaSixty() to instantiate ReaSixtySurface, which
+    // opens the UF8 and starts the timer.
+    plugin_register("csurf", &g_csurfReg);
     return 1;
 }

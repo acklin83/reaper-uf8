@@ -127,7 +127,23 @@ bool UF8Device::open()
     // physical Plugin-Mixer-Layer button press. A single FF 66 11 0F
     // command alone doesn't switch modes — UF8 firmware needs the
     // whole fader-position/motor/label/color sequence.
+    //
+    // We filter out the text-zone frames though: the capture was taken on
+    // an SSL session that had "Kick", "Snarer", "OH" etc. on the scribble
+    // strips and those demo strings briefly flash before the timer
+    // overwrites them. Structural frames (layer mode, color, fader pos,
+    // motor, slot-active) stay — only text content is skipped.
+    auto isTextFrame = [](const uint8_t* b, size_t sz) {
+        if (sz < 5 || b[0] != 0xFF || b[1] != 0x66) return false;
+        const uint8_t cmd = b[3];
+        return cmd == 0x04   // parameter label / plugin slot name
+            || cmd == 0x0B   // upper scribble strip
+            || cmd == 0x0C   // O/PdB readout
+            || cmd == 0x0E   // lower scribble / value line
+            || cmd == 0x17;  // CS Type
+    };
     for (const auto& f : kLayerPluginMixerSequence) {
+        if (isTextFrame(f.bytes, f.size)) continue;
         int transferred = 0;
         libusb_bulk_transfer(
             handle_, kEpOut,
@@ -158,6 +174,19 @@ bool UF8Device::open()
         char name[8];
         std::snprintf(name, sizeof(name), "TRK %u", static_cast<unsigned>(s + 1));
         sendFrame(buildPluginSlotName(s, name));
+    }
+
+    // The captured layer-switch replay writes the session text that SSL
+    // 360° had on screen at capture time ("Kick", "Snarer", "OH", "-1.0",
+    // etc.). Blank every text zone on every strip so the user doesn't see
+    // those ghost strings in the ~33 ms before the 30 Hz timer overwrites
+    // them with REAPER-derived content.
+    for (uint8_t s = 0; s < 8; ++s) {
+        sendFrame(buildStripTextUpper(s, ""));
+        sendFrame(buildStripTextLower(s, ""));
+        sendFrame(buildChannelStripType(s, "    "));
+        sendFrame(buildFaderDbReadout(s, "    "));
+        sendFrame(buildValueLine(s, ""));
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 

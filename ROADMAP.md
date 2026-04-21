@@ -11,20 +11,23 @@ The project started 2026-04-19 as a "just the colors" REAPER extension. After de
 
 **Goal:** The user can quit SSL 360° for UF8 and lose no functionality. Bonus: DAW-layer scribble-strip colors, which SSL 360° doesn't offer at all.
 
+**Scope clarification (2026-04-21):** We replace CSI entirely. The extension is the full host — no MCU-MIDI bridge, no reliance on any REAPER control-surface plug-in. All UF8 input (buttons, fader, fader-touch, V-Pot) is routed via the REAPER C API; all UF8 output (scribble, colors, LEDs, fader motor, meters) is driven by the extension from REAPER state on a timer. This keeps PM-mode — the only mode with color bars — fully functional without any SSL- or MCU-stack dependency.
+
 Deliverables:
-- `reaper_uf8` REAPER extension (or standalone daemon) that claims UF8 over libusb
+- `reaper_uf8` REAPER extension that claims UF8 over libusb
 - Init-sequence replay at open() so the UF8 actually wakes up
 - Color push on REAPER track-color change + bank shift
-- Soft-key / Quick-key / Send-Plugin button inputs routed — via HID path or MCU-MIDI relay, depending on what reverse-engineering of the UF8 input paths reveals
-- Keyboard-macro engine: press UF8 soft-key → send a keystroke or REAPER action (what SSL 360°'s "Shift Opt N1"-style mappings do)
-- Soft-key LED colors (same frame format as scribble-strip colors)
-- Layer management: DAW / Send / Pan / Plugin / EQ / Instrument, selected via global buttons
-- Meter display (forward REAPER peak meters to UF8's meter bands — already via MCU)
+- Native button router: every UF8 button (per-strip SOLO/CUT/SEL/V-Pot-Push, top soft-keys, Bank, Layer, Send/Plugin, Page, Flip, Automation, Transport, 360, Channel-Encoder, Norm/Rec/Auto, PAN, Fine) mapped to a REAPER API call or named extension action
+- Native fader + fader-touch + V-Pot rotation routing via REAPER API (no virtual MIDI)
+- LED feedback driven from REAPER state (solo/mute/select/arm) on the extension's 30 Hz timer — UF8 LEDs reflect what REAPER thinks
+- Keyboard-macro engine: press UF8 soft-key → run a REAPER named action (equivalent of SSL 360°'s "Shift Opt N1" mappings)
+- Layer management: DAW / Send / Pan / Plugin / EQ / Instrument selected via left-side Layer buttons
+- Meter display: REAPER peak meters drive UF8 meter bands via the native vendor-USB meter command (once decoded)
 - Minimal config via JSON/INI: mappings, colors, layer bindings
 
-Next capture work: init-sequence (power-cycle capture on Windows + SSL 360° wakeup).
+Next capture/decode work: LED command formats (solo/mute/select/arm), meter command format.
 
-**Milestone complete when:** User starts macOS, SSL 360° is never launched, CSI + our tool drive UF8 fully, scribble strips show REAPER track colors in DAW layer.
+**Milestone complete when:** User starts macOS, SSL 360° is never launched, no MCU control-surface plug-in is configured in REAPER, UF8 drives REAPER fully via the native extension, scribble strips show REAPER track colors.
 
 ## Phase 2 — Config UI
 
