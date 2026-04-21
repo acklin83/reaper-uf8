@@ -44,15 +44,31 @@ public:
     // Send a MIDI message upstream (UF8 → REAPER direction).
     void send(std::span<const uint8_t> bytes);
 
+    // Try to open UF8's OS-level MCU/HUI MIDI destination so the
+    // extension can drive LED state directly (SOLO/MUTE/SELECT/ARM).
+    // Matches the first destination whose name contains "UF8" or "SSL"
+    // — works with or without SSL 360° depending on whether its virtual
+    // MIDI port is installed. Returns true if a destination was bound.
+    bool openUf8Output();
+
+    // Send an MCU-style MIDI message to the UF8 MCU port, if bound.
+    // Silently no-ops when the UF8 output wasn't found. Safe to call
+    // from the main thread (REAPER CSurf callbacks and timer).
+    void sendToUf8(std::span<const uint8_t> bytes);
+
+    bool uf8OutputOpen() const;
+
     void setIncomingHandler(IncomingHandler h) { handler_ = std::move(h); }
 
 private:
 #if __APPLE__
     static void readProc_(const MIDIPacketList* pktList, void* refCon, void* connRefCon);
 
-    MIDIClientRef    client_ = 0;
-    MIDIEndpointRef  source_ = 0;
-    MIDIEndpointRef  dest_   = 0;
+    MIDIClientRef    client_       = 0;
+    MIDIEndpointRef  source_       = 0;
+    MIDIEndpointRef  dest_         = 0;
+    MIDIPortRef      uf8OutPort_   = 0;
+    MIDIEndpointRef  uf8OutDest_   = 0;
 #endif
     IncomingHandler  handler_;
 };

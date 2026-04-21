@@ -60,6 +60,14 @@ public:
     const char* GetConfigString() override { return "0 0"; }
 
     bool GetTouchState(MediaTrack* tr, int isPan) override;
+
+    // LED feedback. REAPER calls these whenever solo/mute/select/arm
+    // state changes for any track. We translate to MCU note-on/off and
+    // send to the UF8's MCU-MIDI port so the per-strip LEDs follow.
+    void SetSurfaceSolo(MediaTrack* tr, bool solo)        override;
+    void SetSurfaceMute(MediaTrack* tr, bool mute)        override;
+    void SetSurfaceSelected(MediaTrack* tr, bool sel)     override;
+    void SetSurfaceRecArm(MediaTrack* tr, bool arm)       override;
 };
 
 // Per-slot MediaTrack cache so GetTouchState can map REAPER's track
@@ -411,6 +419,44 @@ bool ReaSixtySurface::GetTouchState(MediaTrack* tr, int isPan)
     return false;
 }
 
+// MCU note IDs for the LED classes UF8 firmware responds to:
+//   0x00..0x07 = REC ARM, 0x08..0x0F = SOLO,
+//   0x10..0x17 = MUTE,    0x18..0x1F = SELECT,
+// each offset by strip index 0..7. Confirmed 2026-04-21 that UF8 lights
+// these LEDs even while in PM (Plug-in Mixer) mode as long as the MIDI
+// reaches its MCU endpoint.
+void sendMcuLed(uint8_t base, MediaTrack* tr, bool on)
+{
+    if (!g_midi) return;
+    for (int s = 0; s < 8; ++s) {
+        if (g_slotTrack[s] != tr) continue;
+        const uint8_t msg[3] = {
+            0x90,
+            static_cast<uint8_t>(base + s),
+            on ? uint8_t{0x7F} : uint8_t{0x00},
+        };
+        g_midi->sendToUf8(std::span<const uint8_t>(msg, 3));
+        return;
+    }
+}
+
+void ReaSixtySurface::SetSurfaceSolo(MediaTrack* tr, bool solo)
+{
+    sendMcuLed(0x08, tr, solo);
+}
+void ReaSixtySurface::SetSurfaceMute(MediaTrack* tr, bool mute)
+{
+    sendMcuLed(0x10, tr, mute);
+}
+void ReaSixtySurface::SetSurfaceSelected(MediaTrack* tr, bool sel)
+{
+    sendMcuLed(0x18, tr, sel);
+}
+void ReaSixtySurface::SetSurfaceRecArm(MediaTrack* tr, bool arm)
+{
+    sendMcuLed(0x00, tr, arm);
+}
+
 // Device lifecycle: the surface instance owns the UF8 connection and the
 // timer registration. REAPER creates the instance when the user adds
 // "Rea-Sixty" in Control Surface settings, and destroys it on removal or
@@ -427,6 +473,12 @@ ReaSixtySurface::ReaSixtySurface()
     g_midi = std::make_unique<uf8::MidiBridge>();
     if (g_midi->open("reaper_uf8")) {
         g_midi->setIncomingHandler(onMidiFromReaper);
+        // Also try to open the UF8's own OS-level MCU MIDI port so we
+        // can drive the per-strip LEDs via MCU note-on/off. Silently
+        // no-ops if no matching destination exists (e.g. SSL 360° not
+        // installed and the UF8 not exposed as native MIDI) — LED
+        // feedback just stays dark in that case.
+        g_midi->openUf8Output();
     }
 
     g_dev = std::make_unique<uf8::UF8Device>();
@@ -1011,8 +1063,12 @@ void pushZonesForVisibleSlots()
 
     // Full re-push on a bank change — every cached "last" value refers
     // to a different track now, so dedup would suppress legitimate
-    // updates for a few ticks until each value happens to drift.
-    if (g_bankDirty.exchange(false)) {
+    // updates for a few ticks until each value happens to drift. Also
+    // re-sync SOLO/MUTE/SEL/ARM LEDs to the new bank's tracks, since
+    // REAPER only calls SetSurface* on actual state changes, not on
+    // bank shifts.
+    const bool bankChanged = g_bankDirty.exchange(false);
+    if (bankChanged) {
         g_lastTrackName.fill({});
         g_lastSlotLabel.fill({});
         g_lastCsType.fill({});
@@ -1020,6 +1076,24 @@ void pushZonesForVisibleSlots()
         g_lastFaderDb.fill({});
         g_lastFaderPb.fill(0xFFFF);
         if (g_sync) g_sync->invalidate();
+
+        for (int s = 0; s < 8; ++s) {
+            const int rs = s + bankOffset;
+            MediaTrack* t = (rs < trackCount) ? GetTrack(nullptr, rs) : nullptr;
+            const bool solo = t && GetMediaTrackInfo_Value(t, "I_SOLO")     > 0.5;
+            const bool mute = t && GetMediaTrackInfo_Value(t, "B_MUTE")     > 0.5;
+            const bool sel  = t && GetMediaTrackInfo_Value(t, "I_SELECTED") > 0.5;
+            const bool arm  = t && GetMediaTrackInfo_Value(t, "I_RECARM")   > 0.5;
+            if (g_midi) {
+                const uint8_t msgs[4][3] = {
+                    {0x90, uint8_t(0x08 + s), solo ? uint8_t(0x7F) : uint8_t(0x00)},
+                    {0x90, uint8_t(0x10 + s), mute ? uint8_t(0x7F) : uint8_t(0x00)},
+                    {0x90, uint8_t(0x18 + s), sel  ? uint8_t(0x7F) : uint8_t(0x00)},
+                    {0x90, uint8_t(0x00 + s), arm  ? uint8_t(0x7F) : uint8_t(0x00)},
+                };
+                for (auto& m : msgs) g_midi->sendToUf8(std::span<const uint8_t>(m, 3));
+            }
+        }
     }
 
     for (int s = 0; s < 8; ++s) {
