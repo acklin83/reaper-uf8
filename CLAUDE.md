@@ -20,7 +20,7 @@ Implication: the 360° color commands are NOT MIDI-over-USB. They travel on a ve
 2. **Decode:** identify packet structure — channel index, color encoding (RGB? palette?), framing bytes.
 3. **Emit:** write a REAPER extension that opens the UF8 (when SSL360Core is NOT running) and sends the same packets driven by `GetTrackColor()` + bank-switch hooks.
 
-Stretch: test whether UF8 accepts color packets while ALSO in MCU/HUI mode (second USB endpoint, different altsetting?) — if yes, we could run alongside SSL360Core instead of replacing it.
+**End goal: complete SSL 360° replacement for UF8, no CSI, no virtual MCU.** The extension talks directly to REAPER (API) and UF8 (vendor-USB). MCU/CSI was a transitional pipeline-proof only — see `docs/architecture-decision.md` for the rationale and migration path. Any new feature goes through the direct REAPER↔UF8 path; do not add CSI-dependent code.
 
 ## Repo Layout
 ```
