@@ -39,7 +39,7 @@ UC1 has a 4-character-ish numeric display per knob section (Threshold, Ratio, At
 **The headline target.** The UC1 GR bar-graph is a ~20-LED vertical strip. Format TBD. Working hypothesis from `cap17`: `FF 13 04 <4 bytes>` frames seen going to UC1 when UF8 was present are the GR stream — but that capture didn't have the UC1 in standalone mode, so we can't tell whether those are meter-only frames or include other telemetry. Resolve in `uc1_12_gr_dynamic.pcap`.
 
 ### VU (input/output) meters
-TBD from `uc1_13_vu_meters.pcap`. UF8 uses `FF 38 04 …` / `FF 39 04 …`; UC1 may share or differ.
+VU meters on the UC1 belong to the **Channel Strip section**, not the Bus Comp section — the Bus Comp layout has no dedicated I/O VU strip. TBD from `uc1_13_vu_meters.pcapng`. UF8 uses `FF 38 04 …` / `FF 39 04 …`; UC1 may share or differ.
 
 ### LED / button feedback
 Per-button LED frames (Bypass-active, Ext-SC, etc.) — TBD from `uc1_08_buttons_all.pcap`.
@@ -109,5 +109,5 @@ The SSL plugins ship GR to 360° over encrypted Thrift IPC (see `plugin-ipc-note
 | 2026-04-22 | `uc1_10_track_select.pcapng` | Track focus 1→2→3→4→1 with Bus Comp 2 on T1/T3 only (20 s, 22378 pkts) |
 | 2026-04-22 | `uc1_11_gr_static.pcapng` | GR pinned ~12 dB steady, audio running (10 s, 11302 pkts) |
 | 2026-04-22 | `uc1_12_gr_dynamic.pcapng` | Dynamic program material, GR animated across full range (10 s, 11370 pkts) |
-| _TBD_ | `uc1_13_vu_meters.pcap` | Known-level sines (−20/−10/−6/0 dBFS) |
+| 2026-04-22 | `uc1_13_vu_meters.pcapng` | Test tones −20/−10/−6/0 dBFS through Channel Strip 2 (bypassed) (20 s, 22894 pkts) |
 | _TBD_ | `uc1_14_multiple_sc.pcap` | External sidechain on, various SC sources |
