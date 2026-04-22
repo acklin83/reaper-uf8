@@ -100,7 +100,7 @@ The SSL plugins ship GR to 360° over encrypted Thrift IPC (see `plugin-ipc-note
 | 2026-04-22 | `uc1_01_init_clean.pcapng` | Init/wakeup sequence on fresh enumeration — 27944 pkts to address 28, endpoints 0x00/0x80/0x02/0x81 |
 | 2026-04-22 | `uc1_02_idle_baseline.pcapng` | 10 s idle heartbeat — 11288 pkts, ~1130 pkt/s, same endpoint set |
 | 2026-04-22 | `uc1_03_plugin_presence.pcapng` | Plugin load/unload transitions (30 s, 34298 pkts): empty → +BusComp2 → +ChStrip2 → −BusComp2 → −ChStrip2 |
-| _TBD_ | `uc1_04_knob_threshold_sweep.pcap` | Threshold full sweep |
+| 2026-04-22 | `uc1_04_knob_threshold_sweep.pcapng` | Threshold full sweep CCW→CW→CCW (15 s, 17702 pkts) |
 | _TBD_ | `uc1_05_knob_ratio_steps.pcap` | Ratio discrete steps |
 | _TBD_ | `uc1_06_knob_attack_release.pcap` | Attack + Release sweeps |
 | _TBD_ | `uc1_07_knob_makeup_mix.pcap` | Makeup + Mix + HPF sweeps |
