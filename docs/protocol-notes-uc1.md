@@ -68,31 +68,50 @@ ff 13 04 01 1a 01 01 35
 ```
 Same level (0x1a), differing only in the last data byte → strongly suggests input/output meter pair with shared level byte.
 
-### `FF 66 <len> <zone> <ascii…> <chk>` — display write (alphanumeric readouts)
-UC1's per-knob numeric displays. Zone `0x05` seen in every knob capture, carrying a 22-character fixed-width ASCII string `<label><spaces><value>`:
+### `FF 66 <len> <zone> <ascii…> <chk>` — display write (alphanumeric + context)
+UC1 has multiple display zones addressed by the byte immediately after length. Each zone has its own fixed field width. Known zones from the capture set:
 
-| Payload (stripped) | Zone | Text |
-|--------------------|-----:|------|
-| `… 05 "Threshold       12.1dB"` | 0x05 | Threshold readout |
-| `… 05 "Ratio           4:1"` | 0x05 | Ratio readout |
-| `… 05 "Release         0.3s"` | 0x05 | Release readout |
-| `… 05 "Makeup          …"` | 0x05 | Makeup readout |
-| `… 05 "Mix             50.5%"` | 0x05 | Mix readout |
-| `… 05 "S/C HPF         45.3Hz"` | 0x05 | Sidechain HPF readout |
+| Zone | Width | Purpose | Example text seen |
+|-----:|------:|---------|-------------------|
+| `0x02` | 37 B | Channel-strip context line with `a`/`b` byte markers at specific columns (likely track position / strip layout) | `"············a···········b···········"`, `"············-------·····b···········"` |
+| `0x04` | 43 B | General status / "No Plug-ins" line | `"··············No Plug-ins·················"`, all-zero with a `0x61` sentinel when populated |
+| `0x05` | 22 B | **Shared numeric readout** (time-multiplexed to the knob currently being turned) | `"Threshold       12.1dB"`, `"Ratio           4:1"`, `"Release         0.3s"`, `"Makeup          …"`, `"Mix             50.5%"`, `"S/C HPF         45.3Hz"` |
+| `0x03` | 18–19 B | Status button label + on/off text | `"S/C Listen      On"`, `"S/C Listen      Off"` |
+| `0x0E` | 3–4 B | Plugin state tag | `"Off"`, `"N/A"`, (presumably `"On"`) |
+| `0x10` | 4–5 B | Plugin name tag | `"4K E"` (4K E Channel Strip detected — UC1 adapts to multiple SSL plugin variants, not just Native 2) |
 
-Zone `0x05` is a **shared 22-char display slot** that swaps label when a different knob is being touched; it is not a per-knob address. `uc1_04`–`uc1_07` show only a single text field being time-multiplexed to whichever knob the user is currently turning.
+Short `FF 66` variants seen alongside big updates:
+- `ff 66 03 00 01 00 6a` — three-byte payload; likely a "repaint pending" / invalidate flag.
+- `ff 66 02 0b 01 74` — similar short form, different zone.
+- `ff 66 01 03 6a` — single-byte payload, zone 0x03 invalidate.
 
-Zone `0x04` carries a 43-byte frame that is almost entirely zero bytes plus a single `0x61` sentinel — probably a layout / context frame rather than text. `uc1_10` (track-select) surfaced a single novel frame `ff 66 2b 04 … 61 … 62 … 58` which looks like a track-context identity block, TBD.
+Zone 0x05 time-multiplexing means Rea-Sixty must maintain state for the currently-active knob (the one most recently turned) and push the 22-char string each time the value changes. Other zones are mostly written on plugin load/unload and track change.
 
-Short variants:
-- `ff 66 03 00 01 00 6a` — three-byte payload sent alongside every display update. Possibly a "repaint pending" flag.
-- `ff 66 02 0b 01 74` (seen once in uc1_13) — similar, different zone.
+### `FF 5C 02 <hi> <lo> <chk>` — LED bitmask
+Seen in `uc1_03`, `uc1_08`, `uc1_14`. Two-byte payload appears to be a 16-bit bitmask of the UC1's button-LED states. Observed values:
 
-### `FF 5C …` — LED feedback (button state echo)
-Seen 2× in `uc1_08` during button capture, correlated with button-press events. Counterpart to the `FF 22` button event in the OUT direction: after UC1 signals a press, SSL 360° echoes a `FF 5C` frame to turn the button LED on or off. Full family decode needs a single-button toggle capture; `uc1_14` is that capture for Ext-SC specifically.
+```
+ff 5c 02 00 00 5e    (all LEDs off)
+ff 5c 02 00 0a 68    (bits 1+3 set)
+ff 5c 02 00 32 90    (bits 1+4+5 set)
+```
 
-### Init sequence
-Full init is in `uc1_01_init_clean.pcapng` — 27944 packets on EP 0x02/0x00 following replug. Extraction into `extension/src/init_sequence_uc1.inc` is pending. Expect ~50–150 vendor frames plus the standard USB enumeration on EP 0x00.
+Exact bit→button mapping not yet pinned; requires a capture that toggles one button at a time with the rest known off. `uc1_14` (Ext-SC only) is a start — combined with `uc1_08`'s time-aligned button press events and the matching `5C` emissions, bits can be assigned.
+
+In parallel, `FF 13 04 <…>` is used to push LED-strip / meter state updates — see the VU section above. The same command carries both VU and non-VU LED updates; the disambiguator is the addressing bytes (byte1/byte2 of the 4-byte data field).
+
+### Init sequence (trivial)
+**UC1 needs no vendor-specific init.** Analysis of `uc1_01` (2846 OUT frames to the newly enumerated device) found only 5 distinct payloads in the whole post-replug stream, all of which already exist in the idle-baseline set:
+
+```
+ff 5b 02 00 00 5d       (GR = 0.0 dB)
+ff 1b 01 00 1c          (keepalive counter 0)
+ff 1b 01 01 1d          (keepalive counter 1)
+ff 1b 01 02 1e          (keepalive counter 2)
+ff 1b 01 03 1f          (keepalive counter 3)
+```
+
+Control-transfer side (EP 0x00) shows only the stock USB enumeration (GET_DESCRIPTOR, SET_CONFIGURATION). Rea-Sixty can open the bulk endpoints, immediately start the keepalive + zero-GR stream, and everything else comes on demand. No separate `init_sequence_uc1.inc` file is needed — replicate the 5 payloads above in code.
 
 ## Events — UC1 → host (EP 0x81 IN)
 
@@ -125,21 +144,21 @@ State byte: `0x01` = press, `0x00` = release. Middle byte (always `0x00` observe
 
 Button IDs mapped against user's pressed sequence in `uc1_08`:
 
-| `button_id` | Button (label on hardware) | Section |
-|------------:|----------------------------|---------|
-| `0x0A` | Bell HF | Channel Strip — EQ |
-| `0x0B` | Type (E) | Channel Strip — EQ character |
-| `0x0C` | Bus Comp IN | Bus Comp — enable |
-| `0x14` | Bell LF | Channel Strip — EQ |
-| `0x15` | Fast Attack | Channel Strip — Comp |
-| `0x16` | Peak | Channel Strip — Comp |
-| `0x17` | Dyn In | Channel Strip — dynamics enable |
-| `0x18` | Expand | Channel Strip — Gate |
-| `0x19` | Fast Attack (Gate) | Channel Strip — Gate |
-| `0x1A` | Polarity | Channel Strip — Input |
-| `0x1B` | S/C Listen | Bus Comp — sidechain listen |
+| `button_id` | Button | Evidence |
+|------------:|--------|----------|
+| `0x0A` | Bell HF | first press in uc1_08 sequence |
+| `0x0B` | Type (E) | second press in uc1_08 |
+| `0x0C` | Bus Comp IN | last press in uc1_08 |
+| `0x14` | Bell LF | uc1_08 sequence position |
+| `0x15` | Fast Attack (Comp) | uc1_08 sequence position |
+| `0x16` | Peak | uc1_08 sequence position |
+| `0x17` | Dyn In | uc1_08 sequence position |
+| `0x18` | Expand | uc1_08 sequence position |
+| `0x19` | Fast Attack (Gate) | uc1_08 sequence position |
+| `0x1A` | **S/C Listen** | `uc1_14` — display zone 0x03 shows `"S/C Listen      On/Off"` during toggles of id 0x1A (**direct evidence, overrides uc1_08 sequence alignment**) |
+| `0x1B` | Polarity | remaining ID in the uc1_08 cluster once `0x1A` is pinned to S/C Listen by `uc1_14` |
 
-**Two buttons in the user's 13-press sequence produced no `FF 22` event**: position 3 (EQ IN) and position 12 (Solo Clear). They may use a different command family, or the capture missed those physical presses. Re-run as a narrow follow-up capture if Rea-Sixty implementation discovers the buttons don't respond.
+Two IDs in the user's 13-press sequence produced no `FF 22` event: EQ IN and Solo Clear. They may use a different command family or the user may have tapped past those without a firm press. A targeted re-capture toggling just those two would close the gap — not a blocker for the initial implementation.
 
 ### Track-selection follow (host-driven)
 UC1 does not send a "track changed" event — track focus is driven by SSL 360° observing the DAW. `uc1_10` confirmed this: in the focus walk 1→2→3→4→1 the only novel payload was one OUT frame (`ff 66 2b 04 …`), no novel IN frames. Rea-Sixty's `FocusedTrack` must therefore push the retarget frame itself when REAPER's `SetTrackSelected` fires.
@@ -166,20 +185,20 @@ The SSL plugins ship GR to 360° over encrypted Thrift IPC (see `plugin-ipc-note
 
 ## Open items
 
-- [x] USB descriptor dump — endpoints, max packet size, interface class/subclass (confirmed EP 0x02 OUT / 0x81 IN bulk; exact max-packet-size still from `uc1_01` control transfers)
-- [ ] Init sequence extraction (uc1_01) → `extension/src/init_sequence_uc1.inc`
+- [x] USB descriptor dump — endpoints, max packet size, interface class/subclass (confirmed EP 0x02 OUT / 0x81 IN bulk)
+- [x] Init sequence — trivial; 5 reusable payloads (keepalive + zero-GR), no custom sequence file needed
 - [x] Idle heartbeat identification (`FF 1B 01 <counter>`, 4-phase)
-- [ ] Plugin-presence frames isolation (uc1_03 — has 315 novel payloads, needs per-transition windowing)
+- [~] Plugin-presence frames — `FF 66` writes to zones 0x04/0x0E/0x10 land the plugin-name/state, `FF 5C` flips the LED mask. Full cross-plugin list requires more captures (4K B, SSL 360 Link, Native Channel Strip 2, etc.)
 - [x] Physical-knob → event-frame ID map for Bus Comp section (see table above)
 - [ ] Channel Strip knob IDs — no capture yet exercises those knobs
-- [x] Button ID map for 11 of 13 buttons (EQ IN + Solo Clear outstanding)
-- [x] Display (numeric readout) frame format (`FF 66 <len> <zone> <ascii> <chk>`; zone 0x05 = shared 22-char slot)
-- [ ] Track-focus retarget frame — partial; `ff 66 2b 04 … 61 … 62 … 58` is the candidate, semantics TBD
+- [x] Button ID map — 11 of 13 confirmed (EQ IN + Solo Clear outstanding; `0x1A`/`0x1B` corrected via `uc1_14` direct evidence)
+- [x] Display frame format — zones 0x02/0x03/0x04/0x05/0x0E/0x10 documented
+- [~] Track-focus retarget frame — `FF 66 2B 04 …` with byte markers `0x61`/`0x62` at varying column positions; semantics (which byte = track index) still TBD
 - [x] GR bar-graph frame format (`FF 5B 02 <BE-16 dB×10>`)
-- [x] VU LED frame format (`FF 13 04 <bank> <level> <01> <in/out>`)
-- [ ] External-sidechain indicator frames — `uc1_14` has 33 novel, decode in next pass
+- [x] VU meter frame format (`FF 13 04 <bank> <level> <01> <in/out>`)
+- [~] LED bitmask frame (`FF 5C 02 <16-bit mask>`) — bit→button mapping needs a single-button toggle capture per button
 - [ ] Attack knob ID confirmation (probably 0x10 by analogy)
-- [ ] UF8 vs UC1 GR routing re-verification — needs a both-connected capture with UF8 also driving displays
+- [ ] UF8 vs UC1 GR routing re-verification — needs a both-connected capture
 
 ## Capture index
 
