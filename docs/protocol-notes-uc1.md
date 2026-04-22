@@ -110,4 +110,4 @@ The SSL plugins ship GR to 360° over encrypted Thrift IPC (see `plugin-ipc-note
 | 2026-04-22 | `uc1_11_gr_static.pcapng` | GR pinned ~12 dB steady, audio running (10 s, 11302 pkts) |
 | 2026-04-22 | `uc1_12_gr_dynamic.pcapng` | Dynamic program material, GR animated across full range (10 s, 11370 pkts) |
 | 2026-04-22 | `uc1_13_vu_meters.pcapng` | Test tones −20/−10/−6/0 dBFS through Channel Strip 2 (bypassed) (20 s, 22894 pkts) |
-| _TBD_ | `uc1_14_multiple_sc.pcap` | External sidechain on, various SC sources |
+| 2026-04-22 | `uc1_14_multiple_sc.pcapng` | Ext-SC button toggled on/off repeatedly — LED feedback focus, SC source irrelevant (20 s, 22547 pkts) |
