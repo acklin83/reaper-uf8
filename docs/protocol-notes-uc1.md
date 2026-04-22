@@ -106,7 +106,7 @@ The SSL plugins ship GR to 360° over encrypted Thrift IPC (see `plugin-ipc-note
 | 2026-04-22 | `uc1_07_knob_makeup_mix.pcapng` | Makeup + Mix + SC HPF sweeps (25 s, 29184 pkts) |
 | 2026-04-22 | `uc1_08_buttons_all.pcapng` | 13 buttons pressed in sequence (20 s, 22758 pkts) — full button set |
 | 2026-04-22 | `uc1_09_display_params.pcapng` | GUI-side Bus Comp 2 param changes (unspecified order) (20 s, 23130 pkts) — format-only decode, per-param IDs come from uc1_04/06/07 |
-| _TBD_ | `uc1_10_track_select.pcap` | REAPER track selection changes → UC1 retarget |
+| 2026-04-22 | `uc1_10_track_select.pcapng` | Track focus 1→2→3→4→1 with Bus Comp 2 on T1/T3 only (20 s, 22378 pkts) |
 | _TBD_ | `uc1_11_gr_static.pcap` | Audio off, Threshold pinned low, max GR |
 | _TBD_ | `uc1_12_gr_dynamic.pcap` | Audio loop through aggressive comp, 10 s |
 | _TBD_ | `uc1_13_vu_meters.pcap` | Known-level sines (−20/−10/−6/0 dBFS) |
