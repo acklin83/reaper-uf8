@@ -102,7 +102,7 @@ The SSL plugins ship GR to 360° over encrypted Thrift IPC (see `plugin-ipc-note
 | 2026-04-22 | `uc1_03_plugin_presence.pcapng` | Plugin load/unload transitions (30 s, 34298 pkts): empty → +BusComp2 → +ChStrip2 → −BusComp2 → −ChStrip2 |
 | 2026-04-22 | `uc1_04_knob_threshold_sweep.pcapng` | Threshold full sweep CCW→CW→CCW (15 s, 17702 pkts) |
 | 2026-04-22 | `uc1_05_knob_ratio_steps.pcapng` | Ratio discrete steps 1.5/2/4/10 (15 s, 16940 pkts) |
-| _TBD_ | `uc1_06_knob_attack_release.pcap` | Attack + Release sweeps |
+| 2026-04-22 | `uc1_06_knob_attack_release.pcapng` | Attack sweep + pause + Release sweep (20 s, 22540 pkts) |
 | _TBD_ | `uc1_07_knob_makeup_mix.pcap` | Makeup + Mix + HPF sweeps |
 | _TBD_ | `uc1_08_buttons_all.pcap` | Every button pressed once |
 | _TBD_ | `uc1_09_display_params.pcap` | REAPER-side param changes → display output frames |
