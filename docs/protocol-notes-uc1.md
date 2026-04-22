@@ -97,8 +97,8 @@ The SSL plugins ship GR to 360° over encrypted Thrift IPC (see `plugin-ipc-note
 
 | Date | File | Summary |
 |------|------|---------|
-| _TBD_ | `uc1_01_init_clean.pcap` | Init/wakeup sequence on fresh enumeration |
-| _TBD_ | `uc1_02_idle_baseline.pcap` | 10 s idle heartbeat |
+| 2026-04-22 | `uc1_01_init_clean.pcapng` | Init/wakeup sequence on fresh enumeration — 27944 pkts to address 28, endpoints 0x00/0x80/0x02/0x81 |
+| 2026-04-22 | `uc1_02_idle_baseline.pcapng` | 10 s idle heartbeat — 11288 pkts, ~1130 pkt/s, same endpoint set |
 | _TBD_ | `uc1_03_layer_boot.pcap` | Mode switch (Bus Comp / Channel Strip) |
 | _TBD_ | `uc1_04_knob_threshold_sweep.pcap` | Threshold full sweep |
 | _TBD_ | `uc1_05_knob_ratio_steps.pcap` | Ratio discrete steps |
