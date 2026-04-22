@@ -13,7 +13,7 @@ Living spec of the SSL UC1 USB protocol, reverse-engineered by capturing SSL 360
 
 ## Capture constraints
 
-**UF8 must be disconnected during UC1 captures.** `cap17_pm_gain_reduction.md` (2026-04-20) proved that SSL 360° steers Bus Compressor GR meter traffic to whichever controller has the dedicated GR display — UC1 wins when both are present. To see the full UC1 frame family we need UC1 as the only SSL device on the bus.
+**UF8 must be disconnected during UC1 captures.** Rationale: clean single-device bus. With both controllers connected we'd have to disentangle two overlapping SSL-VID streams per capture — USB addresses change between sessions and at least some frame families look identical on the wire between UC1 and UF8. `cap17_pm_gain_reduction.md` (2026-04-20) observed the `FF 13 04 …` GR frames going only to UC1 when both were present, but the hardware fact that UF8 still displays GR in normal operation means the routing is not fully understood — the "GR goes exclusively to UC1" reading was too strong. Re-verification is a planned output of `uc1_11` / `uc1_12` plus a dedicated both-connected reference capture.
 
 ## Frame format
 
@@ -29,8 +29,8 @@ TBD from `uc1_01_init_clean.pcap`. Expected: ~50–150 frames sent by SSL 360° 
 ### Idle heartbeat
 TBD from `uc1_02_idle_baseline.pcap`.
 
-### Layer / mode selection
-TBD. UC1 has at least two modes: Bus Compressor mode (default, physical knobs drive the selected track's bus comp) and Channel Strip mode (physical knobs drive the channel strip plugin on the focused track). The mode switch likely arrives as either a `FF 1B …` style command (like UF8's layer selector) or a distinct command family.
+### Plugin presence / absence
+UC1 has no mode toggle — the hardware is a single fixed layout (Bus Comp 2 knobs in the center, Channel Strip 2 knobs — EQ + Gate/Comp — around them), both sections always live. "Layer selection" in the UF8 sense does not exist here. What does happen is that individual sections go inert when the focused track has no corresponding plugin loaded: center section dark when Bus Comp 2 is absent, EQ/dynamics sections dark when Channel Strip 2 is absent. The frames SSL 360° sends to switch sections between live and inert states are what `uc1_03` should isolate.
 
 ### Parameter display
 UC1 has a 4-character-ish numeric display per knob section (Threshold, Ratio, Attack, Release, Makeup, Mix). Format TBD — likely `FF 66 <len> <zone> <strip/knob-id> <ASCII chars>` analogous to UF8's scribble-strip zones, but the zone byte will differ.
@@ -72,7 +72,7 @@ The UC1 is physically laid out to match SSL Native Bus Compressor 2's control se
 | Sidechain HPF | 6                  | 7                        |
 | Mix           | 7                  | 8                        |
 
-Channel Strip mode: the UC1 also has a channel-strip knob bank for driving Native Channel Strip 2 params (Input Trim, HPF, LPF, EQ bands, Dynamics). That mapping gets its own table once the capture shows which physical controls belong to which LinkSlots.
+Channel Strip section: the UC1's EQ + Gate/Comp knob banks drive Native Channel Strip 2 params (Input Trim, HPF, LPF, EQ bands, Dynamics) on the focused track in parallel with the Bus Comp 2 section. That mapping gets its own table once the capture shows which physical controls belong to which LinkSlots.
 
 ## GR data source — not from the plugin
 
@@ -83,7 +83,7 @@ The SSL plugins ship GR to 360° over encrypted Thrift IPC (see `plugin-ipc-note
 - [ ] USB descriptor dump — endpoints, max packet size, interface class/subclass
 - [ ] Init sequence extraction (uc1_01)
 - [ ] Idle heartbeat identification (uc1_02)
-- [ ] Layer/mode selector command (uc1_03)
+- [ ] Plugin-presence frames: what SSL 360° sends when Channel Strip 2 and/or Bus Comp 2 get loaded/removed from the focused track (uc1_03)
 - [ ] Physical-knob → event-frame ID map (uc1_04 through uc1_07)
 - [ ] Button ID map (uc1_08)
 - [ ] Display (numeric readout) frame format (uc1_09)
@@ -99,7 +99,7 @@ The SSL plugins ship GR to 360° over encrypted Thrift IPC (see `plugin-ipc-note
 |------|------|---------|
 | 2026-04-22 | `uc1_01_init_clean.pcapng` | Init/wakeup sequence on fresh enumeration — 27944 pkts to address 28, endpoints 0x00/0x80/0x02/0x81 |
 | 2026-04-22 | `uc1_02_idle_baseline.pcapng` | 10 s idle heartbeat — 11288 pkts, ~1130 pkt/s, same endpoint set |
-| _TBD_ | `uc1_03_layer_boot.pcap` | Mode switch (Bus Comp / Channel Strip) |
+| _TBD_ | `uc1_03_plugin_presence.pcapng` | Load/unload Channel Strip 2 and Bus Comp 2 on focused track — isolate the frames that light/dark each UC1 section |
 | _TBD_ | `uc1_04_knob_threshold_sweep.pcap` | Threshold full sweep |
 | _TBD_ | `uc1_05_knob_ratio_steps.pcap` | Ratio discrete steps |
 | _TBD_ | `uc1_06_knob_attack_release.pcap` | Attack + Release sweeps |

@@ -1,6 +1,6 @@
 # USB Capture on Windows (USBPcap) — UC1
 
-> **UF8 abstecken bevor irgendwas passiert.** See `protocol-notes-uc1.md` → *Capture constraints* (cap17 GR-routing problem): when UF8 and UC1 are both attached, SSL 360° steers GR / Bus Comp traffic to whichever controller owns the dedicated GR display, and UC1 wins that contest. To see the complete UC1 frame family the UC1 has to be the only SSL device on the bus.
+> **UF8 abstecken bevor irgendwas passiert.** See `protocol-notes-uc1.md` → *Capture constraints*: with both UF8 and UC1 on the bus, every analysis step has to separate the two frame streams before anything else — USB addresses change between sessions, and some frame families may look identical on the wire. Running UC1 as the only SSL device on the bus eliminates that whole class of confusion. (Whether SSL 360° actually routes certain frame families exclusively to one device — an earlier assumption from cap17 — is not settled; see `uc1-gr-routing` memory note.)
 
 macOS 15 on Apple Silicon doesn't expose XHC USB interfaces to tshark/Wireshark anymore. Windows with USBPcap is the standard reverse-engineering path. Analysis still happens on macOS — the .pcapng file transfers cleanly.
 
