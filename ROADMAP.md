@@ -29,29 +29,47 @@ Next capture/decode work: LED command formats (solo/mute/select/arm), meter comm
 
 **Milestone complete when:** User starts macOS, SSL 360° is never launched, no MCU control-surface plug-in is configured in REAPER, UF8 drives REAPER fully via the native extension, scribble strips show REAPER track colors.
 
-## Phase 2 — Config UI
+## Phase 2 — UC1 integration
+
+**Goal:** SSL 360° becomes fully redundant. UC1 behaves as a native Rea-Sixty device driving whatever SSL Bus Compressor (or other supported plugin) sits on the currently-focused REAPER track — including its dedicated GR display.
+
+UC1 was originally parked in a late phase on the assumption that UF8 could ship without it. Revisited 2026-04-22: the project stops being a credible SSL 360° replacement the moment it only covers one of the two controllers a typical user owns. Pulled forward, ahead of the config UI.
+
+### 2a — Protocol capture + decode
+
+- Windows + USBPcap session with **UF8 disconnected** (cap17 showed SSL 360° routes Bus-Comp GR to UC1 when both devices are present; we need UC1 to be the only target)
+- Capture sequence `uc1_01` through `uc1_14` covering: init, idle, layer boot, every physical knob, every button, display output, track-selection follow, static GR, dynamic GR under audio, VU meters, external sidechain
+- Decode work lands in `docs/protocol-notes-uc1.md` (living spec, mirrors `protocol-notes.md`)
+- Capture-workflow recipe in `docs/windows-capture-workflow-uc1.md` (fork of UF8 workflow, first step "unplug UF8")
+
+### 2b — UC1 device + parameter mirror (no GR yet)
+
+- `UC1Device.{cpp,h}` parallel to `UF8Device.*`, PID `0x0023`, same libusb skeleton, same init-replay pattern
+- Second `ReaSixtySurface`-style path for UC1, or extend the existing surface to fan out to both devices (TBD once the protocol is in hand)
+- Selection-follow model (new, not bank-based): `FocusedTrack` listens to `SetTrackSelected`, resolves the first Bus Comp / Channel Strip on the track, retargets every UC1 knob and button at that FX
+- Parameter mirror reuses `PluginMap` — the Bus-Comp-2 slot table already exists, it just needs an additional "physical-knob-id → LinkSlot" indirection per supported plugin instead of the V-Pot-page logic
+- Checkpoint: physical UC1 knobs move parameters on the focused track's SSL Bus Comp in real time, with values mirrored back to the UC1's display
+
+### 2c — GR pipeline
+
+- `extension/jsfx/rea_sixty_gr_probe.jsfx` — sidechain-tap envelope follower that exposes a `GR (dB)` slider the extension reads via `TrackFX_GetParam`. Ships with the extension, auto-inserted next to detected SSL compressors
+- Auto-insert policy: on `SetTrackFX*` callbacks, if an SSL Bus Comp lands on a track and the probe isn't already present, the extension inserts it post-comp with sidechain routing from the pre-comp tap
+- Tick the probe's value into the UC1 GR bar-graph frame at ~30 Hz (same timer path as parameter mirror)
+- A/B validation: record the UC1 GR readout driven by (A) SSL 360° + stock plugin vs (B) Rea-Sixty + JSFX probe under identical audio. Ballistic mismatch tolerance ≤2 dB on transients is acceptable; anything larger triggers a followup decision on whether to escalate to a Thrift-MITM path (documented but not preferred — see `docs/plugin-ipc-notes.md`)
+
+**Milestone complete when:** SSL 360° is never launched, both UF8 and UC1 drive REAPER fully via Rea-Sixty, SSL plugins respond to UC1 controls, and UC1's GR display tracks audio-driven gain reduction on the focused track.
+
+## Phase 3 — Config UI
 
 **Goal:** Mappings editable without touching code.
 
 Deliverables:
 - A WebView / Electron / native SwiftUI config UI equivalent to SSL 360°'s mapping screens: soft-keys, quick-keys, send/plugin rows, automation buttons, pan/shift, channel encoder, foot switches
 - Color-picker per button
-- Live preview on UF8
+- Live preview on UF8 **and UC1**
 - Import/export JSON configs so users can share setups
 
-**Milestone complete when:** A non-developer UF8 user can remap soft-keys via GUI, save, reload, and see the change on the hardware.
-
-## Phase 3 — UC1 support
-
-**Goal:** SSL 360° can be uninstalled — nothing depends on it anymore.
-
-Deliverables:
-- UC1 vendor-USB protocol reverse-engineering (separate capture + decode pass)
-- UC1 driver integrating with the Phase 1 architecture
-- Integration with SSL plugins (4K B / 4K E / 4K G / Channel Strip / Bus Compressor) so UC1 still drives the plugin GUIs — needs reverse-engineering of the SSL-plugin ↔ SSL-360° IPC
-- If IPC is unreachable: UC1 in a "generic channel-strip mode" driving any REAPER-selected plugin via automation of its VST parameters
-
-**Milestone complete when:** SSL 360° is uninstalled, UF8 + UC1 work fully, SSL plugins respond to UC1.
+**Milestone complete when:** A non-developer user can remap controls via GUI on either device, save, reload, and see the change on the hardware.
 
 ## Phase 4+ — Community
 
@@ -73,6 +91,6 @@ Candidate work:
 ## Working rhythm
 
 - Each phase starts with a capture/decode session (Windows box, USBPcap)
-- Decoded protocol lands in `docs/protocol-notes.md` (never let a capture go un-documented)
+- Decoded protocol lands in the matching spec (`docs/protocol-notes.md` for UF8, `docs/protocol-notes-uc1.md` for UC1; never let a capture go un-documented)
 - Code in small layers with unit tests where the logic is pure (checksum, palette, frame parse)
 - Extension/daemon rebuilds verified on Mac Studio and MacBook before anything lands on main

@@ -1,0 +1,77 @@
+desc:Rea-Sixty GR Probe
+author:Rea-Sixty
+tags:metering analysis
+
+// Envelope-follower GR probe. Shipped with the Rea-Sixty REAPER extension to
+// surface gain-reduction telemetry from SSL Bus Compressor (and other
+// compressors) without relying on SSL's encrypted plugin-to-360° Thrift
+// channel.
+//
+// Placement: AFTER the compressor on the same track.
+//   - Channels 1-2: main audio (compressor OUTPUT, passed through unchanged)
+//   - Channels 3-4: sidechain tap of the compressor INPUT (pre-comp signal)
+//
+// REAPER routes that sidechain tap via the FX plug-in pin connector. The
+// extension wires it automatically when it auto-inserts this probe next to
+// a detected SSL compressor.
+//
+// GR calculation:
+//   gr_db = 20*log10(RMS_pre) - 20*log10(RMS_post)
+// GR is positive when the compressor is reducing gain (pre louder than post).
+// The extension reads slider1 (gr_db) via TrackFX_GetParam on its timer tick
+// and pushes the value to the UC1's GR bar-graph.
+//
+// Ballistic note: detector attack/release here will not match the host
+// plugin's internal detector bit-for-bit. Tolerance target is ≤2 dB on
+// transients; if the UC1 meter feels visibly offset from the plugin GUI in
+// A/B listening, tune atk_ms / rel_ms or escalate per ROADMAP phase 2c.
+
+slider1:gr_db=0<0,30,0.01>GR (dB)
+slider2:atk_ms=5<0.1,50,0.1>Envelope attack (ms)
+slider3:rel_ms=100<10,500,1>Envelope release (ms)
+
+in_pin:Main L
+in_pin:Main R
+in_pin:Sidechain L (pre-comp)
+in_pin:Sidechain R (pre-comp)
+out_pin:Main L
+out_pin:Main R
+
+@init
+eps = 1e-12;
+env_post = 0;
+env_pre  = 0;
+
+@slider
+atk_coeff = 1 - exp(-1 / (srate * atk_ms * 0.001));
+rel_coeff = 1 - exp(-1 / (srate * rel_ms * 0.001));
+
+@sample
+// Squared-sum of both channels = mean-square magnitude (x2; cancels in dB diff).
+post = spl0 * spl0 + spl1 * spl1;
+pre  = spl2 * spl2 + spl3 * spl3;
+
+// One-pole envelope followers, attack coefficient on rising edges, release
+// coefficient on falling edges. Tracks the loud part fast, decays gently.
+env_post = post > env_post
+         ? env_post + atk_coeff * (post - env_post)
+         : env_post + rel_coeff * (post - env_post);
+
+env_pre  = pre  > env_pre
+         ? env_pre  + atk_coeff * (pre  - env_pre)
+         : env_pre  + rel_coeff * (pre  - env_pre);
+
+// Main path: pass the post-compressor signal through unchanged.
+// (spl0 and spl1 need no action — JSFX default is pass-through on the first
+// two out_pins.)
+
+@block
+// One GR computation per audio block, ~1 kHz at 48 kHz/64-sample. That's
+// more than enough headroom for the extension's 30 Hz timer read.
+db_post = 10 * log10(env_post + eps);
+db_pre  = 10 * log10(env_pre  + eps);
+gr      = db_pre - db_post;
+gr < 0 ? gr = 0;
+gr > 30 ? gr = 30;
+slider1 = gr;
+sliderchange(slider1);
