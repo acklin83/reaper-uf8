@@ -37,9 +37,7 @@ PluginBindings makeBusComp2Bindings()
     auto b = makeEmpty("Bus Compressor 2", "BC 2");
     b.knobParam[knob::kBCThreshold] = 2;
     b.knobParam[knob::kBCMakeup]    = 3;
-    // Attack's UC1 knob ID isn't confirmed yet (0x10 is the likely
-    // candidate — we never captured a clean sweep with display evidence).
-    // Leave it kParamNone for now; add when uc1_XX pins it down.
+    b.knobParam[knob::kBCAttack]    = 4;
     b.knobParam[knob::kBCRelease]   = 5;
     b.knobParam[knob::kBCRatio]     = 6;
     b.knobParam[knob::kBCScHpf]     = 7;

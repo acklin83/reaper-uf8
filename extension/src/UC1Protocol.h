@@ -36,22 +36,22 @@ constexpr uint8_t  kEpIn       = 0x81;
 // Comp 2 loaded they drive Bus Comp params, without it SSL 360° maps some
 // of them (0x0C, 0x16) to Channel Strip params instead.
 namespace knob {
-    // Top-center V-Pots — Bus Comp 2 mapping
-    // (kBCMakeup and kBCScHpf were swapped in the initial decode of
-    //  uc1_07 — first hardware test with the param-name diagnostic
-    //  confirmed physical "S/C HPF" V-Pot fires 0x0F and physical
-    //  "Makeup" fires 0x16, opposite of my zone-0x05-text attribution.)
+    // Top 7 Bus Comp V-Pots — IDs 0x0E..0x14, confirmed from uc1_XX
+    // hardware session 2026-04-23 via the per-ID param-name diagnostic.
+    // Each physical knob has a unique ID; no V-Pot repurposing of the
+    // Bus Comp row (the earlier hypothesis that 0x0C/0x16 repurpose
+    // was wrong — those IDs belong to Channel-Strip-only pots).
     constexpr uint8_t kBCRatio      = 0x0E;
     constexpr uint8_t kBCScHpf      = 0x0F;
+    constexpr uint8_t kBCAttack     = 0x10;
     constexpr uint8_t kBCRelease    = 0x11;
     constexpr uint8_t kBCThreshold  = 0x12;
+    constexpr uint8_t kBCMakeup     = 0x13;
     constexpr uint8_t kBCMix        = 0x14;
-    constexpr uint8_t kBCMakeup     = 0x16;
-    // kBCAttack probably 0x10 — not yet directly verified
 
-    // Top-center V-Pots — Channel Strip repurposing when no Bus Comp 2
+    // Channel-Strip-only V-Pot IDs (no Bus Comp collision)
     constexpr uint8_t kCSInputTrim  = 0x0C;
-    constexpr uint8_t kCSFaderLevel = 0x16;  // collides with kBCMakeup by design — repurposes
+    constexpr uint8_t kCSFaderLevel = 0x16;
 
     // Dedicated Channel Strip left-side pots (EQ + filters)
     constexpr uint8_t kCSLowPass    = 0x00;

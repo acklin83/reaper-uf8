@@ -20,6 +20,7 @@ const char* labelForKnob(uint8_t knobId, bool busCompContext)
         switch (knobId) {
             case knob::kBCThreshold: return "Threshold";
             case knob::kBCMakeup:    return "Makeup";
+            case knob::kBCAttack:    return "Attack";
             case knob::kBCRelease:   return "Release";
             case knob::kBCRatio:     return "Ratio";
             case knob::kBCMix:       return "Mix";
