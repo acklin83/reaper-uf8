@@ -59,6 +59,45 @@ UC1 was originally parked in a late phase on the assumption that UF8 could ship 
 
 **Milestone complete when:** SSL 360° is never launched, both UF8 and UC1 drive REAPER fully via Rea-Sixty, SSL plugins respond to UC1 controls, and UC1's GR display tracks audio-driven gain reduction on the focused track.
 
+## Phase 2.5 — Session navigation & generic FX mapping
+
+**Goal:** Features that SSL 360° does not offer at all — large-session ergonomics, and user-programmable control over *any* VST/JS/AU plugin, not just SSL's.
+
+No new captures required; everything here is REAPER-API work on top of the finished Phase 1/2 foundation.
+
+### 2.5a — Folder Mode
+
+- Bank resolver filters to folder parents only; child tracks hidden by default
+- `SEL` long-press (~500 ms, detected on press-edge + release-edge we already parse) toggles expanded state for that parent
+- "Has children" indicator in the Channel Number zone (e.g. `+`/`−` sigil) and/or a SEL-LED blink pattern
+- Default one level per expand; `Shift`-modifier (or equivalent) expands all nested levels
+- Bank-position stable across expand/collapse — user never gets surprise-scrolled
+
+### 2.5b — Show Only Selected + 8 selection slots
+
+- Bank resolver switches from "`GetTrack(i)` 0..N" to a project-local selection list
+- 8 slots persisted via `SetProjExtState("rea_sixty", "selset_N", …)`; store Track-**GUIDs** not indices so reorders/deletes don't corrupt sets
+- UX: a modifier key toggles Selset-Mode; top soft-keys `0x18..0x1F` over each strip = slot 1..8. Tap = recall, hold (>1 s) = store
+- Recall prunes missing tracks gracefully and surfaces count in the Value Line zone
+- Inherits GUID-store infrastructure from 2.5a
+
+### 2.5c — Show Sends / Show Receives
+
+- Focus-variant (SSL 360° Send-Layer equivalent): on the focused track, strips 0..7 represent the first 8 sends; fader = send level, CUT = send mute, scribble = destination name, Channel Number Zone = send index, Page L/R pages through >8
+- Receives via the same UI, toggled with a dedicated layer button
+- Data: `GetTrackNumSends(tr, 0)` / `GetTrackSendInfo_Value` / `GetTrackSendName`
+- Deferred optional variant: a routing-map overlay that highlights send destinations across banks with SEL-LED blink. Decide after (a) ships.
+
+### 2.5d — Generic FX-parameter mapping (user-programmable Plug-in Mixer)
+
+- Learn-mode: modifier + move any UF8 V-Pot or touch any soft-button → binding captured from `GetTouchedOrFocusedFX()` + `GetLastTouchedFX()`
+- Binding schema in project extState: `slot.<strip>.<page>.<control> → {fxGuid, paramIdx, displayFormat}`. Guid-keyed so FX-slot reorders don't break mappings
+- Value display via `TrackFX_GetFormattedParamValue` — plugin-provided formatting ("−3.5 dB", "42 %"), no per-plugin formatter code needed
+- Multiple pages per strip; soft-buttons bindable as toggle or momentary
+- Relationship to UC1: UC1 keeps its hardcoded SSL-plugin tables (physical layout is built for Bus Comp / Channel Strip). Generic mapping lives on UF8, where the physical controls are already generic
+
+**Milestone complete when:** A user can (a) navigate a 200-track folder session on UF8 without leaving the surface, (b) save/recall 8 selection sets per project, (c) mix sends from UF8, and (d) bind any third-party plugin parameter to any V-Pot or soft-button with learn-mode and see the plugin's formatted value on the scribble strip.
+
 ## Phase 3 — Config UI
 
 **Goal:** Mappings editable without touching code.
