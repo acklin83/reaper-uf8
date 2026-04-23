@@ -469,7 +469,12 @@ void UC1Surface::refresh()
         return fallback;
     };
 
-    std::string csName = bindings.channelMap ? resolveTrackName() : std::string{};
+    // CS slot always shows the focused track's name — Rea-Sixty uses
+    // the Channel Strip display as the general "current track" view,
+    // whether or not an SSL Channel Strip 2 plugin is on the track.
+    // BC slot stays plugin-specific since its knobs are only
+    // meaningful when Bus Comp 2 is actually present.
+    std::string csName = resolveTrackName();
     std::string bcName = bindings.busCompMap ? resolveTrackName() : std::string{};
 
     // Diag — one-shot log of what we're pushing so the user can
