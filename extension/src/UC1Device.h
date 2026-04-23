@@ -25,6 +25,16 @@ struct libusb_transfer;
 
 namespace uc1 {
 
+// Diagnostic hooks — useful when the UC1 falls back to "Attempting to
+// reconnect to SSL 360°". Counters are lifetime totals on the current
+// process; poll them from the main thread and print deltas once per
+// second to see what's actually on the wire.
+uint64_t debugOutFrames();
+uint64_t debugOutBytes();
+uint64_t debugOutErrors();
+uint64_t debugInCallbacks();
+uint64_t debugInBytes();
+
 class UC1Device {
 public:
     using ButtonHandler   = std::function<void(const ButtonEvent&)>;

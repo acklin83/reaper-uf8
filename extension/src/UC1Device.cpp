@@ -2,14 +2,34 @@
 
 #include <libusb.h>
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <queue>
 #include <span>
 
 namespace uc1 {
+
+// Diagnostic counters — bumped from the worker + IN callback, read from
+// the main thread to log bytes-per-second and error rates. Useful for
+// "is anything actually happening on the wire?" triage.
+struct IoStats {
+    std::atomic<uint64_t> outFramesSent{0};
+    std::atomic<uint64_t> outBytesSent{0};
+    std::atomic<uint64_t> outErrors{0};
+    std::atomic<uint64_t> inCallbacks{0};
+    std::atomic<uint64_t> inBytes{0};
+};
+static IoStats g_stats;
+// Exposed so main.cpp can poll and ShowConsoleMsg once per second.
+uint64_t debugOutFrames()   { return g_stats.outFramesSent.load();   }
+uint64_t debugOutBytes()    { return g_stats.outBytesSent.load();    }
+uint64_t debugOutErrors()   { return g_stats.outErrors.load();       }
+uint64_t debugInCallbacks() { return g_stats.inCallbacks.load();     }
+uint64_t debugInBytes()     { return g_stats.inBytes.load();         }
 
 namespace {
 constexpr uint8_t  kInterface = 0;
@@ -165,8 +185,10 @@ void UC1Device::workerLoop_()
         if (now - lastGr >= kGrStreamInterval) {
             auto gr = buildGrMeter(grDb_.load(std::memory_order_relaxed));
             int t = 0;
-            libusb_bulk_transfer(handle_, kEpOut, gr.data(),
-                                 static_cast<int>(gr.size()), &t, 100);
+            const int rc = libusb_bulk_transfer(handle_, kEpOut, gr.data(),
+                                                static_cast<int>(gr.size()), &t, 100);
+            if (rc < 0) { g_stats.outErrors.fetch_add(1); lastError_ = libusb_error_name(rc); }
+            else         { g_stats.outFramesSent.fetch_add(1); g_stats.outBytesSent.fetch_add(gr.size()); }
             lastGr = now;
         }
 
@@ -174,8 +196,10 @@ void UC1Device::workerLoop_()
         if (now - lastKeepalive >= kKeepaliveInterval) {
             auto ka = buildKeepalive(keepaliveCounter);
             int t = 0;
-            libusb_bulk_transfer(handle_, kEpOut, ka.data(),
-                                 static_cast<int>(ka.size()), &t, 100);
+            const int rc = libusb_bulk_transfer(handle_, kEpOut, ka.data(),
+                                                static_cast<int>(ka.size()), &t, 100);
+            if (rc < 0) { g_stats.outErrors.fetch_add(1); lastError_ = libusb_error_name(rc); }
+            else         { g_stats.outFramesSent.fetch_add(1); g_stats.outBytesSent.fetch_add(ka.size()); }
             keepaliveCounter = (keepaliveCounter + 1) & 0x03;
             lastKeepalive    = now;
         }
@@ -187,8 +211,11 @@ void UC1Device::workerLoop_()
                                                 static_cast<int>(frame.size()),
                                                 &transferred, 500);
             if (rc < 0) {
+                g_stats.outErrors.fetch_add(1);
                 lastError_ = std::string("bulk OUT failed: ") + libusb_error_name(rc);
-                // Keep running — transient errors shouldn't kill the surface.
+            } else {
+                g_stats.outFramesSent.fetch_add(1);
+                g_stats.outBytesSent.fetch_add(frame.size());
             }
         }
 
@@ -221,6 +248,9 @@ void UC1Device::readCallback_(libusb_transfer* xfer)
     if (xfer->status == LIBUSB_TRANSFER_COMPLETED && xfer->actual_length > 0) {
         std::span<const uint8_t> data{xfer->buffer,
                                       static_cast<size_t>(xfer->actual_length)};
+
+        g_stats.inCallbacks.fetch_add(1);
+        g_stats.inBytes.fetch_add(static_cast<size_t>(xfer->actual_length));
 
         if (self->rawInputHandler_) {
             self->rawInputHandler_(xfer->buffer, static_cast<size_t>(xfer->actual_length));

@@ -601,8 +601,27 @@ ReaSixtySurface::ReaSixtySurface()
     // Best-effort UC1 attach — absence is fine, UF8 runs standalone.
     g_uc1_dev = std::make_unique<uc1::UC1Device>();
     if (g_uc1_dev->open()) {
+        ShowConsoleMsg("Rea-Sixty UC1: opened\n");
         g_uc1_surface = std::make_unique<uc1::UC1Surface>();
         g_uc1_surface->attach(*g_uc1_dev);
+        // Dump the first handful of raw IN frames to the console so we
+        // can see what UC1 is sending on its own vs. only after we push
+        // something. Useful for diagnosing connection-lost failures.
+        static int kUc1DumpRemaining = 12;
+        g_uc1_dev->setRawInputHandler([](const uint8_t* data, size_t len) {
+            if (kUc1DumpRemaining <= 0) return;
+            --kUc1DumpRemaining;
+            char buf[256];
+            int off = std::snprintf(buf, sizeof(buf), "UC1 IN len=%zu ", len);
+            for (size_t i = 0; i < len && off + 4 < (int)sizeof(buf); ++i) {
+                off += std::snprintf(buf + off, sizeof(buf) - off, "%02x", data[i]);
+            }
+            if (off + 2 < (int)sizeof(buf)) {
+                buf[off++] = '\n';
+                buf[off] = '\0';
+            }
+            ShowConsoleMsg(buf);
+        });
         // Focus whatever track REAPER currently considers "last touched"
         // so UC1 has something meaningful to drive from the first click.
         if (auto* tr = GetLastTouchedTrack()) {
@@ -1527,6 +1546,29 @@ void onTimer()
     if (g_sync) g_sync->refresh(reaperColorForVisibleSlot);
     pushZonesForVisibleSlots();
     if (g_uc1_surface) g_uc1_surface->poll();
+
+    // Once-per-second UC1 wire stats — prints deltas so we can see
+    // whether OUT flow is stalling or IN is dropping. Remove once the
+    // connection is stable.
+    static auto lastStat = std::chrono::steady_clock::now();
+    static uint64_t prevOutFrames = 0, prevInBytes = 0, prevOutErrors = 0;
+    if (g_uc1_dev) {
+        auto now = std::chrono::steady_clock::now();
+        if (now - lastStat >= std::chrono::seconds(1)) {
+            const auto of = uc1::debugOutFrames();
+            const auto ib = uc1::debugInBytes();
+            const auto oe = uc1::debugOutErrors();
+            char line[128];
+            std::snprintf(line, sizeof(line),
+                "UC1 stats: OUT=%llu frames/s IN=%llu bytes/s errs=%llu\n",
+                (unsigned long long)(of - prevOutFrames),
+                (unsigned long long)(ib - prevInBytes),
+                (unsigned long long)(oe - prevOutErrors));
+            ShowConsoleMsg(line);
+            prevOutFrames = of; prevInBytes = ib; prevOutErrors = oe;
+            lastStat = now;
+        }
+    }
 }
 
 } // anonymous
