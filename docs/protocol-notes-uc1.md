@@ -95,7 +95,7 @@ Bank → Cell → Button map (derived from `uc1_21` direct evidence):
 
 | ID | Button | Bank | Cell |
 |----|--------|-----:|-----:|
-| `0x08` | HF Bell | `0x02` | TBD (not fired with Bus Comp 2 loaded) |
+| `0x08` | HF Bell | `0x02` | `0x89` (from `uc1_22` — 10× presses with CS 2 loaded) |
 | `0x09` | EQ Type | `0x02` | `0x51` |
 | `0x0A` | EQ In | `0x02` | `0x50` |
 | `0x0B` | LF Bell | `0x02` | `0x23` |
@@ -282,6 +282,7 @@ The SSL plugins ship GR to 360° over encrypted Thrift IPC (see `plugin-ipc-note
 | 2026-04-23 | `uc1_19_buttons_4ke.pcapng` | All 16 Channel-Strip-area buttons, one press each, 4K E loaded (60 s, 67 384 pkts) — full button-ID map via zone 0x03 display text |
 | 2026-04-23 | `uc1_20_buttons_cs2.pcapng` | Same 16-button sequence with SSL Native Channel Strip 2 (60 s, 67 372 pkts) — IDs confirmed stable across plugins; HF Bell + EQ Type gated off by CS 2 |
 | 2026-04-23 | `uc1_21_led_buscomp.pcapng` | 17 buttons incl. Bus Comp IN, Bus Comp 2 loaded (75 s, 84 276 pkts) — Bus Comp IN = 0x0C confirmed; full `FF 13 04` per-button LED cell map derived; HF Bell silent with Bus Comp 2 |
+| 2026-04-23 | `uc1_22_bells_cs2.pcapng` | HF Bell + LF Bell 10× each, CS 2 (30 s, 33 752 pkts) — HF Bell LED cell = 0x89; overturns uc1_20 "HF Bell silent with CS 2" (was contact issue) |
 | 2026-04-22 | `uc1_01_init_clean.pcapng` | Init/wakeup sequence on fresh enumeration — 27944 pkts to address 28, endpoints 0x00/0x80/0x02/0x81 |
 | 2026-04-22 | `uc1_02_idle_baseline.pcapng` | 10 s idle heartbeat — 11288 pkts, ~1130 pkt/s, same endpoint set. Baseline input for every diff. |
 | 2026-04-22 | `uc1_03_plugin_presence.pcapng` | Plugin load/unload transitions (30 s, 34298 pkts, 315 novel): empty → +BusComp2 → +ChStrip2 → −BusComp2 → −ChStrip2 |
