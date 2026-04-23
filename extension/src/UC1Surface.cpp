@@ -291,10 +291,72 @@ void UC1Surface::pushButtonLed_(uint8_t buttonId, bool on)
 void UC1Surface::refresh()
 {
     if (!device_) return;
-    // TODO: re-read all plugin param states and push corresponding LED +
-    // display updates. First implementation pass keeps the surface
-    // reactive (responds to user interaction); a full state-sync
-    // broadcast on track focus change comes next.
+
+    auto bindings = focusedTrack_ ? lookupBindingsOnTrack(focusedTrack_) : UC1Bindings{};
+
+    // Plugin-name tag (zone 0x10) — shows which CS plugin variant is
+    // currently driving the Channel Strip section. Bus Comp 2 isn't
+    // reflected here in captures; when neither plugin is present we
+    // leave zone 0x10 blank so SSL-style "No Plug-ins" status lives
+    // in zone 0x04 (which we don't populate yet).
+    const char* nameTag =
+        bindings.channelMap ? bindings.channelMap->shortName :
+        bindings.busCompMap ? bindings.busCompMap->shortName :
+        "    ";
+    device_->send(buildDisplayText(zone::kPluginNameTag, nameTag, 4));
+
+    // Push each button's LED to mirror its current plugin-param state.
+    // We walk the full button-ID range and ask the appropriate binding
+    // for each one; kParamNone or no binding → LED off.
+    MediaTrack* tr = static_cast<MediaTrack*>(focusedTrack_);
+    auto ledForParam = [&](const PluginBindings* map, int fxIdx, uint8_t btnId) {
+        if (!map || !tr) return false;
+        const int p = map->buttonParam[btnId];
+        if (p == kParamNone) return false;
+        const double v = TrackFX_GetParamNormalized(tr, fxIdx, p);
+        return v >= 0.5;
+    };
+
+    for (uint8_t btn = 0; btn < 0x20; ++btn) {
+        const auto cell = cellForButton(btn);
+        if (cell.bank == 0 && cell.cell == 0) continue;  // not an LED
+
+        bool on = false;
+        switch (classifyButton(btn)) {
+            case ControlDomain::BusComp:
+                if (bindings.busCompMap && tr) {
+                    on = TrackFX_GetEnabled(tr, bindings.busCompFxIdx);
+                }
+                break;
+            case ControlDomain::ChannelStrip:
+                if (btn == button::kChannelIn) {
+                    on = bindings.channelMap && tr
+                         && TrackFX_GetEnabled(tr, bindings.channelFxIdx);
+                } else {
+                    on = ledForParam(bindings.channelMap,
+                                     bindings.channelFxIdx, btn);
+                }
+                break;
+        }
+
+        // Fine tracks the surface's own modifier state, not a plugin param.
+        if (btn == button::kFine) on = fineMode_.load(std::memory_order_relaxed);
+
+        // Solo / Cut / Solo Clear still route through REAPER track-state
+        // rather than plugin params — skip them here; the track-state
+        // hook will push LEDs once wired up.
+        if (btn == button::kSolo || btn == button::kCut
+            || btn == button::kSoloClear) continue;
+
+        device_->send(buildLedWrite(cell.bank, cell.cell,
+                                    on ? led::kStateOn : led::kStateOff));
+    }
+
+    // Zero the Bus Comp GR readout so stale values from the last track
+    // don't linger until the JSFX probe next ticks.
+    if (bindings.busCompMap) {
+        device_->send(buildZeroGr());
+    }
 }
 
 void UC1Surface::pushGainReduction(float dB)
