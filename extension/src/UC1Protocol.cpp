@@ -146,7 +146,10 @@ void appendDigit(std::vector<std::vector<uint8_t>>& out,
 {
     const uint8_t segs = blank ? 0 : kDigitSegments[digit];
     for (int s = 0; s < 7; ++s) {
-        const uint8_t state = (segs & (1 << s)) ? 0xFF : 0x00;
+        // 7-seg segments use state=0x01 for on, 0x00 for off (unlike
+        // button LEDs which use 0xFF / 0x00). The "mode" byte (byte3)
+        // is 0x00 for 7-seg vs 0x01 for buttons.
+        const uint8_t state = (segs & (1 << s)) ? 0x01 : 0x00;
         out.push_back(buildLedWrite(0x01, baseCell + s, state));
         // buildLedWrite uses byte3=0x01 (VU flag) — but 7-seg needs
         // byte3=0x00. Rewrite that byte.
@@ -187,7 +190,7 @@ std::vector<std::vector<uint8_t>> buildSevenSeg(unsigned int value)
         // those correspond to "0" or "2" shapes, the display will be
         // slightly wrong but the tens+ones will be correct.
         for (uint8_t c : {0x00, 0x03, 0x04, 0x05}) {
-            auto f = buildLedWrite(0x01, c, 0xFF);
+            auto f = buildLedWrite(0x01, c, 0x01);
             f[5] = 0x00;
             uint32_t sum = 0;
             for (size_t i = 1; i < f.size() - 1; ++i) sum += f[i];
