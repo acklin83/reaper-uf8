@@ -331,12 +331,39 @@ std::string compactUnit(std::string_view s)
     };
     for (auto u : units) {
         auto p = r.rfind(u);
-        if (p != std::string::npos) {
-            r.erase(p, 1);  // drop the leading space from the unit token
-            break;
-        }
+        if (p == std::string::npos) continue;
+        // Only strip the separator space if the char immediately
+        // before it is digit/decimal — i.e. a numeric value. For
+        // "OFF Hz" the char before the space is 'F', not numeric, so
+        // we leave the whole string alone (display will show "OFF").
+        if (p == 0) break;
+        const char prev = r[p - 1];
+        const bool isNumeric = (prev >= '0' && prev <= '9') || prev == '.';
+        if (!isNumeric) break;
+        r.erase(p, 1);
+        break;
     }
     return r;
+}
+
+// For non-numeric values like "OFF", "AUTO", "N/A" — drop the unit
+// token entirely. SSL 360° shows just "OFF" without " Hz" in that
+// case (uc1_07 captured "S/C HPF         OFF Hz" but the OFF plays
+// cleaner without the trailing unit).
+std::string stripUnitIfNonNumeric(std::string_view s)
+{
+    static constexpr std::string_view units[] = {
+        " dB", " Hz", " kHz", " ms", " s", " %", " :1",
+    };
+    for (auto u : units) {
+        auto p = s.rfind(u);
+        if (p == std::string::npos) continue;
+        if (p == 0) return std::string{s};
+        const char prev = s[p - 1];
+        const bool isNumeric = (prev >= '0' && prev <= '9') || prev == '.';
+        if (!isNumeric) return std::string{s.substr(0, p)};
+    }
+    return std::string{s};
 }
 
 // Right-pad / left-pad a value string to a fixed width. UC1's numeric
@@ -370,8 +397,10 @@ void UC1Surface::pushKnobReadout_(uint8_t knobId, void* trackRaw, int fxIdx,
     TrackFX_FormatParamValueNormalized(tr, fxIdx, vst3Param, cur,
                                        formatted, sizeof(formatted));
     // UC1 expects compact "X.XdB" / "X.XHz" / "X%" and a fixed-width
-    // value field so digits land in the right LCD slot.
-    std::string value = padValueFixed(compactUnit(formatted), 7);
+    // value field so digits land in the right LCD slot. Non-numeric
+    // values ("OFF", "AUTO", "N/A") drop the unit entirely.
+    std::string value = padValueFixed(
+        stripUnitIfNonNumeric(compactUnit(formatted)), 7);
 
     auto readout = formatReadout(label, value);
 
