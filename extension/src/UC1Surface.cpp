@@ -170,10 +170,20 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
     const bool logThis = (ev.id < 0x20 && kPerIdRemaining[ev.id] > 0);
     if (logThis) --kPerIdRemaining[ev.id];
 
-    // CHANNEL encoder — scrolls through REAPER tracks. Each click
-    // advances the track selection by 1 (positive = next track,
-    // negative = previous). Wraps at project bounds.
+    // CHANNEL encoder — scrolls through REAPER tracks. The UC1's
+    // CHANNEL encoder sends ~4 delta ticks per physical detent click,
+    // much finer than the Bus Comp V-Pots (which send 1 per detent).
+    // Accumulate across events so one detent = one track step.
     if (ev.id == knob::kChannelEncoder) {
+        static int acc = 0;
+        constexpr int kTicksPerStep = 4;
+        acc += ev.delta;
+        int step = acc / kTicksPerStep;
+        acc -= step * kTicksPerStep;
+        if (step == 0) {
+            ++stats_.knobEventsHandled;
+            return;
+        }
         const int n = CountTracks(nullptr);
         if (n <= 0) return;
         int cur = -1;
@@ -182,7 +192,7 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
                 GetMediaTrackInfo_Value(static_cast<MediaTrack*>(focusedTrack_),
                                         "IP_TRACKNUMBER")) - 1;
         }
-        int next = cur + ev.delta;
+        int next = cur + step;
         if (next < 0) next = 0;
         if (next >= n) next = n - 1;
         MediaTrack* tr = GetTrack(nullptr, next);
@@ -195,8 +205,8 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
         if (logThis) {
             char line[96];
             std::snprintf(line, sizeof(line),
-                "UC1 CHANNEL delta=%d → track %d of %d\n",
-                (int)ev.delta, next + 1, n);
+                "UC1 CHANNEL delta=%d step=%d → track %d of %d\n",
+                (int)ev.delta, step, next + 1, n);
             ShowConsoleMsg(line);
         }
         ++stats_.knobEventsHandled;
