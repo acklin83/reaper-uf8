@@ -447,9 +447,12 @@ void UC1Surface::refresh()
 
     auto bindings = focusedTrack_ ? lookupBindingsOnTrack(focusedTrack_) : UC1Bindings{};
 
-    // Track name push — zone 0x04. One active slot at positions 14..27
-    // plus a possible second slot at 29+. Writes both so whichever
-    // physical LCD area reads which position gets the right name.
+    // Track name push — zone 0x04. Show the track name regardless of
+    // whether an SSL plugin is loaded (UF8 does the same — the UC1's
+    // display should reflect which REAPER track is currently focused,
+    // even with no BC/CS plugin on it). Route to both slots; SSL 360°
+    // would only populate the slot for the plugin that's loaded, but
+    // doubling up is harmless and covers the "focused-track-only" case.
     std::string csName, bcName;
     if (focusedTrack_) {
         MediaTrack* tr = static_cast<MediaTrack*>(focusedTrack_);
@@ -457,8 +460,16 @@ void UC1Surface::refresh()
         if (GetSetMediaTrackInfo_String(tr, "P_NAME", nameBuf, false)
             && nameBuf[0] != '\0')
         {
-            if (bindings.channelMap) csName = nameBuf;
-            if (bindings.busCompMap) bcName = nameBuf;
+            csName = nameBuf;
+            bcName = nameBuf;
+        } else {
+            // REAPER tracks with no explicit name still have an index —
+            // show "Track N" so the UC1 never looks dead.
+            int idx = static_cast<int>(GetMediaTrackInfo_Value(tr, "IP_TRACKNUMBER"));
+            char fallback[32];
+            std::snprintf(fallback, sizeof(fallback), "Track %d", idx);
+            csName = fallback;
+            bcName = fallback;
         }
     }
 
