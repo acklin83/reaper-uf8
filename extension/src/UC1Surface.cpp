@@ -170,32 +170,29 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
     const bool logThis = (ev.id < 0x20 && kPerIdRemaining[ev.id] > 0);
     if (logThis) --kPerIdRemaining[ev.id];
 
-    // CHANNEL encoder — scrolls through REAPER tracks. The UC1's
-    // CHANNEL encoder sends ~4 delta ticks per physical detent click,
-    // much finer than the Bus Comp V-Pots. Accumulate across events
-    // so one detent = one track step. Clear the accumulator on any
-    // direction change — otherwise leftover same-sign residue eats
-    // the first reversed click.
+    // Helper for fine-tick encoders (CHANNEL, BC): accumulate deltas
+    // across events so N ticks = 1 physical click. Direction change
+    // resets accumulator to avoid residue eating the first reversed
+    // click.
+    auto stepFromAccumulator = [&ev](int& acc, int ticksPerStep) -> int {
+        if ((ev.delta > 0 && acc < 0) || (ev.delta < 0 && acc > 0)) acc = 0;
+        acc += ev.delta;
+        int step = acc / ticksPerStep;
+        acc -= step * ticksPerStep;
+        return step;
+    };
+
+    // CHANNEL encoder — scroll through ALL REAPER tracks. ~4 ticks/click.
     if (ev.id == knob::kChannelEncoder) {
         static int acc = 0;
-        constexpr int kTicksPerStep = 4;
-        if ((ev.delta > 0 && acc < 0) || (ev.delta < 0 && acc > 0)) {
-            acc = 0;
-        }
-        acc += ev.delta;
-        int step = acc / kTicksPerStep;
-        acc -= step * kTicksPerStep;
-        if (step == 0) {
-            ++stats_.knobEventsHandled;
-            return;
-        }
+        int step = stepFromAccumulator(acc, 4);
+        if (step == 0) { ++stats_.knobEventsHandled; return; }
         const int n = CountTracks(nullptr);
         if (n <= 0) return;
         int cur = -1;
         if (focusedTrack_) {
-            cur = static_cast<int>(
-                GetMediaTrackInfo_Value(static_cast<MediaTrack*>(focusedTrack_),
-                                        "IP_TRACKNUMBER")) - 1;
+            cur = static_cast<int>(GetMediaTrackInfo_Value(
+                static_cast<MediaTrack*>(focusedTrack_), "IP_TRACKNUMBER")) - 1;
         }
         int next = cur + step;
         if (next < 0) next = 0;
@@ -203,8 +200,6 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
         MediaTrack* tr = GetTrack(nullptr, next);
         if (tr) {
             SetOnlyTrackSelected(tr);
-            // Ensure the focused track updates even if REAPER doesn't
-            // fire SetSurfaceSelected in the expected order.
             setFocusedTrack(tr);
         }
         if (logThis) {
@@ -212,6 +207,60 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
             std::snprintf(line, sizeof(line),
                 "UC1 CHANNEL delta=%d step=%d → track %d of %d\n",
                 (int)ev.delta, step, next + 1, n);
+            ShowConsoleMsg(line);
+        }
+        ++stats_.knobEventsHandled;
+        return;
+    }
+
+    // BC encoder — scroll only through tracks that have a plugin
+    // targeted by the Bus-Comp section (currently just Bus Compressor
+    // 2; the Link-System config page will eventually let users route
+    // other plugins here). ~3 ticks/click.
+    if (ev.id == knob::kBcEncoder) {
+        static int acc = 0;
+        int step = stepFromAccumulator(acc, 3);
+        if (step == 0) { ++stats_.knobEventsHandled; return; }
+        const int n = CountTracks(nullptr);
+        if (n <= 0) return;
+
+        // Collect all tracks that currently own a BC-section plugin.
+        std::vector<MediaTrack*> bcTracks;
+        bcTracks.reserve(n);
+        int curBcIdx = -1;
+        for (int i = 0; i < n; ++i) {
+            MediaTrack* t = GetTrack(nullptr, i);
+            if (!t) continue;
+            auto b = lookupBindingsOnTrack(t);
+            if (b.busCompMap) {
+                if (t == focusedTrack_) curBcIdx = static_cast<int>(bcTracks.size());
+                bcTracks.push_back(t);
+            }
+        }
+
+        if (bcTracks.empty()) {
+            if (logThis) ShowConsoleMsg("UC1 BC encoder: no track has Bus Comp\n");
+            ++stats_.knobEventsHandled;
+            return;
+        }
+
+        // If focused track isn't itself BC-hosting, step from the
+        // first BC track instead of from -1 (would wrap weirdly).
+        if (curBcIdx < 0) curBcIdx = (step > 0) ? -1 : bcTracks.size();
+        int nextIdx = curBcIdx + step;
+        if (nextIdx < 0) nextIdx = 0;
+        if (nextIdx >= static_cast<int>(bcTracks.size()))
+            nextIdx = static_cast<int>(bcTracks.size()) - 1;
+
+        MediaTrack* tr = bcTracks[nextIdx];
+        SetOnlyTrackSelected(tr);
+        setFocusedTrack(tr);
+
+        if (logThis) {
+            char line[128];
+            std::snprintf(line, sizeof(line),
+                "UC1 BC delta=%d step=%d → bc-track %d of %zu\n",
+                (int)ev.delta, step, nextIdx + 1, bcTracks.size());
             ShowConsoleMsg(line);
         }
         ++stats_.knobEventsHandled;

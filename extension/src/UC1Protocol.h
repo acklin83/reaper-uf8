@@ -58,6 +58,13 @@ namespace knob {
     // REAPER's track selection.
     constexpr uint8_t kChannelEncoder = 0x0D;
 
+    // Secondary encoder right of the central screen. SSL uses it to
+    // select a Bus Compressor 2 instance; Rea-Sixty uses it to jump
+    // between tracks that have the BC-section-target plugin loaded
+    // (Bus Compressor 2 today, any user-mapped plugin once the
+    //  Link-System config page lands).
+    constexpr uint8_t kBcEncoder      = 0x15;
+
     // Dedicated Channel Strip left-side pots (EQ + filters)
     constexpr uint8_t kCSLowPass    = 0x00;
     constexpr uint8_t kCSHighPass   = 0x01;
