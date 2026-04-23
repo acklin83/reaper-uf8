@@ -194,6 +194,23 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
 
     pushKnobReadout_(ev.id, tr, fxIdx, vst3Param, zone, labelForKnob(ev.id, busCompContext));
 
+    // Diagnostic — first N events per session dump "UC1 knob 0xNN
+    // 'OurLabel' → VST3 param P 'PluginLabel'" so we can spot any
+    // mapping mismatch between our knob-ID table and the actual
+    // plugin param layout. Remove once bindings are confirmed.
+    static int kDiagRemaining = 30;
+    if (kDiagRemaining > 0) {
+        --kDiagRemaining;
+        char pname[64] = {0};
+        TrackFX_GetParamName(tr, fxIdx, vst3Param, pname, sizeof(pname));
+        char line[160];
+        std::snprintf(line, sizeof(line),
+            "UC1 knob 0x%02x '%s' delta=%d → VST3 param %d '%s' val=%.3f\n",
+            ev.id, labelForKnob(ev.id, busCompContext),
+            (int)ev.delta, vst3Param, pname, next);
+        ShowConsoleMsg(line);
+    }
+
     ++stats_.knobEventsHandled;
 }
 
