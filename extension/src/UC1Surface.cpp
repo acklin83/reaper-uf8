@@ -317,6 +317,33 @@ void UC1Surface::handleButton_(const ButtonEvent& ev)
     ++stats_.buttonEventsHandled;
 }
 
+namespace {
+
+// Strip a single space between the numeric part and the unit suffix.
+// REAPER's TrackFX_FormatParamValueNormalized returns "12.1 dB",
+// "102.5 Hz", "50.0 %", "0.12 s" — SSL 360°'s zone 0x05 format is the
+// same without the separator space ("12.1dB", "102.5Hz"). UC1's
+// numeric display addresses specific character cells per digit, so
+// sending the string with an extra space shifts the sign/digit column
+// by one and produces garbage like "-2 0.0dB" instead of "-20.0dB".
+std::string compactUnit(std::string_view s)
+{
+    std::string r{s};
+    static constexpr std::string_view units[] = {
+        " dB", " Hz", " kHz", " ms", " s", " %", " :1",
+    };
+    for (auto u : units) {
+        auto p = r.rfind(u);
+        if (p != std::string::npos) {
+            r.erase(p, 1);  // drop the leading space from the unit token
+            break;
+        }
+    }
+    return r;
+}
+
+} // namespace
+
 void UC1Surface::pushKnobReadout_(uint8_t knobId, void* trackRaw, int fxIdx,
                                   int vst3Param, uint8_t zone,
                                   std::string_view label)
@@ -326,15 +353,12 @@ void UC1Surface::pushKnobReadout_(uint8_t knobId, void* trackRaw, int fxIdx,
     MediaTrack* tr = static_cast<MediaTrack*>(trackRaw);
     char formatted[64];
     formatted[0] = '\0';
-    // TrackFX_FormatParamValueNormalized gives us "-12.1 dB", "45.0 %",
-    // "250 Hz" etc. — exactly what SSL 360° shows on the UC1.
     const double cur = TrackFX_GetParamNormalized(tr, fxIdx, vst3Param);
     TrackFX_FormatParamValueNormalized(tr, fxIdx, vst3Param, cur,
                                        formatted, sizeof(formatted));
-    std::string value{formatted};
-    // REAPER returns "X.X dB" with space; SSL 360°'s readout is "X.XdB"
-    // compact. Strip the space before unit — optional cosmetic polish.
-    // Keep it simple for now.
+    // UC1 expects compact "X.XdB" / "X.XHz" / "X%" — strip the space
+    // REAPER inserts between number and unit.
+    std::string value = compactUnit(formatted);
 
     auto readout = formatReadout(label, value);
     device_->send(buildDisplayText(zone, readout, 22));
