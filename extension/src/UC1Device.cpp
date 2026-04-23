@@ -102,9 +102,48 @@ bool UC1Device::open()
     libusb_clear_halt(handle_, kEpOut);
     libusb_clear_halt(handle_, kEpIn);
 
-    // UC1 init is trivial — no custom sequence needed. The worker thread
-    // starts pushing the keepalive stream and zero-GR baseline, and UC1
-    // is ready to receive display/LED writes immediately.
+    // Handshake. Captured from uc1_23 (SSL 360° cold-start with UC1
+    // already plugged in) — these 5 empty-data commands transition UC1
+    // from "Attempting to reconnect to SSL 360°" into the fully
+    // controllable state. Without this, UC1 shows a half-connected UI
+    // (plugin context visible but LEDs dark, GR bar stuck, controls
+    // drop the connection on use).
+    //
+    // Pacing mirrors SSL 360°'s observed inter-frame gaps (~15 / 10 /
+    // 70 / 17 / 12 ms). The 70 ms gap between FF 05 and FF 4B is
+    // respected — earlier attempts with tighter pacing left UC1 in
+    // partial state, so we keep the original timing.
+    struct HandshakeStep { uint8_t bytes[4]; int delayMsBefore; };
+    static constexpr HandshakeStep kHandshake[] = {
+        { {0xFF, 0x01, 0x00, 0x01}, 0   },
+        { {0xFF, 0x02, 0x00, 0x02}, 15  },
+        { {0xFF, 0x05, 0x00, 0x05}, 10  },
+        { {0xFF, 0x4B, 0x00, 0x4B}, 70  },
+        { {0xFF, 0x4E, 0x00, 0x4E}, 17  },
+    };
+    for (const auto& step : kHandshake) {
+        if (step.delayMsBefore > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(step.delayMsBefore));
+        }
+        int t = 0;
+        const int rc = libusb_bulk_transfer(handle_, kEpOut,
+                                            const_cast<uint8_t*>(step.bytes),
+                                            4, &t, 500);
+        if (rc < 0) {
+            lastError_ = std::string("handshake OUT failed: ") + libusb_error_name(rc);
+            libusb_release_interface(handle_, kInterface);
+            libusb_close(handle_);
+            libusb_exit(ctx_);
+            handle_ = nullptr;
+            ctx_    = nullptr;
+            return false;
+        }
+    }
+    // Short settle before the GR / keepalive stream starts — in the
+    // captured reference SSL 360° waits ~12 ms after FF 4E before any
+    // further traffic.
+    std::this_thread::sleep_for(std::chrono::milliseconds(12));
+
     shuttingDown_ = false;
     worker_ = std::thread([this]{ workerLoop_(); });
 
