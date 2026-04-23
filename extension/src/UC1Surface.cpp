@@ -1,6 +1,7 @@
 #include "UC1Surface.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -172,9 +173,15 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
 
     // Helper for fine-tick encoders (CHANNEL, BC): accumulate deltas
     // across events so N ticks = 1 physical click. Direction change
-    // resets accumulator to avoid residue eating the first reversed
-    // click.
-    auto stepFromAccumulator = [&ev](int& acc, int ticksPerStep) -> int {
+    // OR a >100 ms gap since the last event clears residual ticks,
+    // so occasional short-tick clicks don't silently accumulate drift.
+    auto stepFromAccumulator = [&ev](int& acc, auto& lastT, int ticksPerStep) -> int {
+        auto now = std::chrono::steady_clock::now();
+        if (lastT.time_since_epoch().count() != 0
+            && now - lastT > std::chrono::milliseconds(100)) {
+            acc = 0;
+        }
+        lastT = now;
         if ((ev.delta > 0 && acc < 0) || (ev.delta < 0 && acc > 0)) acc = 0;
         acc += ev.delta;
         int step = acc / ticksPerStep;
@@ -185,7 +192,8 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
     // CHANNEL encoder — scroll through ALL REAPER tracks. ~4 ticks/click.
     if (ev.id == knob::kChannelEncoder) {
         static int acc = 0;
-        int step = stepFromAccumulator(acc, 4);
+        static std::chrono::steady_clock::time_point lastT{};
+        int step = stepFromAccumulator(acc, lastT, 4);
         if (step == 0) { ++stats_.knobEventsHandled; return; }
         const int n = CountTracks(nullptr);
         if (n <= 0) return;
@@ -219,7 +227,8 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
     // other plugins here). ~3 ticks/click.
     if (ev.id == knob::kBcEncoder) {
         static int acc = 0;
-        int step = stepFromAccumulator(acc, 3);
+        static std::chrono::steady_clock::time_point lastT{};
+        int step = stepFromAccumulator(acc, lastT, 3);
         if (step == 0) { ++stats_.knobEventsHandled; return; }
         const int n = CountTracks(nullptr);
         if (n <= 0) return;

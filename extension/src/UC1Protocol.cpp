@@ -181,16 +181,25 @@ std::vector<std::vector<uint8_t>> buildSevenSeg(unsigned int value)
     appendDigit(frames, 0x10, false, ones);
     appendDigit(frames, 0x08, false, tens);
 
-    // Hundreds: only 4 cells decoded (uc1_27 saw 0x00/0x03/0x04/0x05
-    // toggle during 99→100). For hundreds != 0 light all 4 (approx
-    // "1"-shape placeholder; visually off for digits other than "1"
-    // since we don't know the remaining 3 segments' cells). For
-    // hundreds == 0 clear those 4 cells — removes the stale "dash"
-    // the init-flood leaves in this position.
+    // Hundreds: partial decode. uc1_27 saw 0x00/0x03/0x04/0x05 toggle
+    // during 99→100 (those are the "1"-shape segments). Init flood
+    // also lights 0x06 — that's almost certainly segment g (the
+    // horizontal middle bar) which renders as "-" when unmatched.
+    // Clear the full gap range 0x00..0x07 for blank-hundreds to wipe
+    // any stale init-state; light only the 4 known cells for "1".
     {
-        const uint8_t st = (hundreds != 0) ? 0x01 : 0x00;
-        for (uint8_t c : {0x00, 0x03, 0x04, 0x05}) {
-            auto f = buildLedWrite(0x01, c, st);
+        // Cells 0x00..0x07 cover the hundreds-digit segments (at least
+        // the ones we can reach). Cells marked true are the known "1"
+        // pattern seen in uc1_27 — light those when hundreds != 0.
+        // The rest always get cleared so init-flood residue (e.g. the
+        // mysterious "-" at 0x06) goes away.
+        static constexpr struct { uint8_t cell; bool lightForNonZero; } kHundredsCells[] = {
+            {0x00, true},  {0x01, false}, {0x02, false}, {0x03, true},
+            {0x04, true},  {0x05, true},  {0x06, false}, {0x07, false},
+        };
+        for (const auto& hc : kHundredsCells) {
+            uint8_t st = (hundreds != 0 && hc.lightForNonZero) ? 0x01 : 0x00;
+            auto f = buildLedWrite(0x01, hc.cell, st);
             f[5] = 0x00;
             uint32_t sum = 0;
             for (size_t i = 1; i < f.size() - 1; ++i) sum += f[i];
