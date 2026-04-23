@@ -1,0 +1,9 @@
+# UC1 device_address = 35 (capture: captures/uc1/uc1_21_led_buscomp.pcapng)
+# baseline device_address = 28 (captures/uc1/uc1_02_idle_baseline.pcapng)
+# baseline: 8 unique payloads
+
+# summary
+#   baseline EP1 IN : 37586
+#   baseline EP2 OUT: 4263
+#   novel    EP1 IN : 32
+#   novel    EP2 OUT: 140

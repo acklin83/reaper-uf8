@@ -53,20 +53,15 @@ ff 1b 01 03 1f
 
 `uc1_12` contained 100 distinct values from `0x0026` (3.8 dB) to `0x0098` (15.2 dB). Encoding is monotonic.
 
-### `FF 13 04 <meter> <level> <flag1> <flag2> <chk>` — VU meter (Channel Strip I/O meters)
-Seen in `uc1_13` test-tone capture. Not GR (cap17's old label was wrong).
-
-Hypothesized byte roles (pending a cleaner calibration capture):
-- byte 1: meter/bank selector. In `uc1_13` all novel frames had byte1=`0x01`.
-- byte 2: level value, varies with signal. Climbs through the full dynamic range of the test tones (−20/−10/−6/0 dBFS).
-- byte 3 and byte 4: seen as `01 00` or `01 01`; second bit likely differentiates input vs output meter.
+### `FF 13 04 01 <level> 01 <in/out> <chk>` — VU meter (Channel Strip I/O meters)
+Special case of the general `FF 13 04` LED-cell-write command where **bank byte is `0x01`** — that bank is reserved for the VU level strips. Byte 4 selects input vs output meter (`0x00` / `0x01`).
 
 Example pair from `uc1_13`:
 ```
 ff 13 04 01 1a 01 00 34
 ff 13 04 01 1a 01 01 35
 ```
-Same level (0x1a), differing only in the last data byte → strongly suggests input/output meter pair with shared level byte.
+Same level (0x1a), differing only in the last data byte → input and output meters sharing the same level in that moment.
 
 ### `FF 66 <len> <zone> <ascii…> <chk>` — display write (alphanumeric + context)
 UC1 has multiple display zones addressed by the byte immediately after length. Each zone has its own fixed field width. Known zones from the capture set:
@@ -87,18 +82,43 @@ Short `FF 66` variants seen alongside big updates:
 
 Zone 0x05 time-multiplexing means Rea-Sixty must maintain state for the currently-active knob (the one most recently turned) and push the 22-char string each time the value changes. Other zones are mostly written on plugin load/unload and track change.
 
-### `FF 5C 02 <hi> <lo> <chk>` — LED bitmask
-Seen in `uc1_03`, `uc1_08`, `uc1_14`. Two-byte payload appears to be a 16-bit bitmask of the UC1's button-LED states. Observed values:
+### `FF 13 04 <bank> <cell> 01 <state> <chk>` — per-button LED feedback (and more)
+**This is the main LED-update mechanism, not `FF 5C`.** Every button press is followed within ~10 ms by one `FF 13 04` frame with a unique `(bank, cell)` address per button. State byte encodes LED brightness:
 
-```
-ff 5c 02 00 00 5e    (all LEDs off)
-ff 5c 02 00 0a 68    (bits 1+3 set)
-ff 5c 02 00 32 90    (bits 1+4+5 set)
-```
+- `0x00` — LED fully off
+- `0x33` — LED **dimmed** (brightness reduced but still visible — the plugin-bypassed visual state, so the user still sees which buttons are "armed" even though the plugin isn't processing)
+- `0xFF` — LED fully on
 
-Exact bit→button mapping not yet pinned; requires a capture that toggles one button at a time with the rest known off. `uc1_14` (Ext-SC only) is a start — combined with `uc1_08`'s time-aligned button press events and the matching `5C` emissions, bits can be assigned.
+Per user feedback: when Channel IN is pressed to bypass the Channel Strip, the feature LEDs don't go dark — they dim. `0x33` is explicitly a dim level, not an off state. Rea-Sixty must preserve this: bypass-state rendering uses `0x33` across the section, plugin-active uses `0xFF` on the lit cells and `0x00` only where the feature is truly inactive.
 
-In parallel, `FF 13 04 <…>` is used to push LED-strip / meter state updates — see the VU section above. The same command carries both VU and non-VU LED updates; the disambiguator is the addressing bytes (byte1/byte2 of the 4-byte data field).
+Bank → Cell → Button map (derived from `uc1_21` direct evidence):
+
+| ID | Button | Bank | Cell |
+|----|--------|-----:|-----:|
+| `0x08` | HF Bell | `0x02` | TBD (not fired with Bus Comp 2 loaded) |
+| `0x09` | EQ Type | `0x02` | `0x51` |
+| `0x0A` | EQ In | `0x02` | `0x50` |
+| `0x0B` | LF Bell | `0x02` | `0x23` |
+| `0x0C` | Bus Comp IN | `0x02` | `0x01` |
+| `0x14` | Fast Attack (Comp) | `0x02` | `0x38` |
+| `0x15` | Peak | `0x02` | `0x39` |
+| `0x16` | Dyn In | `0x02` | `0x5B` |
+| `0x17` | Expand | `0x02` | `0x92` |
+| `0x18` | Fast Attack (Gate) | `0x02` | `0x93` |
+| `0x19` | Polarity | `0x02` | `0x98` |
+| `0x1A` | S/C Listen | `0x02` | `0x99` |
+| `0x1B` | Solo Clear | `0x01` | `0x9A` (state cycles 01 → 03 → 00 on clear) |
+| `0x1C` | Solo | `0x02` | `0x97` |
+| `0x1D` | Cut | `0x02` | `0x96` |
+| `0x1E` | Channel IN | `0x02` | `0x94` |
+| `0x1F` | Fine | `0x02` | `0x95` |
+
+Plugin-bypass additionally fires a burst of `FF 13 04` frames for every feature-LED in the section. **LEDs are dimmed (`0x33`), not switched off** — the user still sees the armed button states visually, just at reduced brightness. Rea-Sixty must mirror this: bypass-state = re-push every cell at `0x33`, un-bypass = re-push each cell at whatever value was active before.
+
+Same command family carries the VU meter frames (`ff 13 04 01 <level> 01 <in/out>`) — bank `0x01` for the I/O VU strips, bank `0x02` for button LEDs. So `FF 13 04` is the generic "LED cell write" command, one address space for everything lit on the device.
+
+### `FF 5C 02 <hi> <lo> <chk>` — small global status register
+Not per-button LED data. Only 3 distinct values seen across all captures (`00 00`, `00 0A`, `00 32`) and it updates rarely — probably a global status bitmask (Bus-Comp-active, Solo-active, etc.). Low-priority for the first Rea-Sixty release; individual LED pushes go via `FF 13 04`.
 
 ### Init sequence (trivial)
 **UC1 needs no vendor-specific init.** Analysis of `uc1_01` (2846 OUT frames to the newly enumerated device) found only 5 distinct payloads in the whole post-replug stream, all of which already exist in the idle-baseline set:
@@ -202,11 +222,12 @@ Plus `0x0C` = **Bus Comp IN** (from `uc1_08` positional evidence, direct-display
 
 All 16 Channel-Strip-area buttons + 1 Bus Comp button cover the UC1's full button inventory. Earlier apparent "Polarity doesn't emit events" was a physical-contact issue on the user side, not a firmware peculiarity — `uc1_19` confirms every button fires reliably when firmly pressed.
 
-**Plugin context (tested with `uc1_20`, CS 2 loaded):** Button IDs are **stable** across 4K E and CS 2 — no per-plugin remapping, unlike the top V-Pots. What does change:
+**Plugin context (tested with `uc1_20`, CS 2 loaded):** Button IDs are **stable** across 4K E and CS 2 — no per-plugin remapping, unlike the top V-Pots.
 
-- **Event emission is plugin-gated**: with CS 2, HF Bell (`0x08`) and EQ Type (`0x09`) emit no `FF 22` events — CS 2's EQ doesn't have a matching function. 4K E fires these normally.
-- **Display feedback per button varies**: Peak (`0x15`) shows `"Peak            In"` with CS 2 but no text with 4K E, matching user's note "Peak nur von CS2 verwendet". EQ Type's label varies per plugin (Black/Orange/Brown for 4K E, In/Out for CS 2, etc.) when it fires at all.
+What depends on plugin / hardware-contact:
+- **Display feedback per button varies**: Peak (`0x15`) shows `"Peak            In"` with CS 2 but no text with 4K E, matching user's note "Peak nur von CS2 verwendet". EQ Type's label varies per plugin (Black/Orange/Brown for 4K E, In/Out for CS 2, etc.).
 - **Display text content obviously depends on plugin context** (the `In`/`Out` state of the toggled param).
+- **HF Bell (`0x08`) and EQ Type (`0x09`) didn't emit events in `uc1_20`** despite CS 2 fully supporting both (EQ Type, HF Bell, LF Bell all present on CS 2 per user). This is the same physical-contact issue observed earlier with Polarity in `uc1_17/18` — the user pressed firmly for most buttons but certain physical buttons on the UC1 need more positive engagement. Firmware isn't gating these; user hardware contact was inconsistent. Not a protocol-level phenomenon.
 
 Rea-Sixty can ship a single stable button-ID table and forward each press to the focused plugin — buttons that the plugin doesn't implement simply no-op.
 
@@ -260,6 +281,7 @@ The SSL plugins ship GR to 360° over encrypted Thrift IPC (see `plugin-ipc-note
 | 2026-04-23 | `uc1_18_polarity_eqin_hold.pcapng` | Polarity + EQ IN + Gate Hold (with CS 2 loaded) (20 s, 23 888 pkts) — `0x0A = EQ IN`, `0x18 = Gate Hold` (CS 2 param); Polarity no events (physical contact issue, not firmware) |
 | 2026-04-23 | `uc1_19_buttons_4ke.pcapng` | All 16 Channel-Strip-area buttons, one press each, 4K E loaded (60 s, 67 384 pkts) — full button-ID map via zone 0x03 display text |
 | 2026-04-23 | `uc1_20_buttons_cs2.pcapng` | Same 16-button sequence with SSL Native Channel Strip 2 (60 s, 67 372 pkts) — IDs confirmed stable across plugins; HF Bell + EQ Type gated off by CS 2 |
+| 2026-04-23 | `uc1_21_led_buscomp.pcapng` | 17 buttons incl. Bus Comp IN, Bus Comp 2 loaded (75 s, 84 276 pkts) — Bus Comp IN = 0x0C confirmed; full `FF 13 04` per-button LED cell map derived; HF Bell silent with Bus Comp 2 |
 | 2026-04-22 | `uc1_01_init_clean.pcapng` | Init/wakeup sequence on fresh enumeration — 27944 pkts to address 28, endpoints 0x00/0x80/0x02/0x81 |
 | 2026-04-22 | `uc1_02_idle_baseline.pcapng` | 10 s idle heartbeat — 11288 pkts, ~1130 pkt/s, same endpoint set. Baseline input for every diff. |
 | 2026-04-22 | `uc1_03_plugin_presence.pcapng` | Plugin load/unload transitions (30 s, 34298 pkts, 315 novel): empty → +BusComp2 → +ChStrip2 → −BusComp2 → −ChStrip2 |
