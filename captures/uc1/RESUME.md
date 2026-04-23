@@ -1,48 +1,53 @@
-# UC1 Capture Session — Resume Point
+# Rea-Sixty UC1 — Resume Point
 
-**Phase 2 status:** all 14 planned captures recorded. Next phase is **decode / analysis**, not more captures.
-**Last commit:** `0e8f309` on `main`, pushed.
+**Last commit:** `ede90ec` on `main`, pushed.
+**Phase status:** UC1 implementation is live and working on hardware. Core feature set complete; nice-to-haves remain.
 
-## Captures in hand (01–14)
+## What works end-to-end (tested on macOS with real UC1)
 
-| # | File | Pkts | Gist |
-|---|------|-----:|------|
-| 01 | `uc1_01_init_clean.pcapng` | 27944 | Init/wakeup on fresh enumeration |
-| 02 | `uc1_02_idle_baseline.pcapng` | 11288 | 10 s idle — baseline for every diff |
-| 03 | `uc1_03_plugin_presence.pcapng` | 34298 | Load/unload transitions |
-| 04 | `uc1_04_knob_threshold_sweep.pcapng` | 17702 | Threshold CCW→CW→CCW |
-| 05 | `uc1_05_knob_ratio_steps.pcapng` | 16940 | Ratio stepped, one direction |
-| 06 | `uc1_06_knob_attack_release.pcapng` | 22540 | Attack + Release sweeps |
-| 07 | `uc1_07_knob_makeup_mix.pcapng` | 29184 | Makeup + Mix + SC HPF sweeps |
-| 08 | `uc1_08_buttons_all.pcapng` | 22758 | 13 buttons — full set (order documented in sibling) |
-| 09 | `uc1_09_display_params.pcapng` | 23130 | GUI-side param changes (order not recorded) |
-| 10 | `uc1_10_track_select.pcapng` | 22378 | Focus 1→2→3→4→1, BusComp on T1/T3 only |
-| 11 | `uc1_11_gr_static.pcapng` | 11302 | GR steady ~12 dB |
-| 12 | `uc1_12_gr_dynamic.pcapng` | 11370 | GR animated |
-| 13 | `uc1_13_vu_meters.pcapng` | 22894 | Test tones −20/−10/−6/0 dBFS |
-| 14 | `uc1_14_multiple_sc.pcapng` | 22547 | Ext-SC LED feedback |
+- **Device lifecycle**: handshake (FF 01/02/05/4B/4E) + 1394-frame LED init flood, 50 Hz GR stream as liveness heartbeat, 150 ms FF 1B keepalive. UF8 optional in the same extension instance.
+- **Bus Comp 2 V-Pots** (all 7, IDs 0x0E/0x0F/0x10/0x11/0x12/0x13/0x14) drive the right VST3 params with display readout at position 16 in zone 0x05. Values compact ("12.1dB" not "12.1 dB"), non-numeric tokens drop the unit ("OFF" not "OFFHz").
+- **Channel Strip knobs** (4K E / CS 2) drive VST3 params with display readout in zone 0x03.
+- **Channel Strip buttons** (16 total, IDs 0x08..0x1F) toggle plugin params + LED feedback via `FF 13 04 02 <cell> 01 <0xFF/0x00>`.
+- **Channel IN / Bus Comp IN** toggle `TrackFX_SetEnabled` bypass.
+- **Track name** pushed to zone 0x02 (CS slot) and zone 0x04 (BC slot). CS slot always shows the focused-track name; BC slot only when a Bus Comp plugin is loaded.
+- **CHANNEL encoder (0x0D)** scrolls REAPER tracks, 4 ticks per click, direction-change + 100 ms timeout accumulator reset.
+- **BC encoder (0x15)** jumps to nearest BC-hosting track relative to current focus, 3 ticks/click.
+- **7-segment display** shows REAPER track index (001..099 correct, 100..199 best-effort). Hundreds digit still partial decode — cells 0x00/0x03/0x04/0x05 light for "1"; cells 0x01/0x02/0x06/0x07 always cleared to wipe init residue.
 
-## Environment notes for future capture re-runs
+## Critical protocol details
 
-- Windows host: `StoerPC` at `192.168.177.197`, user `claude` / `claudepass`
-- USBPcap interface for SSL devices: `\\.\USBPcap3`
-- UC1 device address **varies per replug**; last seen 34. Always confirm from the pcap itself via `usb.idVendor == 0x31e9` filter rather than hard-coding.
-- UF8 must stay physically disconnected during UC1 captures (capture hygiene — see `docs/windows-capture-workflow-uc1.md` and `uc1-gr-routing` memory note)
-- Windows work directory: `C:\Users\claude\uc1_capture\`
+- Frame: `FF <cmd> <len> <data> <chk>`, chk = sum(cmd+len+data) mod 256.
+- `FF 13 04 <bank> <cell> <byte3> <state>`:
+  - byte3 = `0x01` → button/VU LEDs, state `0xFF` on / `0x33` dim / `0x00` off
+  - byte3 = `0x00` → 7-seg, state `0x01` on / `0x00` off
+- Display zone widths: CS zone 0x03 uses 22 chars ASCII. Zone 0x02 has CS track name at byte 12. Zone 0x04 has BC track name at byte 14.
+- Plugin-bypass: LEDs dim to `0x33`, not off.
 
-## Pending decode work (next session focus)
+## Outstanding / nice-to-have
 
-1. Run `analysis/parse_usbpcap_uc1.py` against each 03–14 capture with `uc1_02` as baseline. Save output hex digests alongside for review.
-2. Start filling `docs/protocol-notes-uc1.md` → *Frame format* and *Commands* sections with concrete bytes:
-   - Init sequence extraction from `uc1_01` → `extension/src/init_sequence_uc1.inc` (not yet created)
-   - Knob event-frame IDs from uc1_04–07 → table in protocol notes
-   - Button event-frame IDs from uc1_08 (sequence is documented in its sibling .md)
-   - GR frame family + byte→dB calibration from uc1_11 (~12 dB anchor) and uc1_12 (full range)
-   - VU frame family + 4-point calibration from uc1_13
-   - Plugin-presence + track-retarget frames from uc1_03 and uc1_10
-3. Cross-check GR routing claim from cap17 against uc1_11/12 findings (see `uc1-gr-routing` memory — is the `FF 13 04` family really UC1-exclusive, or does UF8 receive GR via a different route?).
-4. Once the event table is solid, start the UC1 counterpart to `extension/src/` — mirrors the UF8 pipeline but speaks to the UC1 section of the device.
+- Hundreds digit of 7-seg: full per-segment decode (only 4 of 7 cells known)
+- GR-JSFX-Probe → `pushGainReduction()` wiring (JSFX lives at `extension/jsfx/rea_sixty_gr_probe.jsfx`)
+- VU meter feed (track peaks → `pushVu(meter, level)`)
+- Solo / Cut / Solo Clear buttons → REAPER track-state routing (currently just consumed)
+- 4K E / 4K G / 4K B binding tables (CS 2 knob/button IDs are stable across plugins; just need the VST3 param indices per-variant — existing UF8 PluginMap has the numbers)
+- Link-System config page: map any VST3 plugin's params to UC1 BC section + CS section (Phase 3 of the roadmap)
 
-## Housekeeping
-- `probe1/2/3.pcapng` and `probe_resume.pcapng` on the Windows side are throwaway probes; can be deleted at any time.
-- The 14 captures total ~17 MB in the repo (`git add -f` style, tracked despite `captures/` gitignore rule).
+## Environment notes
+
+- Windows capture box: 192.168.177.197 (`claude`/`claudepass`), UC1 captures in `C:\Users\claude\uc1_capture\`, USBPcap interface `\\.\USBPcap3`.
+- UC1 device address rotates on replug — `parse_usbpcap_uc1.py` auto-detects.
+- UF8 must stay physically disconnected during UC1 captures (capture hygiene).
+- Reference handshake capture: `uc1_23_ssl360_startup.pcapng`. Used for the replayed init flood in `extension/src/uc1_init_sequence.inc`.
+- Hardware quirk: after a bad init or aborted session, UC1 firmware can hang and require a power-cycle at the unit (USB replug alone isn't always enough). Observed twice during debugging.
+
+## Capture inventory (UC1 work)
+
+- uc1_01..uc1_22: initial decode sweeps (knobs, buttons, LEDs, GR, VU, init)
+- uc1_23: SSL 360° cold-start handshake reference
+- uc1_24b: BC track name @ zone 0x04 pos 14
+- uc1_25: CS track name @ zone 0x02 pos 12
+- uc1_26: CHANNEL-encoder 110-position scroll (uncovered the 7-seg FF 13 04 01 mechanism)
+- uc1_27: systematic 7-seg decode (positions 1→20 and 99→105 — enough to decode ones + tens alphabetical)
+
+All captures committed to `captures/uc1/` (force-added; `captures/` is otherwise gitignored).
