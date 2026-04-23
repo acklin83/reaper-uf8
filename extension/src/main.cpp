@@ -37,6 +37,8 @@
 #include "MidiBridge.h"
 #include "PluginMap.h"
 #include "Protocol.h"
+#include "UC1Device.h"
+#include "UC1Surface.h"
 #include "UF8Device.h"
 
 namespace {
@@ -45,6 +47,13 @@ std::unique_ptr<uf8::UF8Device>   g_dev;
 std::unique_ptr<uf8::ColorSync>   g_sync;
 std::unique_ptr<uf8::MidiBridge>  g_midi;
 std::unique_ptr<uf8::HidDevice>   g_hid;
+
+// UC1 — optional. If the device isn't present on the bus we just skip
+// it; UF8 continues to work independently. Opening UC1 as a separate
+// libusb context keeps the two devices isolated on the bulk-transfer
+// side.
+std::unique_ptr<uc1::UC1Device>   g_uc1_dev;
+std::unique_ptr<uc1::UC1Surface>  g_uc1_surface;
 
 // IReaperControlSurface subclass registered as a full control surface
 // class ("Rea-Sixty") so users see and add it like any other surface.
@@ -517,6 +526,12 @@ void ReaSixtySurface::SetSurfaceMute(MediaTrack* tr, bool mute)
 void ReaSixtySurface::SetSurfaceSelected(MediaTrack* tr, bool sel)
 {
     sendLed(LedClass::Sel, tr, sel);
+    // UC1 always follows whichever track just became selected. Ignoring
+    // the sel=false side means we keep the last-focused track driving
+    // UC1 until a new one is picked — matches SSL 360°'s Focus Mode.
+    if (sel && g_uc1_surface) {
+        g_uc1_surface->setFocusedTrack(tr);
+    }
 }
 void ReaSixtySurface::SetSurfaceRecArm(MediaTrack* tr, bool arm)
 {
@@ -583,6 +598,22 @@ ReaSixtySurface::ReaSixtySurface()
         g_dev->send(uf8::buildFaderPosition(s, lsb, msb));
     }
 
+    // Best-effort UC1 attach — absence is fine, UF8 runs standalone.
+    g_uc1_dev = std::make_unique<uc1::UC1Device>();
+    if (g_uc1_dev->open()) {
+        g_uc1_surface = std::make_unique<uc1::UC1Surface>();
+        g_uc1_surface->attach(*g_uc1_dev);
+        // Focus whatever track REAPER currently considers "last touched"
+        // so UC1 has something meaningful to drive from the first click.
+        if (auto* tr = GetLastTouchedTrack()) {
+            g_uc1_surface->setFocusedTrack(tr);
+        }
+    } else {
+        ShowConsoleMsg(("Rea-Sixty UC1: " + g_uc1_dev->lastError()
+                        + "  (UC1 optional — UF8 continues)\n").c_str());
+        g_uc1_dev.reset();
+    }
+
     plugin_register("timer", reinterpret_cast<void*>(onTimer));
 }
 
@@ -594,6 +625,9 @@ ReaSixtySurface::~ReaSixtySurface()
     g_midi.reset();
     if (g_dev) g_dev->close();
     g_dev.reset();
+    g_uc1_surface.reset();
+    if (g_uc1_dev) g_uc1_dev->close();
+    g_uc1_dev.reset();
     g_slotTrack.fill(nullptr);
 }
 
@@ -1492,6 +1526,7 @@ void onTimer()
     commitDebouncedTouchReleases();
     if (g_sync) g_sync->refresh(reaperColorForVisibleSlot);
     pushZonesForVisibleSlots();
+    if (g_uc1_surface) g_uc1_surface->poll();
 }
 
 } // anonymous
