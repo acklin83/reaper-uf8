@@ -123,15 +123,48 @@ Relative encoder event, **6-bit signed delta** (range −32…+31). Positive = C
 
 | `knob_id` | Knob | Source of ID |
 |----------:|------|--------------|
-| `0x0E` | Ratio | `uc1_05` — display showed "Ratio …" during these events |
-| `0x0F` | Makeup | `uc1_07` — display showed "Makeup …" |
-| `0x11` | Release | `uc1_06` — display showed "Release …" |
-| `0x12` | Threshold | `uc1_04` — display showed "Threshold …" |
-| `0x14` | Mix | `uc1_07` — display showed "Mix …" |
-| `0x16` | S/C HPF | `uc1_07` — display showed "S/C HPF …" |
-| `0x10`? | Attack | Not seen in `uc1_06` (user confirms only Release frames arrived; Attack ID slot still open) |
+| `0x0E` | Ratio (Bus Comp) | `uc1_05` — display showed "Ratio …" (zone 0x05) |
+| `0x0F` | Makeup (Bus Comp) | `uc1_07` — display showed "Makeup …" (zone 0x05) |
+| `0x11` | Release (Bus Comp) | `uc1_06` — display showed "Release …" (zone 0x05) |
+| `0x12` | Threshold (Bus Comp) | `uc1_04` — display showed "Threshold …" (zone 0x05) |
+| `0x14` | Mix (Bus Comp) | `uc1_07` — display showed "Mix …" (zone 0x05) |
+| `0x16` | S/C HPF (Bus Comp) | `uc1_07` — display showed "S/C HPF …" (zone 0x05) |
+| `0x10`? | Attack (Bus Comp) | Not seen in `uc1_06` (Attack events didn't fire; ID still open) |
+
+**The top-center V-Pot IDs `0x0C–0x16` repurpose based on the focused plugin.** `uc1_15` showed the same IDs driving Channel Strip params when Bus Comp 2 was absent and 4K E was loaded: `0x0C = Input Trim`, `0x16 = Fader Level / Output Trim`. So these 7 IDs are **soft-mapped** by SSL 360° depending on what's on the track.
+
+**Dedicated Channel Strip pots — always drive CS params** (from `uc1_15`, display text in zone 0x03):
+
+| `knob_id` | CS knob |
+|----------:|---------|
+| `0x00` | Low Pass (LPF freq) |
+| `0x01` | High Pass (HPF freq) |
+| `0x02` | HF Gain |
+| `0x03` | HF Frequency |
+| `0x04` | HMF Gain |
+| `0x05` | HMF Frequency |
+| `0x06` | HMF Q |
+| `0x07` | LMF Gain |
+| `0x08` | LMF Frequency |
+| `0x09` | LMF Q |
+| `0x0A` | LF Frequency |
+| `0x0B` | LF Gain |
+| `0x17` | Gate Release |
+| `0x18` | Gate Hold (knob exists; 4K E doesn't map it — other CS plugins might) |
+| `0x19` | Gate Threshold |
+| `0x1A` | Gate Range |
+| `0x1B` | Dyn Comp Release |
+| `0x1C` | Dyn Comp Threshold |
+| `0x1D` | Dyn Comp Ratio |
 
 Stepped knobs (Ratio) use the same `FF 24` event family — the firmware does not distinguish continuous vs discrete knobs on the wire, only the underlying plugin param is stepped.
+
+### Display zones per section
+
+- **Zone 0x05** (22-char ASCII) — Bus Comp readout, used when one of the top V-Pots is turned and Bus Comp 2 is the governing plugin
+- **Zone 0x03** (22-char ASCII) — Channel Strip readout, used when one of the CS pots (or a repurposed V-Pot driving a CS param) is turned
+
+Implementation: Rea-Sixty maintains a per-focused-track map of "which plugin owns the V-Pots right now?" and picks the target zone accordingly when pushing knob-value text.
 
 Example delta pairs observed in `uc1_05` (Ratio steps):
 ```
@@ -204,6 +237,7 @@ The SSL plugins ship GR to 360° over encrypted Thrift IPC (see `plugin-ipc-note
 
 | Date | File | Summary |
 |------|------|---------|
+| 2026-04-23 | `uc1_15_knob_channelstrip_sweep.pcapng` | 4K E loaded, 20 CS pots swept sequentially (180 s, 209 802 pkts) — full CS knob-ID table via zone 0x03 display text |
 | 2026-04-22 | `uc1_01_init_clean.pcapng` | Init/wakeup sequence on fresh enumeration — 27944 pkts to address 28, endpoints 0x00/0x80/0x02/0x81 |
 | 2026-04-22 | `uc1_02_idle_baseline.pcapng` | 10 s idle heartbeat — 11288 pkts, ~1130 pkt/s, same endpoint set. Baseline input for every diff. |
 | 2026-04-22 | `uc1_03_plugin_presence.pcapng` | Plugin load/unload transitions (30 s, 34298 pkts, 315 novel): empty → +BusComp2 → +ChStrip2 → −BusComp2 → −ChStrip2 |
