@@ -78,6 +78,29 @@ std::vector<uint8_t> buildLedWrite(uint8_t bank, uint8_t cell, uint8_t state)
     return buildFrame(0x13, data);
 }
 
+std::vector<uint8_t> buildTrackNameContext(std::string_view csName,
+                                           std::string_view bcName)
+{
+    // 42-byte data field after the zone byte. Slot layout derived
+    // empirically from uc1_24b.
+    constexpr size_t kFieldWidth = 42;
+    constexpr size_t kCsStart    = 0;
+    constexpr size_t kCsLen      = 14;   // first slot: Channel Strip
+    constexpr size_t kBcStart    = 16;
+    constexpr size_t kBcLen      = 14;   // second slot: Bus Compressor
+
+    std::vector<uint8_t> data(1 + kFieldWidth, 0x00);
+    data[0] = 0x04;  // zone
+
+    const size_t nCs = std::min(csName.size(), kCsLen);
+    for (size_t i = 0; i < nCs; ++i) data[1 + kCsStart + i] = static_cast<uint8_t>(csName[i]);
+
+    const size_t nBc = std::min(bcName.size(), kBcLen);
+    for (size_t i = 0; i < nBc; ++i) data[1 + kBcStart + i] = static_cast<uint8_t>(bcName[i]);
+
+    return buildFrame(0x66, data);
+}
+
 std::vector<uint8_t> buildDisplayText(uint8_t zone, std::string_view text, size_t width)
 {
     std::vector<uint8_t> data;

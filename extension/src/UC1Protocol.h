@@ -188,6 +188,22 @@ std::vector<uint8_t> buildDisplayText(uint8_t zone, std::string_view text, size_
 // Zero-GR convenience: FF 5B 02 00 00.
 inline std::vector<uint8_t> buildZeroGr() { return buildGrMeter(0.0f); }
 
+// Build a zone 0x04 "context line" with the Channel Strip and Bus
+// Compressor track names. SSL 360° uses a 42-byte ASCII-like payload
+// split into two name slots (derived from uc1_24b with Bus Comp 2 on
+// track "TESTBUS" — name landed at positions 16..22):
+//
+//   positions  0..13 (14 chars): Channel Strip track name slot
+//   positions 14..15 (2 chars):  reserved / marker
+//   positions 16..29 (14 chars): Bus Compressor track name slot
+//   positions 30..41 (12 chars): reserved / second marker area
+//
+// Empty slots (no plugin) should be left as zero bytes. Callers pass
+// the raw track-name strings; this helper truncates to the field
+// width and fills the rest with zeros.
+std::vector<uint8_t> buildTrackNameContext(std::string_view csName,
+                                           std::string_view bcName);
+
 // ---- Frame parser (UC1 → host, EP 0x81) ----
 //
 // EP 0x81 IN frames arrive as a 2-byte USB poll token `31 XX` followed
