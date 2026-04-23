@@ -59,6 +59,8 @@ add_library(reaper_uf8 MODULE
     src/UF8Device.cpp
     src/UC1Protocol.cpp
     src/UC1Device.cpp
+    src/UC1PluginMap.cpp
+    src/UC1Surface.cpp
     src/ColorSync.cpp
     src/MidiBridge.cpp
     src/HidDevice.cpp
