@@ -11,6 +11,8 @@
 #include <queue>
 #include <span>
 
+#include "uc1_init_sequence.inc"
+
 namespace uc1 {
 
 // Diagnostic counters — bumped from the worker + IN callback, read from
@@ -139,10 +141,34 @@ bool UC1Device::open()
             return false;
         }
     }
-    // Short settle before the GR / keepalive stream starts — in the
-    // captured reference SSL 360° waits ~12 ms after FF 4E before any
-    // further traffic.
+    // Short settle before the init flood — captured reference waits
+    // ~12 ms after FF 4E.
     std::this_thread::sleep_for(std::chrono::milliseconds(12));
+
+    // LED-init flood. 1394 FF 13 04 / FF 66 / misc frames captured from
+    // uc1_23 right after the 5-frame handshake. Primes every LED cell
+    // and framebuffer register so UC1 leaves the SSL-UC1 splash logo
+    // and enters the normal operational state where knob events drive
+    // plugin params and LEDs reflect live state. Without this, UC1 ACKs
+    // the handshake but stays on the splash.
+    for (size_t i = 0; i < kUc1InitFrameCount; ++i) {
+        int t = 0;
+        const int rc = libusb_bulk_transfer(handle_, kEpOut,
+            const_cast<uint8_t*>(kUc1InitSequence[i].bytes),
+            static_cast<int>(kUc1InitSequence[i].size), &t, 500);
+        if (rc < 0) {
+            lastError_ = std::string("init flood OUT failed at frame ")
+                       + std::to_string(i) + ": " + libusb_error_name(rc);
+            libusb_release_interface(handle_, kInterface);
+            libusb_close(handle_);
+            libusb_exit(ctx_);
+            handle_ = nullptr;
+            ctx_    = nullptr;
+            return false;
+        }
+    }
+    // Post-flood settle.
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
     shuttingDown_ = false;
     worker_ = std::thread([this]{ workerLoop_(); });
