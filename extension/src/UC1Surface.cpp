@@ -447,31 +447,30 @@ void UC1Surface::refresh()
 
     auto bindings = focusedTrack_ ? lookupBindingsOnTrack(focusedTrack_) : UC1Bindings{};
 
-    // Track name push — zone 0x04. Show the track name regardless of
-    // whether an SSL plugin is loaded (UF8 does the same — the UC1's
-    // display should reflect which REAPER track is currently focused,
-    // even with no BC/CS plugin on it). Route to both slots; SSL 360°
-    // would only populate the slot for the plugin that's loaded, but
-    // doubling up is harmless and covers the "focused-track-only" case.
-    std::string csName, bcName;
-    if (focusedTrack_) {
+    // Track name push — zones 0x02 (CS slot) and 0x04 (BC slot). Per
+    // SSL UC1 User Guide p.17 each slot shows the DAW track name of
+    // the track that has THAT specific plugin inserted. If a plugin
+    // isn't present on the focused track, its slot reads "No Plug-ins".
+    // Empty string → device keeps the last state; we explicitly reset
+    // the slot to all-zeros when empty so the stale track name from a
+    // previous focus doesn't linger.
+    auto resolveTrackName = [&]() -> std::string {
+        if (!focusedTrack_) return {};
         MediaTrack* tr = static_cast<MediaTrack*>(focusedTrack_);
         char nameBuf[128] = {0};
         if (GetSetMediaTrackInfo_String(tr, "P_NAME", nameBuf, false)
             && nameBuf[0] != '\0')
         {
-            csName = nameBuf;
-            bcName = nameBuf;
-        } else {
-            // REAPER tracks with no explicit name still have an index —
-            // show "Track N" so the UC1 never looks dead.
-            int idx = static_cast<int>(GetMediaTrackInfo_Value(tr, "IP_TRACKNUMBER"));
-            char fallback[32];
-            std::snprintf(fallback, sizeof(fallback), "Track %d", idx);
-            csName = fallback;
-            bcName = fallback;
+            return nameBuf;
         }
-    }
+        int idx = static_cast<int>(GetMediaTrackInfo_Value(tr, "IP_TRACKNUMBER"));
+        char fallback[32];
+        std::snprintf(fallback, sizeof(fallback), "Track %d", idx);
+        return fallback;
+    };
+
+    std::string csName = bindings.channelMap ? resolveTrackName() : std::string{};
+    std::string bcName = bindings.busCompMap ? resolveTrackName() : std::string{};
 
     // Diag — one-shot log of what we're pushing so the user can
     // correlate with what the UC1 actually displays.
