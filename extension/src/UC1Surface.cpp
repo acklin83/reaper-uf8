@@ -542,6 +542,18 @@ void UC1Surface::refresh()
     device_->send(buildChannelStripContext(csName));
     device_->send(buildBusCompContext(bcName));
 
+    // 7-segment position indicator — show the REAPER track number
+    // (1-based) on the central red display. Matches the MAIN/ROUTING
+    // page of the Central Control Panel.
+    if (focusedTrack_) {
+        int idx = static_cast<int>(GetMediaTrackInfo_Value(
+            static_cast<MediaTrack*>(focusedTrack_), "IP_TRACKNUMBER"));
+        if (idx < 0) idx = 0;
+        for (const auto& frame : buildSevenSeg(static_cast<unsigned int>(idx))) {
+            device_->send(frame);
+        }
+    }
+
     // Plugin-name tag (zone 0x10) — shows which CS plugin variant is
     // currently driving the Channel Strip section. Bus Comp 2 isn't
     // reflected here in captures; when neither plugin is present we

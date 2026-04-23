@@ -114,6 +114,101 @@ std::vector<uint8_t> buildBusCompContext(std::string_view name)
     return buildFrame(0x66, data);
 }
 
+namespace {
+
+// Segments lit for each decimal digit (standard 7-segment, a..g).
+// Each bit represents one segment; segments a,b,c,d,e,f,g indexed 0..6.
+//   bit 0 = a (top horizontal)
+//   bit 1 = b (top-right)
+//   bit 2 = c (bottom-right)
+//   bit 3 = d (bottom horizontal)
+//   bit 4 = e (bottom-left)
+//   bit 5 = f (top-left)
+//   bit 6 = g (middle)
+constexpr uint8_t kDigitSegments[10] = {
+    0b0111111,  // 0: a,b,c,d,e,f
+    0b0000110,  // 1: b,c
+    0b1011011,  // 2: a,b,d,e,g
+    0b1001111,  // 3: a,b,c,d,g
+    0b1100110,  // 4: b,c,f,g
+    0b1101101,  // 5: a,c,d,f,g
+    0b1111101,  // 6: a,c,d,e,f,g
+    0b0000111,  // 7: a,b,c
+    0b1111111,  // 8: all
+    0b1101111,  // 9: a,b,c,d,f,g
+};
+
+// Push 7 FF 13 04 01 <cell> 00 <state> frames for one digit position.
+void appendDigit(std::vector<std::vector<uint8_t>>& out,
+                 uint8_t baseCell,
+                 bool blank,
+                 uint8_t digit)
+{
+    const uint8_t segs = blank ? 0 : kDigitSegments[digit];
+    for (int s = 0; s < 7; ++s) {
+        const uint8_t state = (segs & (1 << s)) ? 0xFF : 0x00;
+        out.push_back(buildLedWrite(0x01, baseCell + s, state));
+        // buildLedWrite uses byte3=0x01 (VU flag) — but 7-seg needs
+        // byte3=0x00. Rewrite that byte.
+        auto& f = out.back();
+        // Frame layout: FF 13 04 01 <cell> 01 <state> <chk>
+        //                        idx: 3   4    5    6     7
+        f[5] = 0x00;  // switch from VU-mode flag to 7-seg-mode flag
+        // Recompute checksum: sum(cmd + len + data) mod 256.
+        uint32_t sum = 0;
+        for (size_t i = 1; i < f.size() - 1; ++i) sum += f[i];
+        f.back() = static_cast<uint8_t>(sum & 0xFF);
+    }
+}
+
+} // namespace
+
+std::vector<std::vector<uint8_t>> buildSevenSeg(unsigned int value)
+{
+    if (value > 999) value = 999;
+    std::vector<std::vector<uint8_t>> frames;
+    frames.reserve(21);
+
+    const uint8_t ones    = static_cast<uint8_t>(value % 10);
+    const uint8_t tens    = static_cast<uint8_t>((value / 10) % 10);
+    const uint8_t hundreds= static_cast<uint8_t>((value / 100) % 10);
+
+    // Ones digit always shown.
+    appendDigit(frames, 0x10, false, ones);
+    // Tens blank when value < 10 (no leading zero).
+    appendDigit(frames, 0x08, value < 10, tens);
+    // Hundreds: partial decode from uc1_27 — only the 4 cells we saw
+    // toggled during the 99→100 transition. Blank for < 100, else
+    // send the best-effort "1"-like pattern on those 4 cells for any
+    // 100..999 value. Refine with a targeted capture when needed.
+    if (value >= 100) {
+        // Observed cells when "1" appeared: 0x00, 0x03, 0x04, 0x05 all
+        // toggled. Render "hundreds" by lighting all 4 — if any of
+        // those correspond to "0" or "2" shapes, the display will be
+        // slightly wrong but the tens+ones will be correct.
+        for (uint8_t c : {0x00, 0x03, 0x04, 0x05}) {
+            auto f = buildLedWrite(0x01, c, 0xFF);
+            f[5] = 0x00;
+            uint32_t sum = 0;
+            for (size_t i = 1; i < f.size() - 1; ++i) sum += f[i];
+            f.back() = static_cast<uint8_t>(sum & 0xFF);
+            frames.push_back(std::move(f));
+        }
+    } else {
+        // Blank: clear all hundreds cells we know about.
+        for (uint8_t c : {0x00, 0x03, 0x04, 0x05}) {
+            auto f = buildLedWrite(0x01, c, 0x00);
+            f[5] = 0x00;
+            uint32_t sum = 0;
+            for (size_t i = 1; i < f.size() - 1; ++i) sum += f[i];
+            f.back() = static_cast<uint8_t>(sum & 0xFF);
+            frames.push_back(std::move(f));
+        }
+    }
+
+    return frames;
+}
+
 std::vector<uint8_t> buildDisplayText(uint8_t zone, std::string_view text, size_t width)
 {
     std::vector<uint8_t> data;

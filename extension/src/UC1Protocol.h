@@ -193,6 +193,22 @@ std::vector<uint8_t> buildDisplayText(uint8_t zone, std::string_view text, size_
 // Zero-GR convenience: FF 5B 02 00 00.
 inline std::vector<uint8_t> buildZeroGr() { return buildGrMeter(0.0f); }
 
+// Build the set of OUT frames that together drive the UC1's central
+// 7-segment display to show `value` (0..999). Each digit's segments
+// are individual LED cells on bank 0x01:
+//
+//   Ones digit:  cells 0x10..0x16 = segments a..g alphabetical
+//   Tens digit:  cells 0x08..0x0E = segments a..g alphabetical
+//   Hundreds:    cells 0x00,0x03,0x04,0x05 — only partially decoded
+//                from uc1_27 (99→100 transition only lit "1"-segments);
+//                values ≥ 100 currently render the ones+tens faithfully
+//                and leave the hundreds cells at whatever state they
+//                inherit from the prior display.
+//
+// Each segment gets FF 13 04 01 <cell> 00 <state> with state=0xFF (on)
+// or 0x00 (off). Caller should send ALL returned frames in order.
+std::vector<std::vector<uint8_t>> buildSevenSeg(unsigned int value);
+
 // Build the zone 0x02 Channel-Strip context frame with the DAW track
 // name for the Channel Strip section. 36-byte content field; the track
 // name is written at position 12 (from uc1_25: "TESTCS" landed there).
