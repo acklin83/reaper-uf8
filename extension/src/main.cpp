@@ -562,40 +562,42 @@ ReaSixtySurface::ReaSixtySurface()
         g_midi->openUf8Output();
     }
 
+    // UF8 open — optional now. Either UF8, UC1, or both may be on the bus
+    // during any given session. Previously the surface bailed out if UF8
+    // couldn't be opened, which meant a UC1-only setup never reached the
+    // UC1 init below.
     g_dev = std::make_unique<uf8::UF8Device>();
-    if (!g_dev->open()) {
-        ShowConsoleMsg(("Rea-Sixty: " + g_dev->lastError() + "\n").c_str());
+    const bool uf8Opened = g_dev->open();
+    if (!uf8Opened) {
+        ShowConsoleMsg(("Rea-Sixty UF8: " + g_dev->lastError()
+                        + "  (UF8 optional — continuing)\n").c_str());
         g_dev.reset();
-        return;
-    }
-    g_sync = std::make_unique<uf8::ColorSync>(*g_dev);
-    g_sync->invalidate();
-    g_dev->setRawInputHandler(onUf8Input);
+    } else {
+        g_sync = std::make_unique<uf8::ColorSync>(*g_dev);
+        g_sync->invalidate();
+        g_dev->setRawInputHandler(onUf8Input);
 
-    // UF8 firmware powers up with every SEL/MUTE/SOLO LED lit; we want
-    // them all dark until REAPER state says otherwise. Blast an OFF for
-    // every id 0x00..0x17 at open time so the initial display matches
-    // an idle REAPER session.
-    for (uint8_t id = 0x00; id <= 0x17; ++id) {
-        g_dev->send(uf8::buildLedCommand(id, false));
-    }
+        // UF8 firmware powers up with every SEL/MUTE/SOLO LED lit; we want
+        // them all dark until REAPER state says otherwise. Blast an OFF for
+        // every id 0x00..0x17 at open time so the initial display matches
+        // an idle REAPER session.
+        for (uint8_t id = 0x00; id <= 0x17; ++id) {
+            g_dev->send(uf8::buildLedCommand(id, false));
+        }
 
-    // Force the bank-change re-sync block to fire on the very first
-    // timer tick so LED state, slot caches and colors all reflect
-    // REAPER's actual state from the get-go (rather than whatever stale
-    // values the surface booted with).
-    g_bankDirty.store(true);
+        // Force the bank-change re-sync block to fire on the very first
+        // timer tick so LED state, slot caches and colors all reflect
+        // REAPER's actual state from the get-go (rather than whatever stale
+        // values the surface booted with).
+        g_bankDirty.store(true);
 
-    // Zero the fader positions captured in the layer-replay blob (which
-    // still hold the SSL session's fader values at capture time). The
-    // timer will snap every slot to its real REAPER volume on the first
-    // tick, but until then we want a clean 0 dB rest position rather
-    // than the ghosted levels from the capture.
-    const uint16_t pb0dB = linearVolumeToPb(1.0);
-    const uint8_t  lsb   = static_cast<uint8_t>(pb0dB & 0x7F);
-    const uint8_t  msb   = static_cast<uint8_t>((pb0dB >> 7) & 0x7F);
-    for (uint8_t s = 0; s < 8; ++s) {
-        g_dev->send(uf8::buildFaderPosition(s, lsb, msb));
+        // Zero the fader positions captured in the layer-replay blob.
+        const uint16_t pb0dB = linearVolumeToPb(1.0);
+        const uint8_t  lsb   = static_cast<uint8_t>(pb0dB & 0x7F);
+        const uint8_t  msb   = static_cast<uint8_t>((pb0dB >> 7) & 0x7F);
+        for (uint8_t s = 0; s < 8; ++s) {
+            g_dev->send(uf8::buildFaderPosition(s, lsb, msb));
+        }
     }
 
     // Best-effort UC1 attach — absence is fine, UF8 runs standalone.
