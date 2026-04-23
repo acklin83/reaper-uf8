@@ -81,22 +81,41 @@ std::vector<uint8_t> buildLedWrite(uint8_t bank, uint8_t cell, uint8_t state)
 std::vector<uint8_t> buildTrackNameContext(std::string_view csName,
                                            std::string_view bcName)
 {
-    // 42-byte data field after the zone byte. Slot layout derived
-    // empirically from uc1_24b.
+    // 42-byte data field after the zone byte. Slot layout: SSL 360°
+    // writes "No Plug-ins" at position 14 (11 chars through pos 24)
+    // and track names of the same-slot kind at position 14 too (from
+    // uc1_24b: "TESTBUS" landed at positions 14..20 with BC 2 loaded).
+    //
+    // Two-slot interpretation still hypothetical — uc1_20 (CS 2 only)
+    // wrote "-------" (7 dashes) at position 14 and a 'b' marker byte
+    // at position 28, suggesting:
+    //   pos 14..27 = "active plugin display slot"  (shows track name
+    //              of whichever plugin is the focus, or "-------" /
+    //              "No Plug-ins" placeholders)
+    //   pos 28     = state marker ('b' etc.)
+    //   pos 29+    = possibly the second slot — not yet proven
+    //
+    // First fix: push the BC track name to pos 14 if present, else the
+    // CS track name to pos 14, else dashes. Second slot at pos 29+
+    // gets whichever name wasn't used (best-effort until we have a
+    // capture showing both names simultaneously).
     constexpr size_t kFieldWidth = 42;
-    constexpr size_t kCsStart    = 0;
-    constexpr size_t kCsLen      = 14;   // first slot: Channel Strip
-    constexpr size_t kBcStart    = 16;
-    constexpr size_t kBcLen      = 14;   // second slot: Bus Compressor
+    constexpr size_t kSlotALen   = 14;  // positions 14..27
+    constexpr size_t kSlotBLen   = 13;  // positions 29..41
 
     std::vector<uint8_t> data(1 + kFieldWidth, 0x00);
-    data[0] = 0x04;  // zone
+    data[0] = 0x04;
 
-    const size_t nCs = std::min(csName.size(), kCsLen);
-    for (size_t i = 0; i < nCs; ++i) data[1 + kCsStart + i] = static_cast<uint8_t>(csName[i]);
+    // Prefer BC name in slot A (we have direct evidence for that);
+    // fall back to CS name if no BC.
+    std::string_view primary   = !bcName.empty() ? bcName : csName;
+    std::string_view secondary = (!bcName.empty() && !csName.empty()) ? csName : std::string_view{};
 
-    const size_t nBc = std::min(bcName.size(), kBcLen);
-    for (size_t i = 0; i < nBc; ++i) data[1 + kBcStart + i] = static_cast<uint8_t>(bcName[i]);
+    const size_t nA = std::min(primary.size(), kSlotALen);
+    for (size_t i = 0; i < nA; ++i) data[1 + 14 + i] = static_cast<uint8_t>(primary[i]);
+
+    const size_t nB = std::min(secondary.size(), kSlotBLen);
+    for (size_t i = 0; i < nB; ++i) data[1 + 29 + i] = static_cast<uint8_t>(secondary[i]);
 
     return buildFrame(0x66, data);
 }

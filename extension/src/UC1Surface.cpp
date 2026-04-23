@@ -447,12 +447,9 @@ void UC1Surface::refresh()
 
     auto bindings = focusedTrack_ ? lookupBindingsOnTrack(focusedTrack_) : UC1Bindings{};
 
-    // Track name push — zone 0x04. SSL 360° shows the DAW track name
-    // of each plugin in the central display (Channel Strip slot +
-    // Bus Compressor slot). Empty-slot default is "No Plug-ins".
-    //
-    // REAPER's track name comes from GetSetMediaTrackInfo_String;
-    // fall back to "Track N" style default if the user hasn't named it.
+    // Track name push — zone 0x04. One active slot at positions 14..27
+    // plus a possible second slot at 29+. Writes both so whichever
+    // physical LCD area reads which position gets the right name.
     std::string csName, bcName;
     if (focusedTrack_) {
         MediaTrack* tr = static_cast<MediaTrack*>(focusedTrack_);
@@ -464,6 +461,21 @@ void UC1Surface::refresh()
             if (bindings.busCompMap) bcName = nameBuf;
         }
     }
+
+    // Diag — one-shot log of what we're pushing so the user can
+    // correlate with what the UC1 actually displays.
+    {
+        static int kDiagRemaining = 8;
+        if (kDiagRemaining > 0) {
+            --kDiagRemaining;
+            char line[128];
+            std::snprintf(line, sizeof(line),
+                "UC1 refresh zone=0x04  cs='%s' bc='%s'\n",
+                csName.c_str(), bcName.c_str());
+            ShowConsoleMsg(line);
+        }
+    }
+
     device_->send(buildTrackNameContext(csName, bcName));
 
     // Plugin-name tag (zone 0x10) — shows which CS plugin variant is
