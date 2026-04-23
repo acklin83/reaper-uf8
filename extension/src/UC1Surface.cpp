@@ -172,11 +172,16 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
 
     // CHANNEL encoder — scrolls through REAPER tracks. The UC1's
     // CHANNEL encoder sends ~4 delta ticks per physical detent click,
-    // much finer than the Bus Comp V-Pots (which send 1 per detent).
-    // Accumulate across events so one detent = one track step.
+    // much finer than the Bus Comp V-Pots. Accumulate across events
+    // so one detent = one track step. Clear the accumulator on any
+    // direction change — otherwise leftover same-sign residue eats
+    // the first reversed click.
     if (ev.id == knob::kChannelEncoder) {
         static int acc = 0;
         constexpr int kTicksPerStep = 4;
+        if ((ev.delta > 0 && acc < 0) || (ev.delta < 0 && acc > 0)) {
+            acc = 0;
+        }
         acc += ev.delta;
         int step = acc / kTicksPerStep;
         acc -= step * kTicksPerStep;
