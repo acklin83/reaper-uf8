@@ -322,10 +322,7 @@ namespace {
 // Strip a single space between the numeric part and the unit suffix.
 // REAPER's TrackFX_FormatParamValueNormalized returns "12.1 dB",
 // "102.5 Hz", "50.0 %", "0.12 s" — SSL 360°'s zone 0x05 format is the
-// same without the separator space ("12.1dB", "102.5Hz"). UC1's
-// numeric display addresses specific character cells per digit, so
-// sending the string with an extra space shifts the sign/digit column
-// by one and produces garbage like "-2 0.0dB" instead of "-20.0dB".
+// same without the separator space ("12.1dB", "102.5Hz").
 std::string compactUnit(std::string_view s)
 {
     std::string r{s};
@@ -339,6 +336,22 @@ std::string compactUnit(std::string_view s)
             break;
         }
     }
+    return r;
+}
+
+// Right-pad / left-pad a value string to a fixed width. UC1's numeric
+// LCD has physically-spaced digit slots with a gap between the
+// leftmost sign/overflow slot and the main digit column. SSL 360°
+// sends values in a fixed position so chars always land in expected
+// slots; anything shorter gets leading spaces, anything longer
+// "overflows" into the sign slot (bad — shows e.g. "1    02.5Hz"
+// instead of "102.5Hz"). Forcing 7 chars matches the captured format
+// for the widest Bus Comp values ("-20.0dB", "-10.0dB", "102.5Hz").
+std::string padValueFixed(std::string_view s, size_t width = 7)
+{
+    if (s.size() >= width) return std::string{s};
+    std::string r(width - s.size(), ' ');
+    r.append(s);
     return r;
 }
 
@@ -356,11 +369,30 @@ void UC1Surface::pushKnobReadout_(uint8_t knobId, void* trackRaw, int fxIdx,
     const double cur = TrackFX_GetParamNormalized(tr, fxIdx, vst3Param);
     TrackFX_FormatParamValueNormalized(tr, fxIdx, vst3Param, cur,
                                        formatted, sizeof(formatted));
-    // UC1 expects compact "X.XdB" / "X.XHz" / "X%" — strip the space
-    // REAPER inserts between number and unit.
-    std::string value = compactUnit(formatted);
+    // UC1 expects compact "X.XdB" / "X.XHz" / "X%" and a fixed-width
+    // value field so digits land in the right LCD slot.
+    std::string value = padValueFixed(compactUnit(formatted), 7);
 
     auto readout = formatReadout(label, value);
+
+    // Diag — log the final 22-char string for the first N events per
+    // knob ID. Use '·' placeholder for space so we can count columns
+    // exactly. Helps diagnose value-alignment problems in zone 0x05/03.
+    static int kReadoutDebugRemaining[0x20] = {
+        3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+        3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+    };
+    if (knobId < 0x20 && kReadoutDebugRemaining[knobId] > 0) {
+        --kReadoutDebugRemaining[knobId];
+        std::string vis = readout;
+        for (auto& c : vis) if (c == ' ') c = '.';
+        char line[64];
+        std::snprintf(line, sizeof(line),
+            "UC1 push zone=0x%02x raw='%s' → '%s'\n",
+            zone, formatted, vis.c_str());
+        ShowConsoleMsg(line);
+    }
+
     device_->send(buildDisplayText(zone, readout, 22));
 }
 
