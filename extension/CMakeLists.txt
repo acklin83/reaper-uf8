@@ -57,6 +57,8 @@ add_library(reaper_uf8 MODULE
     src/Palette.cpp
     src/PluginMap.cpp
     src/UF8Device.cpp
+    src/UC1Protocol.cpp
+    src/UC1Device.cpp
     src/ColorSync.cpp
     src/MidiBridge.cpp
     src/HidDevice.cpp
@@ -95,6 +97,10 @@ add_executable(test_protocol tests/test_protocol.cpp src/Protocol.cpp src/Palett
 target_include_directories(test_protocol PRIVATE src)
 enable_testing()
 add_test(NAME protocol COMMAND test_protocol)
+
+add_executable(test_uc1_protocol tests/test_uc1_protocol.cpp src/UC1Protocol.cpp)
+target_include_directories(test_uc1_protocol PRIVATE src)
+add_test(NAME uc1_protocol COMMAND test_uc1_protocol)
 
 # ----- CLI smoke-test (libusb only, no REAPER) --------------------------------
 add_executable(uf8_color_test tools/uf8_color_test.cpp src/Protocol.cpp)
