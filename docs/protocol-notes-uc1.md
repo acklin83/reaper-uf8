@@ -283,6 +283,28 @@ The SSL plugins ship GR to 360° over encrypted Thrift IPC (see `plugin-ipc-note
 | 2026-04-23 | `uc1_20_buttons_cs2.pcapng` | Same 16-button sequence with SSL Native Channel Strip 2 (60 s, 67 372 pkts) — IDs confirmed stable across plugins; HF Bell + EQ Type gated off by CS 2 |
 | 2026-04-23 | `uc1_21_led_buscomp.pcapng` | 17 buttons incl. Bus Comp IN, Bus Comp 2 loaded (75 s, 84 276 pkts) — Bus Comp IN = 0x0C confirmed; full `FF 13 04` per-button LED cell map derived; HF Bell silent with Bus Comp 2 |
 | 2026-04-23 | `uc1_22_bells_cs2.pcapng` | HF Bell + LF Bell 10× each, CS 2 (30 s, 33 752 pkts) — HF Bell LED cell = 0x89; overturns uc1_20 "HF Bell silent with CS 2" (was contact issue) |
+| 2026-04-23 | `uc1_23_ssl360_startup.pcapng` | SSL 360° cold-start handshake — 5 init frames (FF 01/02/05/4B/4E) + 1394-frame LED-init flood |
+| 2026-04-23 | `uc1_24_trackname.pcapng` | Bus Comp IN toggle on track TESTBUS (20 s) — button events only, no track-name frames |
+| 2026-04-23 | `uc1_24b_trackname_reload.pcapng` | BC 2 remove/re-add on TESTBUS (25 s, 28 250 pkts) — BC track name = zone 0x04 pos 14 |
+| 2026-04-23 | `uc1_25_cs_trackname.pcapng` | CS 2 remove/re-add on TESTCS (25 s, 29 290 pkts) — CS track name = zone 0x02 pos 12 |
+| 2026-04-23 | `uc1_26_7seg_scroll.pcapng` | CHANNEL-encoder scroll through 16 CS 2 instances (30 s, 34 056 pkts) — 7-seg LEDs at bank 0x01 cells, 22 unique FF 13 04 frames, per-segment addressing still TBD |
+
+## Central-panel 7-segment display (TBD)
+
+The 3-digit red 7-segment display left of the CHANNEL encoder is
+driven by `FF 13 04 01 <cell> 00 <state>` frames — same bank (0x01)
+as the VU meters but with different cell addresses and `byte3=0x00`
+instead of the VU `byte3=0x01`.
+
+uc1_26 (16 CS instances, scrolled through) showed 22 unique cell
+addresses around 0x08..0x16 getting toggled between state 0x00 and
+0x01 as positions changed. This is per-segment addressing — each
+cell corresponds to one LED segment of one digit.
+
+Decoding map requires a targeted capture that shows individual digits
+in isolation (e.g. force-display "1", then "2", then "8", log which
+cells change). Defer until a specific need arises — track-select
+feature works without the 7-seg readout.
 | 2026-04-22 | `uc1_01_init_clean.pcapng` | Init/wakeup sequence on fresh enumeration — 27944 pkts to address 28, endpoints 0x00/0x80/0x02/0x81 |
 | 2026-04-22 | `uc1_02_idle_baseline.pcapng` | 10 s idle heartbeat — 11288 pkts, ~1130 pkt/s, same endpoint set. Baseline input for every diff. |
 | 2026-04-22 | `uc1_03_plugin_presence.pcapng` | Plugin load/unload transitions (30 s, 34298 pkts, 315 novel): empty → +BusComp2 → +ChStrip2 → −BusComp2 → −ChStrip2 |
