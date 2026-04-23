@@ -177,18 +177,32 @@ State byte: `0x01` = press, `0x00` = release. Middle byte (always `0x00` observe
 
 Button IDs mapped against user's pressed sequence in `uc1_08`:
 
-**Direct-evidence mappings (from narrow single-button captures with display confirmation):**
+**Complete button-ID map (4K E context, direct zone 0x03 display text):**
 
-| `button_id` | Button | Source |
-|------------:|--------|--------|
-| `0x0A` | EQ IN | `uc1_18` — zone 0x03 shows `"EQ              In/Out"` toggling |
-| `0x1A` | S/C Listen | `uc1_14` — zone 0x03 shows `"S/C Listen      On/Off"` |
-| `0x1B` | Solo Clear | `uc1_17` — zone 0x03 shows `"Solo Clear      Off"` |
-| `0x1C` | Solo | `uc1_17` — zone 0x03 shows `"Solo            On"` |
+| ID | Button | Display text |
+|----|--------|--------------|
+| `0x08` | HF Bell | `"HF Bell         In"` |
+| `0x09` | EQ Type | `"EQ Colour       Orange"` (4K E) |
+| `0x0A` | EQ In | `"EQ              Out/In"` |
+| `0x0B` | LF Bell | `"LF Bell         In"` |
+| `0x14` | Fast Attack (Comp) | `"Fast Attack     In"` |
+| `0x15` | Peak | (no display text — button fires silently) |
+| `0x16` | Dyn In | `"DYN             Out/In"` |
+| `0x17` | Expand | `"Expander        In"` |
+| `0x18` | Fast Attack (Gate) | `"Fast Attack     In"` (same label string as Comp's, different ID) |
+| `0x19` | Polarity | `"Ø               In"` |
+| `0x1A` | S/C Listen | `"S/C Listen      On/Off"` |
+| `0x1B` | Solo Clear | `"Solo Clear      Off"` |
+| `0x1C` | Solo | `"Solo            On"` |
+| `0x1D` | Cut | `"Cut             On"` |
+| `0x1F` | Fine | `"Fine            On"` |
+| `0x1E` | Channel IN | `"Channel Strip   Out"` |
 
-**Inferred from `uc1_08` sequence alignment only (likely unreliable — treat as TBD):** `0x0B`, `0x0C`, `0x14`, `0x15`, `0x16`, `0x17`, `0x18`, `0x19`. Candidate labels from user's reported order are Type (E), Bus Comp IN, Bell LF, Fast Attack, Peak, Dyn In, Expand, Fast Attack (Gate) — any specific mapping should be re-verified with a narrow per-button capture before relying on it in code. The `uc1_18` correction of `0x0A` (was inferred as "Bell HF", is actually EQ IN) shows the sequence alignment isn't trustworthy beyond ordinal proximity.
+Plus `0x0C` = **Bus Comp IN** (from `uc1_08` positional evidence, direct-display-evidence still pending a targeted Bus-Comp-section capture).
 
-**Button that doesn't emit `FF 22` on this firmware:** **Polarity** — zero events across `uc1_08`, `uc1_17`, `uc1_18`. Likely handled internally by SSL 360° (mouse-side only) or via a command family not yet surfaced in our captures. Initial Rea-Sixty implementation can ignore it.
+All 16 Channel-Strip-area buttons + 1 Bus Comp button cover the UC1's full button inventory. Earlier apparent "Polarity doesn't emit events" was a physical-contact issue on the user side, not a firmware peculiarity — `uc1_19` confirms every button fires reliably when firmly pressed.
+
+**Plugin-context remapping still to verify:** `uc1_20` is planned to repeat the same 16-button sequence with SSL Native Channel Strip 2 loaded, to check whether button IDs stay constant across Channel Strip plugins or — like the top V-Pot knobs — get repurposed by plugin context. EQ Type's display label varies per plugin (Black/Orange/Brown for 4K E; Black/Pink for 4K G; In/Out for CS2), so at minimum the display content is plugin-aware; whether the button ID is stable remains to be shown.
 
 ### Track-selection follow (host-driven)
 UC1 does not send a "track changed" event — track focus is driven by SSL 360° observing the DAW. `uc1_10` confirmed this: in the focus walk 1→2→3→4→1 the only novel payload was one OUT frame (`ff 66 2b 04 …`), no novel IN frames. Rea-Sixty's `FocusedTrack` must therefore push the retarget frame itself when REAPER's `SetTrackSelected` fires.
@@ -237,7 +251,8 @@ The SSL plugins ship GR to 360° over encrypted Thrift IPC (see `plugin-ipc-note
 | 2026-04-23 | `uc1_15_knob_channelstrip_sweep.pcapng` | 4K E loaded, 20 CS pots swept sequentially (180 s, 209 802 pkts) — full CS knob-ID table via zone 0x03 display text |
 | 2026-04-23 | `uc1_16_missing_buttons.pcapng` | User pressed EQ IN + Solo Clear each 5× (15 s, 16 990 pkts) — only `0x1B` fired; later proven to be Solo Clear (not EQ IN), user likely pressed wrong button |
 | 2026-04-23 | `uc1_17_polarity_soloclear.pcapng` | Polarity + Solo + Solo Clear (20 s, 22 500 pkts) — `0x1C = Solo`, `0x1B = Solo Clear` via zone 0x03 display text; Polarity no events |
-| 2026-04-23 | `uc1_18_polarity_eqin_hold.pcapng` | Polarity + EQ IN + Gate Hold (with CS 2 loaded) (20 s, 23 888 pkts) — `0x0A = EQ IN`, `0x18 = Gate Hold` (CS 2 param); Polarity again no events |
+| 2026-04-23 | `uc1_18_polarity_eqin_hold.pcapng` | Polarity + EQ IN + Gate Hold (with CS 2 loaded) (20 s, 23 888 pkts) — `0x0A = EQ IN`, `0x18 = Gate Hold` (CS 2 param); Polarity no events (physical contact issue, not firmware) |
+| 2026-04-23 | `uc1_19_buttons_4ke.pcapng` | All 16 Channel-Strip-area buttons, one press each, 4K E loaded (60 s, 67 384 pkts) — full button-ID map via zone 0x03 display text |
 | 2026-04-22 | `uc1_01_init_clean.pcapng` | Init/wakeup sequence on fresh enumeration — 27944 pkts to address 28, endpoints 0x00/0x80/0x02/0x81 |
 | 2026-04-22 | `uc1_02_idle_baseline.pcapng` | 10 s idle heartbeat — 11288 pkts, ~1130 pkt/s, same endpoint set. Baseline input for every diff. |
 | 2026-04-22 | `uc1_03_plugin_presence.pcapng` | Plugin load/unload transitions (30 s, 34298 pkts, 315 novel): empty → +BusComp2 → +ChStrip2 → −BusComp2 → −ChStrip2 |
