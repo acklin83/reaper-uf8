@@ -481,13 +481,14 @@ void UC1Surface::refresh()
             --kDiagRemaining;
             char line[128];
             std::snprintf(line, sizeof(line),
-                "UC1 refresh zone=0x04  cs='%s' bc='%s'\n",
+                "UC1 refresh  cs='%s' bc='%s'\n",
                 csName.c_str(), bcName.c_str());
             ShowConsoleMsg(line);
         }
     }
 
-    device_->send(buildTrackNameContext(csName, bcName));
+    device_->send(buildChannelStripContext(csName));
+    device_->send(buildBusCompContext(bcName));
 
     // Plugin-name tag (zone 0x10) — shows which CS plugin variant is
     // currently driving the Channel Strip section. Bus Comp 2 isn't

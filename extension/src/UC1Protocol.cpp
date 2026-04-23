@@ -78,44 +78,38 @@ std::vector<uint8_t> buildLedWrite(uint8_t bank, uint8_t cell, uint8_t state)
     return buildFrame(0x13, data);
 }
 
-std::vector<uint8_t> buildTrackNameContext(std::string_view csName,
-                                           std::string_view bcName)
+std::vector<uint8_t> buildChannelStripContext(std::string_view name)
 {
-    // 42-byte data field after the zone byte. Slot layout: SSL 360°
-    // writes "No Plug-ins" at position 14 (11 chars through pos 24)
-    // and track names of the same-slot kind at position 14 too (from
-    // uc1_24b: "TESTBUS" landed at positions 14..20 with BC 2 loaded).
-    //
-    // Two-slot interpretation still hypothetical — uc1_20 (CS 2 only)
-    // wrote "-------" (7 dashes) at position 14 and a 'b' marker byte
-    // at position 28, suggesting:
-    //   pos 14..27 = "active plugin display slot"  (shows track name
-    //              of whichever plugin is the focus, or "-------" /
-    //              "No Plug-ins" placeholders)
-    //   pos 28     = state marker ('b' etc.)
-    //   pos 29+    = possibly the second slot — not yet proven
-    //
-    // First fix: push the BC track name to pos 14 if present, else the
-    // CS track name to pos 14, else dashes. Second slot at pos 29+
-    // gets whichever name wasn't used (best-effort until we have a
-    // capture showing both names simultaneously).
+    // 36-byte content field (+ zone byte = 37 total data). Name at
+    // position 12, up to ~12 chars (uc1_20 saw a 'b' marker at pos 24
+    // when the slot held a placeholder — treat 12..23 as the usable
+    // text range).
+    constexpr size_t kFieldWidth = 36;
+    constexpr size_t kNamePos    = 12;
+    constexpr size_t kNameLen    = 12;
+
+    std::vector<uint8_t> data(1 + kFieldWidth, 0x00);
+    data[0] = 0x02;
+
+    const size_t n = std::min(name.size(), kNameLen);
+    for (size_t i = 0; i < n; ++i) data[1 + kNamePos + i] = static_cast<uint8_t>(name[i]);
+
+    return buildFrame(0x66, data);
+}
+
+std::vector<uint8_t> buildBusCompContext(std::string_view name)
+{
+    // 42-byte content field (+ zone byte = 43 total). Name at position
+    // 14, up to 14 chars (uc1_24b: "TESTBUS" landed at 14..20).
     constexpr size_t kFieldWidth = 42;
-    constexpr size_t kSlotALen   = 14;  // positions 14..27
-    constexpr size_t kSlotBLen   = 13;  // positions 29..41
+    constexpr size_t kNamePos    = 14;
+    constexpr size_t kNameLen    = 14;
 
     std::vector<uint8_t> data(1 + kFieldWidth, 0x00);
     data[0] = 0x04;
 
-    // Prefer BC name in slot A (we have direct evidence for that);
-    // fall back to CS name if no BC.
-    std::string_view primary   = !bcName.empty() ? bcName : csName;
-    std::string_view secondary = (!bcName.empty() && !csName.empty()) ? csName : std::string_view{};
-
-    const size_t nA = std::min(primary.size(), kSlotALen);
-    for (size_t i = 0; i < nA; ++i) data[1 + 14 + i] = static_cast<uint8_t>(primary[i]);
-
-    const size_t nB = std::min(secondary.size(), kSlotBLen);
-    for (size_t i = 0; i < nB; ++i) data[1 + 29 + i] = static_cast<uint8_t>(secondary[i]);
+    const size_t n = std::min(name.size(), kNameLen);
+    for (size_t i = 0; i < n; ++i) data[1 + kNamePos + i] = static_cast<uint8_t>(name[i]);
 
     return buildFrame(0x66, data);
 }
