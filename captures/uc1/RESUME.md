@@ -1,53 +1,51 @@
 # Rea-Sixty UC1 — Resume Point
 
-**Last commit:** `ede90ec` on `main`, pushed.
-**Phase status:** UC1 implementation is live and working on hardware. Core feature set complete; nice-to-haves remain.
+**Last commit:** TBD on `main`, pushed.
+**Phase status:** UC1 core + track-state integration working. Both UC1 and UF8 follow REAPER selection; LED feedback working for the central-section track buttons.
 
 ## What works end-to-end (tested on macOS with real UC1)
 
-- **Device lifecycle**: handshake (FF 01/02/05/4B/4E) + 1394-frame LED init flood, 50 Hz GR stream as liveness heartbeat, 150 ms FF 1B keepalive. UF8 optional in the same extension instance.
-- **Bus Comp 2 V-Pots** (all 7, IDs 0x0E/0x0F/0x10/0x11/0x12/0x13/0x14) drive the right VST3 params with display readout at position 16 in zone 0x05. Values compact ("12.1dB" not "12.1 dB"), non-numeric tokens drop the unit ("OFF" not "OFFHz").
-- **Channel Strip knobs** (4K E / CS 2) drive VST3 params with display readout in zone 0x03.
-- **Channel Strip buttons** (16 total, IDs 0x08..0x1F) toggle plugin params + LED feedback via `FF 13 04 02 <cell> 01 <0xFF/0x00>`.
-- **Channel IN / Bus Comp IN** toggle `TrackFX_SetEnabled` bypass.
-- **Track name** pushed to zone 0x02 (CS slot) and zone 0x04 (BC slot). CS slot always shows the focused-track name; BC slot only when a Bus Comp plugin is loaded.
-- **CHANNEL encoder (0x0D)** scrolls REAPER tracks, 4 ticks per click, direction-change + 100 ms timeout accumulator reset.
-- **BC encoder (0x15)** jumps to nearest BC-hosting track relative to current focus, 3 ticks/click.
-- **7-segment display** shows REAPER track index (001..099 correct, 100..199 best-effort). Hundreds digit still partial decode — cells 0x00/0x03/0x04/0x05 light for "1"; cells 0x01/0x02/0x06/0x07 always cleared to wipe init residue.
+- **Device lifecycle** (unchanged from previous resume): handshake + init flood + 50 Hz GR heartbeat + 150 ms keepalive. UF8 optional in the same extension instance.
+- **Bus Comp 2 V-Pots** + **CS knobs** drive VST3 params with display readout.
+- **Channel Strip plugin-param buttons** (HF Bell, EQ Type, Dyn In, …) toggle plugin params + LEDs. bank=0x02 + state=0xFF per cap21 — works for this section.
+- **Track-state buttons** (Solo / Cut / Solo Clear / Polarity / Channel IN) → REAPER track state, with LEDs.
+  - Solo (0x1C) → `CSurf_OnSoloChange`
+  - Cut (0x1D) → `CSurf_OnMuteChange`
+  - Solo Clear (0x1B) → `Main_OnCommand(40340)` ("Unsolo all")
+  - Polarity (0x19) → toggles `B_PHASE` on focused track (note: button doesn't emit USB events on some firmware — LED still reflects state via `refresh()`)
+  - Channel IN (0x1E) → toggles plugin-internal IN param (scanned by name) on SSL Channel Strip; falls back to `TrackFX_SetEnabled` when no match; on non-SSL tracks bypasses FX index 0 (placeholder — future settings let user define channel-strip registry)
+  - LED encoding override: all five buttons use `bank=0x01, state=0x01` for on (not the cap21 bank=0x02 which turned out to be a status register). See `~/.claude/projects/.../memory/uc1-led-banks.md`.
+  - Solo Clear LED lights whenever any track in project is soloed (global indicator).
+- **CHANNEL encoder** (0x0D) and **BC encoder** (0x15) both:
+  - Scroll REAPER's track selection as before.
+  - **New:** trigger `reasixty_followSelectedInMixer` → REAPER MCP scrolls so the new track is visible, AND UF8 rebanks around the selection using the `BucketSnap` follow-mode.
+- **Track name**, **7-segment display**, **CHANNEL encoder** all unchanged from prior resume.
 
-## Critical protocol details
+## UF8 changes this session
 
-- Frame: `FF <cmd> <len> <data> <chk>`, chk = sum(cmd+len+data) mod 256.
-- `FF 13 04 <bank> <cell> <byte3> <state>`:
-  - byte3 = `0x01` → button/VU LEDs, state `0xFF` on / `0x33` dim / `0x00` off
-  - byte3 = `0x00` → 7-seg, state `0x01` on / `0x00` off
-- Display zone widths: CS zone 0x03 uses 22 chars ASCII. Zone 0x02 has CS track name at byte 12. Zone 0x04 has BC track name at byte 14.
-- Plugin-bypass: LEDs dim to `0x33`, not off.
+- **Empty strips get fully blanked.** Previously when the bank window extended past the last track (e.g. 12 tracks, bank=8 → strips 5–8 empty), the display still showed the previous bucket's residue in CS Type / Parameter Label / track name / dB readout / Value Line. Now `pushZonesForVisibleSlots` in main.cpp explicitly clears all six zones (CS Type "    ", Parameter Label "", Channel Number "", Track Name "", Fader dB "    ", Value Line "") for empty slots, with `bankChanged` forcing the first-tick push so the display actually reflects the blank even when the dedup cache was just cleared.
+- **Color bar for empty strips + default-color tracks = OFF.** `ColorSync::refresh` now emits palette index `0x00` (the hardware OFF state) for any slot whose RGB input is 0. Works correctly; 0x0C was a false lead (the Palette.cpp comment labelled 0x0C "OFF" but it actually renders light blue on this hardware).
+- **UF8 follows REAPER selection.** `ReaSixtySurface::SetSurfaceSelected` now calls `followSelectedInMixer(tr)` on any sel=true edge — clicks in TCP/MCP, ReaScript, other surfaces all rebank the UF8 to the BucketSnap containing the selected track.
+- **Fine button (UC1)** now toggles (latches); previously required holding.
+
+## Shared infrastructure
+
+- `reasixty_followSelectedInMixer(MediaTrack*)` is the external symbol in main.cpp that exposes the anonymous-namespace `followSelectedInMixer` helper so UC1Surface (different TU) can trigger the same MCP-scroll + UF8-rebank behaviour.
 
 ## Outstanding / nice-to-have
 
-- Hundreds digit of 7-seg: full per-segment decode (only 4 of 7 cells known)
-- GR-JSFX-Probe → `pushGainReduction()` wiring (JSFX lives at `extension/jsfx/rea_sixty_gr_probe.jsfx`)
+- **Channel IN param lookup on CS 2** — the "Channel In" VST3 param name our scan looks for doesn't match SSL Native Channel Strip 2's actual naming. `UC1Surface::channelInParam_` dumps every param name on first access; need to read the console output, identify the real name, and add it to `kCandidates`. Current fallback bypasses the whole plugin, which works but isn't what the user wants.
+- **Cleanup**: one-shot diag lines in `handleButton_` (Solo/Cut/SoloClear press logs) and `pushButtonLed_` (LED hex dump) should be removed once the Channel IN name lookup is settled. Also `kDumpedParams` flag in `channelInParam_`.
+- **Per-settings toggles** (documented in `reaper-uf8-project.md` memory backlog):
+  - "CHANNEL encoder selects on scroll" on/off
+  - "Bank-follow mode on selection" BucketSnap vs LeftmostStrip
+  - "Non-SSL channel-strip mapping" user-defined plugin registry
+- GR-JSFX-Probe → `pushGainReduction()` wiring
 - VU meter feed (track peaks → `pushVu(meter, level)`)
-- Solo / Cut / Solo Clear buttons → REAPER track-state routing (currently just consumed)
-- 4K E / 4K G / 4K B binding tables (CS 2 knob/button IDs are stable across plugins; just need the VST3 param indices per-variant — existing UF8 PluginMap has the numbers)
-- Link-System config page: map any VST3 plugin's params to UC1 BC section + CS section (Phase 3 of the roadmap)
+- V-Pot LED rings (protocol still undecoded)
+- 4K E / 4K G / 4K B binding tables
+- Link-System config page (Phase 3)
 
 ## Environment notes
 
-- Windows capture box: 192.168.177.197 (`claude`/`claudepass`), UC1 captures in `C:\Users\claude\uc1_capture\`, USBPcap interface `\\.\USBPcap3`.
-- UC1 device address rotates on replug — `parse_usbpcap_uc1.py` auto-detects.
-- UF8 must stay physically disconnected during UC1 captures (capture hygiene).
-- Reference handshake capture: `uc1_23_ssl360_startup.pcapng`. Used for the replayed init flood in `extension/src/uc1_init_sequence.inc`.
-- Hardware quirk: after a bad init or aborted session, UC1 firmware can hang and require a power-cycle at the unit (USB replug alone isn't always enough). Observed twice during debugging.
-
-## Capture inventory (UC1 work)
-
-- uc1_01..uc1_22: initial decode sweeps (knobs, buttons, LEDs, GR, VU, init)
-- uc1_23: SSL 360° cold-start handshake reference
-- uc1_24b: BC track name @ zone 0x04 pos 14
-- uc1_25: CS track name @ zone 0x02 pos 12
-- uc1_26: CHANNEL-encoder 110-position scroll (uncovered the 7-seg FF 13 04 01 mechanism)
-- uc1_27: systematic 7-seg decode (positions 1→20 and 99→105 — enough to decode ones + tens alphabetical)
-
-All captures committed to `captures/uc1/` (force-added; `captures/` is otherwise gitignored).
+Unchanged — see git history for the 2026-04-22 notes.

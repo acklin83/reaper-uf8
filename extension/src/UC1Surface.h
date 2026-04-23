@@ -46,6 +46,10 @@ public:
     // REAPER's SetTrackSelected callback or similar.
     void setFocusedTrack(void* track /*MediaTrack**/);
 
+    // Accessor so REAPER callbacks (e.g. SetSurfaceMute) can gate their
+    // UC1 refreshes on whether the event concerns the focused track.
+    void* focusedTrack() const { return focusedTrack_; }
+
     // Drain queued hardware events. Call from REAPER's main thread on a
     // timer (Run() or a deferred action). Returns the number of events
     // handled this tick.
@@ -88,6 +92,13 @@ private:
 
     // Push LED-cell state for a button after it toggles.
     void pushButtonLed_(uint8_t buttonId, bool on);
+
+    // Find the VST3 param index of the SSL Channel Strip's internal
+    // "Channel In" switch on the given track+fx slot. Scans param
+    // names for common spellings ("CsIn", "ChannelIn", "Channel In"…)
+    // and caches the hit. Returns -1 if no match; caller falls back to
+    // TrackFX_SetEnabled.
+    int channelInParam_(void* track /*MediaTrack**/, int fxIdx);
 
     // --- state ---
     UC1Device* device_ = nullptr;

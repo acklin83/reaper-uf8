@@ -8,6 +8,11 @@
 
 #include "reaper_plugin_functions.h"
 
+// Defined in main.cpp — scroll REAPER's MCP so the just-selected track
+// is visible (and, on UF8, rebank the 8-strip window around it). Shared
+// with UF8's SEL/CHANNEL-encoder paths so UC1 encoders feel identical.
+void reasixty_followSelectedInMixer(MediaTrack* tr);
+
 namespace uc1 {
 
 namespace {
@@ -208,6 +213,7 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
         MediaTrack* tr = GetTrack(nullptr, next);
         if (tr) {
             SetOnlyTrackSelected(tr);
+            reasixty_followSelectedInMixer(tr);
             setFocusedTrack(tr);
         }
         if (logThis) {
@@ -272,6 +278,7 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
         MediaTrack* tr = GetTrack(nullptr, found);
         if (tr) {
             SetOnlyTrackSelected(tr);
+            reasixty_followSelectedInMixer(tr);
             setFocusedTrack(tr);
         }
         if (logThis) {
@@ -379,22 +386,92 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
 
 void UC1Surface::handleButton_(const ButtonEvent& ev)
 {
-    // Fine is a pure modifier — tracked at the surface, no plugin work.
+    // Fine is a latching toggle — press flips the mode, release is a
+    // no-op. LED reflects the latched state. User preference
+    // 2026-04-23: momentary "hold to fine-tune" was awkward for long
+    // parameter sweeps; toggle lets the user engage Fine once and
+    // adjust as many knobs as they want.
     if (ev.id == button::kFine) {
-        fineMode_.store(ev.pressed, std::memory_order_relaxed);
-        pushButtonLed_(ev.id, ev.pressed);
+        if (ev.pressed) {
+            const bool next = !fineMode_.load(std::memory_order_relaxed);
+            fineMode_.store(next, std::memory_order_relaxed);
+            pushButtonLed_(ev.id, next);
+        }
         ++stats_.buttonEventsHandled;
         return;
     }
 
-    // Track-level buttons (Solo / Cut / Solo Clear) are not plugin
-    // params; let main.cpp wire those in when the track-state router
-    // exists. For now we consume the event so callers can snoop stats.
-    if (ev.id == button::kSolo     ||
-        ev.id == button::kCut      ||
-        ev.id == button::kSoloClear)
-    {
-        ++stats_.buttonEventsSuppressed;
+    // Track-level buttons: act on the press edge; release is a no-op.
+    // Solo/Cut target the focused track; Solo Clear is a global unsolo.
+    // We push the LED inline (pushButtonLed_, same path Fine uses) to
+    // avoid depending on REAPER's SetSurface* callback firing back on
+    // the initiating surface. One-shot diag so we can see in the
+    // console what state each press computed.
+    auto anySolo = []() -> bool {
+        const int n = CountTracks(nullptr);
+        for (int i = 0; i < n; ++i) {
+            if (GetMediaTrackInfo_Value(GetTrack(nullptr, i), "I_SOLO") > 0.5) return true;
+        }
+        return false;
+    };
+    static int kDiagSoloCut = 12;
+    if (ev.id == button::kSolo) {
+        if (ev.pressed && focusedTrack_) {
+            MediaTrack* tr = static_cast<MediaTrack*>(focusedTrack_);
+            CSurf_OnSoloChange(tr, -1);
+            const bool on = GetMediaTrackInfo_Value(tr, "I_SOLO") > 0.5;
+            pushButtonLed_(button::kSolo, on);
+            pushButtonLed_(button::kSoloClear, anySolo());
+            if (kDiagSoloCut > 0) {
+                --kDiagSoloCut;
+                char line[80];
+                std::snprintf(line, sizeof(line),
+                    "UC1 Solo press → solo=%d anySolo=%d\n", on, anySolo());
+                ShowConsoleMsg(line);
+            }
+            ++stats_.buttonEventsHandled;
+        }
+        return;
+    }
+    if (ev.id == button::kCut) {
+        if (ev.pressed && focusedTrack_) {
+            MediaTrack* tr = static_cast<MediaTrack*>(focusedTrack_);
+            CSurf_OnMuteChange(tr, -1);
+            const bool on = GetMediaTrackInfo_Value(tr, "B_MUTE") > 0.5;
+            pushButtonLed_(button::kCut, on);
+            if (kDiagSoloCut > 0) {
+                --kDiagSoloCut;
+                char line[80];
+                std::snprintf(line, sizeof(line),
+                    "UC1 Cut press → mute=%d\n", on);
+                ShowConsoleMsg(line);
+            }
+            ++stats_.buttonEventsHandled;
+        }
+        return;
+    }
+    if (ev.id == button::kSoloClear) {
+        if (ev.pressed) {
+            // REAPER action 40340 = "Track: Unsolo all tracks".
+            Main_OnCommand(40340, 0);
+            pushButtonLed_(button::kSoloClear, anySolo());
+            // Every strip's solo LED could have just been turned off,
+            // but since we only light Solo for the focused track here,
+            // a single refresh on the focused one is enough.
+            if (focusedTrack_) {
+                const bool on = GetMediaTrackInfo_Value(
+                    static_cast<MediaTrack*>(focusedTrack_), "I_SOLO") > 0.5;
+                pushButtonLed_(button::kSolo, on);
+            }
+            if (kDiagSoloCut > 0) {
+                --kDiagSoloCut;
+                char line[80];
+                std::snprintf(line, sizeof(line),
+                    "UC1 SoloClear press → anySolo=%d\n", anySolo());
+                ShowConsoleMsg(line);
+            }
+            ++stats_.buttonEventsHandled;
+        }
         return;
     }
 
@@ -407,14 +484,55 @@ void UC1Surface::handleButton_(const ButtonEvent& ev)
     auto bindings = lookupBindingsOnTrack(focusedTrack_);
     MediaTrack* tr = static_cast<MediaTrack*>(focusedTrack_);
 
-    // Channel IN / Bus Comp IN toggle the plugin's bypass state.
-    if (ev.id == button::kChannelIn && bindings.channelMap) {
-        const bool wasEnabled = TrackFX_GetEnabled(tr, bindings.channelFxIdx);
-        TrackFX_SetEnabled(tr, bindings.channelFxIdx, !wasEnabled);
-        pushButtonLed_(ev.id, !wasEnabled);
+    // Polarity — toggle REAPER's per-track phase-invert (B_PHASE),
+    // not a plugin param. cap17/18 noted this button produces no
+    // FF 22 event on at least some firmwares; if it does fire, we
+    // want it routed to REAPER track state. LED mirrors B_PHASE
+    // regardless (refresh() picks it up on track changes).
+    if (ev.id == button::kPolarity) {
+        const bool cur = GetMediaTrackInfo_Value(tr, "B_PHASE") > 0.5;
+        SetMediaTrackInfo_Value(tr, "B_PHASE", cur ? 0.0 : 1.0);
+        pushButtonLed_(ev.id, !cur);
         ++stats_.buttonEventsHandled;
         return;
     }
+
+    // Channel IN — two modes:
+    //   * SSL Channel Strip on track: toggle the plugin's internal
+    //     "Channel In" switch (found by VST3 param name). This mirrors
+    //     the plugin's own IN button, not the global bypass.
+    //   * No SSL plugin: fall back to bypassing the first track FX.
+    if (ev.id == button::kChannelIn) {
+        if (bindings.channelMap) {
+            const int p = channelInParam_(tr, bindings.channelFxIdx);
+            if (p >= 0) {
+                const double cur = TrackFX_GetParamNormalized(
+                    tr, bindings.channelFxIdx, p);
+                const double next = (cur > 0.5) ? 0.0 : 1.0;
+                TrackFX_SetParamNormalized(
+                    tr, bindings.channelFxIdx, p, next);
+                pushButtonLed_(ev.id, next > 0.5);
+            } else {
+                // Param-by-name lookup failed — degrade gracefully to
+                // plugin-bypass so the button still does *something*.
+                const bool wasEnabled = TrackFX_GetEnabled(
+                    tr, bindings.channelFxIdx);
+                TrackFX_SetEnabled(tr, bindings.channelFxIdx, !wasEnabled);
+                pushButtonLed_(ev.id, !wasEnabled);
+            }
+        } else {
+            // No SSL plugin — bypass the first track FX if any.
+            if (TrackFX_GetCount(tr) > 0) {
+                const bool wasEnabled = TrackFX_GetEnabled(tr, 0);
+                TrackFX_SetEnabled(tr, 0, !wasEnabled);
+                pushButtonLed_(ev.id, !wasEnabled);
+            }
+        }
+        ++stats_.buttonEventsHandled;
+        return;
+    }
+    // Bus Comp IN still toggles the Bus Comp plugin's bypass — no
+    // separate internal IN param on BC 2 that we need to route to.
     if (ev.id == button::kBusCompIn && bindings.busCompMap) {
         const bool wasEnabled = TrackFX_GetEnabled(tr, bindings.busCompFxIdx);
         TrackFX_SetEnabled(tr, bindings.busCompFxIdx, !wasEnabled);
@@ -547,13 +665,106 @@ void UC1Surface::pushKnobReadout_(uint8_t knobId, void* trackRaw, int fxIdx,
     device_->send(buildDisplayText(zone, readout, readout.size()));
 }
 
+int UC1Surface::channelInParam_(void* trackRaw, int fxIdx)
+{
+    MediaTrack* tr = static_cast<MediaTrack*>(trackRaw);
+    if (!tr || fxIdx < 0) return -1;
+
+    // Cache by (track, fxIdx) so we only scan the param list once per
+    // focus change. Simple 1-entry cache — each focus change blows it
+    // away. Good enough for the single-focused-track model.
+    static void* cachedTr = nullptr;
+    static int   cachedFx = -1;
+    static int   cachedP  = -1;
+    if (tr == cachedTr && fxIdx == cachedFx) return cachedP;
+    cachedTr = tr; cachedFx = fxIdx; cachedP = -1;
+
+    const int n = TrackFX_GetNumParams(tr, fxIdx);
+    char buf[256];
+    // Known spellings across SSL plugin variants. Strict exact match.
+    // Do NOT add "Bypass" here — its semantics are inverted from IN
+    // (Bypass=1 means IN=off) and would make the LED mirror the wrong
+    // state. Generic names like "In"/"On"/"Channel" are kept but
+    // placed last so more specific hits win first.
+    static const char* const kCandidates[] = {
+        "CsIn", "ChannelIn", "Channel In", "CHANNELIN", "CHANNEL IN",
+        "ChIn", "Ch In", "CS In", "CS_IN", "Cs In",
+        "In", "On"
+    };
+    // One-shot diag dump of every param name on first access. Helps
+    // identify the correct name when our candidate list misses.
+    static bool kDumpedParams = false;
+    if (!kDumpedParams) {
+        kDumpedParams = true;
+        ShowConsoleMsg("UC1 CS param names:\n");
+        for (int i = 0; i < n; ++i) {
+            if (!TrackFX_GetParamName(tr, fxIdx, i, buf, sizeof(buf))) continue;
+            char line[320];
+            std::snprintf(line, sizeof(line), "  [%d] '%s'\n", i, buf);
+            ShowConsoleMsg(line);
+        }
+    }
+    for (int i = 0; i < n; ++i) {
+        if (!TrackFX_GetParamName(tr, fxIdx, i, buf, sizeof(buf))) continue;
+        for (auto c : kCandidates) {
+            if (std::strcmp(buf, c) == 0) { cachedP = i; return i; }
+        }
+    }
+    return -1;
+}
+
 void UC1Surface::pushButtonLed_(uint8_t buttonId, bool on)
 {
     if (!device_) return;
     auto cell = cellForButton(buttonId);
     if (cell.bank == 0 && cell.cell == 0) return;  // unmapped
-    device_->send(buildLedWrite(cell.bank, cell.cell,
-                                on ? led::kStateOn : led::kStateOff));
+
+    // Per-button state encoding.
+    //   - Most button LEDs use the bank in led::Cell + 0xFF on / 0x00
+    //     off (cap21 decode, plugin-param section).
+    //   - Solo Clear uses bank 0x01 + state 0x01 on / 0x00 off (cap17,
+    //     verified 2026-04-23).
+    //   - Solo and Cut: fan-out test confirmed the LED lights with
+    //     bank 0x01 cell 0x97/0x96 state 0x01 (same scheme as Solo
+    //     Clear). The bank 0x02 cells from cap21 are probably status
+    //     registers, not LED drivers. We override the cell-table bank
+    //     for those two buttons and use state=0x01.
+    uint8_t bank = cell.bank;
+    uint8_t stateOn = led::kStateOn;
+    if (buttonId == button::kSoloClear) {
+        stateOn = 0x01;
+    } else if (buttonId == button::kSolo     ||
+               buttonId == button::kCut      ||
+               buttonId == button::kPolarity ||
+               buttonId == button::kChannelIn)
+    {
+        // Central-section track buttons all use bank 0x01 + state 0x01
+        // for their LEDs. Confirmed empirically: the bank 0x02 cells
+        // listed in cap21 are status registers, not LED drivers.
+        bank = 0x01;
+        stateOn = 0x01;
+    }
+    const uint8_t state = on ? stateOn : led::kStateOff;
+
+    auto frame = buildLedWrite(bank, cell.cell, state);
+
+    // One-shot diag so we can eyeball exactly what hits the bulk OUT
+    // endpoint. Matches the cap17/cap21 frame format when things are
+    // right (e.g. Solo on → "FF 13 04 02 97 01 FF B0").
+    static int kDiagLed = 24;
+    if (kDiagLed > 0) {
+        --kDiagLed;
+        char line[128];
+        int off = std::snprintf(line, sizeof(line),
+            "UC1 LED btn=0x%02x on=%d frame=", buttonId, on);
+        for (auto b : frame) {
+            off += std::snprintf(line + off, sizeof(line) - off, "%02x ", b);
+        }
+        std::snprintf(line + off, sizeof(line) - off, "\n");
+        ShowConsoleMsg(line);
+    }
+
+    device_->send(std::move(frame));
 }
 
 void UC1Surface::refresh()
@@ -657,8 +868,24 @@ void UC1Surface::refresh()
                 break;
             case ControlDomain::ChannelStrip:
                 if (btn == button::kChannelIn) {
-                    on = bindings.channelMap && tr
-                         && TrackFX_GetEnabled(tr, bindings.channelFxIdx);
+                    // ChannelIn uses the bank=0x01/state=0x01 LED
+                    // encoding override — route through pushButtonLed_
+                    // (same path as Solo/Cut/Polarity) rather than the
+                    // direct buildLedWrite fall-through below.
+                    bool cin = false;
+                    if (bindings.channelMap && tr) {
+                        const int p = channelInParam_(tr, bindings.channelFxIdx);
+                        if (p >= 0) {
+                            cin = TrackFX_GetParamNormalized(
+                                tr, bindings.channelFxIdx, p) > 0.5;
+                        } else {
+                            cin = TrackFX_GetEnabled(tr, bindings.channelFxIdx);
+                        }
+                    } else if (tr && TrackFX_GetCount(tr) > 0) {
+                        cin = TrackFX_GetEnabled(tr, 0);
+                    }
+                    pushButtonLed_(btn, cin);
+                    continue;
                 } else {
                     on = ledForParam(bindings.channelMap,
                                      bindings.channelFxIdx, btn);
@@ -669,11 +896,37 @@ void UC1Surface::refresh()
         // Fine tracks the surface's own modifier state, not a plugin param.
         if (btn == button::kFine) on = fineMode_.load(std::memory_order_relaxed);
 
-        // Solo / Cut / Solo Clear still route through REAPER track-state
-        // rather than plugin params — skip them here; the track-state
-        // hook will push LEDs once wired up.
-        if (btn == button::kSolo || btn == button::kCut
-            || btn == button::kSoloClear) continue;
+        // Track-state LEDs: Solo/Cut/Polarity mirror the focused
+        // track; Solo Clear lights when any track in the project is
+        // soloed. Route through pushButtonLed_ so the per-button
+        // state-encoding overrides (bank/state mappings for
+        // Solo/Cut/SoloClear) apply — a direct buildLedWrite here
+        // would use the wrong bank and leave stale LEDs lit after
+        // track switches.
+        if (btn == button::kSolo) {
+            pushButtonLed_(btn, tr && GetMediaTrackInfo_Value(tr, "I_SOLO") > 0.5);
+            continue;
+        }
+        if (btn == button::kCut) {
+            pushButtonLed_(btn, tr && GetMediaTrackInfo_Value(tr, "B_MUTE") > 0.5);
+            continue;
+        }
+        if (btn == button::kPolarity) {
+            pushButtonLed_(btn, tr && GetMediaTrackInfo_Value(tr, "B_PHASE") > 0.5);
+            continue;
+        }
+        if (btn == button::kSoloClear) {
+            bool anySolo = false;
+            const int nTr = CountTracks(nullptr);
+            for (int i = 0; i < nTr; ++i) {
+                if (GetMediaTrackInfo_Value(GetTrack(nullptr, i), "I_SOLO") > 0.5) {
+                    anySolo = true;
+                    break;
+                }
+            }
+            pushButtonLed_(btn, anySolo);
+            continue;
+        }
 
         device_->send(buildLedWrite(cell.bank, cell.cell,
                                     on ? led::kStateOn : led::kStateOff));

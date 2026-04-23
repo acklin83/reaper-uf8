@@ -518,10 +518,21 @@ void sendLed(LedClass cls, MediaTrack* tr, bool on)
 void ReaSixtySurface::SetSurfaceSolo(MediaTrack* tr, bool solo)
 {
     sendLed(LedClass::Solo, tr, solo);
+    // UC1's Solo / Solo Clear LEDs track REAPER state. Solo Clear
+    // reflects "any track soloed anywhere", so every SetSurfaceSolo
+    // callback has to refresh regardless of which track fired it.
+    (void)solo;
+    if (g_uc1_surface) g_uc1_surface->refresh();
 }
 void ReaSixtySurface::SetSurfaceMute(MediaTrack* tr, bool mute)
 {
     sendLed(LedClass::Mute, tr, mute);
+    // Only the focused track's Cut LED matters on UC1 — skip refresh
+    // when REAPER reports a different track's mute change.
+    (void)mute;
+    if (g_uc1_surface && tr && g_uc1_surface->focusedTrack() == tr) {
+        g_uc1_surface->refresh();
+    }
 }
 void ReaSixtySurface::SetSurfaceSelected(MediaTrack* tr, bool sel)
 {
@@ -532,6 +543,13 @@ void ReaSixtySurface::SetSurfaceSelected(MediaTrack* tr, bool sel)
     if (sel && g_uc1_surface) {
         g_uc1_surface->setFocusedTrack(tr);
     }
+    // UF8 bank follows REAPER selection. Any selection change — clicks
+    // in the TCP/MCP, ReaScript, another surface — rebanks so the
+    // active track is visible on the UF8. Uses whichever FollowMode is
+    // set globally (BucketSnap by default; LeftmostStrip is the
+    // planned settings toggle). Only the sel=true edge triggers; a
+    // deselect shouldn't move the view.
+    if (sel) followSelectedInMixer(tr);
 }
 void ReaSixtySurface::SetSurfaceRecArm(MediaTrack* tr, bool arm)
 {
@@ -1347,6 +1365,49 @@ void pushZonesForVisibleSlots()
         // REAPER's track pointer back to a strip index.
         g_slotTrack[s] = tr;
 
+        // Empty strip (bank window extends past the last track): blank
+        // every zone so the last bucket's residue doesn't linger. Without
+        // this, shifting from e.g. tracks 1–8 to 9–12 leaves strips 5–8
+        // displaying whatever tracks 13–16 showed the session before.
+        //
+        // Dedup subtlety: the bankChanged branch above clears every
+        // g_last* cache to "". That means after a bank shift, "cache ==
+        // target" is indistinguishable between "display is already
+        // blank" and "display state unknown, need to push". Force the
+        // first-tick push via bankChanged so the blanks actually reach
+        // the device; subsequent ticks dedup normally.
+        if (!tr) {
+            const std::string blankCs   = "    ";
+            const std::string blankDb   = "    ";
+            const std::string empty{};
+            if (bankChanged || g_lastCsType[s] != blankCs) {
+                g_lastCsType[s] = blankCs;
+                g_dev->send(uf8::buildChannelStripType(static_cast<uint8_t>(s), blankCs));
+            }
+            if (bankChanged || !g_lastSlotLabel[s].empty()) {
+                g_lastSlotLabel[s].clear();
+                g_dev->send(uf8::buildPluginSlotName(static_cast<uint8_t>(s), empty));
+            }
+            if (bankChanged || !g_lastChanNum[s].empty()) {
+                g_lastChanNum[s].clear();
+                g_dev->send(uf8::buildChannelNumber(static_cast<uint8_t>(s), empty));
+            }
+            if (bankChanged || !g_lastTrackName[s].empty()) {
+                g_lastTrackName[s].clear();
+                g_dev->send(uf8::buildStripTextUpper(static_cast<uint8_t>(s), empty));
+            }
+            if (bankChanged || g_lastFaderDb[s] != blankDb) {
+                g_lastFaderDb[s] = blankDb;
+                g_dev->send(uf8::buildFaderDbReadout(static_cast<uint8_t>(s), blankDb));
+            }
+            if (bankChanged || !g_lastValueLine[s].empty()) {
+                g_lastValueLine[s].clear();
+                g_dev->send(uf8::buildValueLine(static_cast<uint8_t>(s), empty));
+            }
+            vpotBar[s] = 0;
+            continue;
+        }
+
         // Resolve the SSL plug-in (if any) and the currently-paged slot
         // for this strip. `slot == nullptr` means "no SSL plug-in on
         // this track" OR "plug-in has fewer slots than the current page
@@ -1390,27 +1451,15 @@ void pushZonesForVisibleSlots()
 
         // Channel Number Zone — the tiny digit top-left of each strip's
         // color bar. REAPER track index is 0-based; UF8 expects 1-based
-        // ASCII. Empty slot → empty string (clears the digit).
+        // ASCII.
         {
-            std::string chan;
-            if (realSlot < trackCount) {
-                char buf[8];
-                std::snprintf(buf, sizeof(buf), "%d", realSlot + 1);
-                chan = buf;
-            }
+            char buf[8];
+            std::snprintf(buf, sizeof(buf), "%d", realSlot + 1);
+            std::string chan(buf);
             if (chan != g_lastChanNum[s]) {
                 g_lastChanNum[s] = chan;
                 g_dev->send(uf8::buildChannelNumber(static_cast<uint8_t>(s), chan));
             }
-        }
-
-        if (!tr) {
-            if (!g_lastTrackName[s].empty()) {
-                g_lastTrackName[s].clear();
-                g_dev->send(uf8::buildStripTextUpper(static_cast<uint8_t>(s), ""));
-            }
-            vpotBar[s] = 0;
-            continue;
         }
 
         // V-Pot Readout Bar position. Plugin param → normalised position;
@@ -1576,6 +1625,17 @@ void onTimer()
 }
 
 } // anonymous
+
+// External hook so UC1Surface (different TU) can trigger the same
+// MCP-scroll + UF8-rebank behaviour that the UF8 select/encoder paths
+// use. Anonymous-namespace internals (g_bankOffset, g_followMode…) stay
+// private; this wrapper is the only symbol exposed. The name differs
+// from the internal helper because giving the anonymous-namespace
+// version external linkage would conflict with this definition.
+void reasixty_followSelectedInMixer(MediaTrack* tr)
+{
+    followSelectedInMixer(tr);
+}
 
 extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(
     REAPER_PLUGIN_HINSTANCE hInstance, reaper_plugin_info_t* rec)
