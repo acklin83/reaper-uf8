@@ -48,6 +48,12 @@ public:
     // over EP 0x02 OUT.
     void send(std::vector<uint8_t> frame);
 
+    // Set the current GR meter value (positive dB, 0 = no reduction).
+    // The worker thread streams this at ~50 Hz continuously — UC1
+    // firmware uses the FF 5B GR stream as its primary liveness
+    // heartbeat and will disconnect if it stops. Thread-safe.
+    void setGainReduction(float dB);
+
     // Event handlers fire on the worker thread.
     void setButtonHandler(ButtonHandler h)   { buttonHandler_   = std::move(h); }
     void setKnobHandler(KnobHandler h)       { knobHandler_     = std::move(h); }
@@ -71,6 +77,8 @@ private:
 
     struct PendingSend;
     std::unique_ptr<PendingSend> pending_;
+
+    std::atomic<float> grDb_{0.0f};
 };
 
 } // namespace uc1

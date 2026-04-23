@@ -15,11 +15,13 @@ namespace {
 constexpr uint8_t  kInterface = 0;
 constexpr size_t   kInBufSize = 64;
 
-// Keepalive cadence from uc1_02 baseline: 4 distinct FF 1B 01 tokens
-// cycling at ~1 Hz. We pace at ~4 Hz (one counter advance every 250 ms)
-// which is well inside the envelope SSL 360° uses — comfortably safe
-// against the firmware's "connection lost" timeout without flooding.
-constexpr auto kKeepaliveInterval = std::chrono::milliseconds(250);
+// Cadence measured from uc1_02 idle baseline:
+//   FF 1B 01 <counter>   every 150 ms (4-phase cycle, ~6.8 Hz total)
+//   FF 5B 02 <GR-16BE>   every 20 ms  (~50 Hz — primary liveness heartbeat)
+// Both streams run continuously. Stop either and UC1 decides the host
+// has died, drops back to "Attempting to reconnect to SSL 360°".
+constexpr auto kKeepaliveInterval = std::chrono::milliseconds(150);
+constexpr auto kGrStreamInterval  = std::chrono::milliseconds(20);
 }
 
 struct UC1Device::PendingSend {
@@ -113,6 +115,11 @@ void UC1Device::send(std::vector<uint8_t> frame)
     pending_->cv.notify_one();
 }
 
+void UC1Device::setGainReduction(float dB)
+{
+    grDb_.store(dB, std::memory_order_relaxed);
+}
+
 void UC1Device::workerLoop_()
 {
     // Post the first async IN transfer so UC1 events flow immediately,
@@ -122,7 +129,9 @@ void UC1Device::workerLoop_()
 
     // Prime the device: one zero-GR frame so the Bus Comp meter reads
     // 0 dB from the start (rather than whatever garbage the firmware
-    // has in memory from the previous session).
+    // has in memory from the previous session). The worker loop below
+    // keeps the GR stream flowing at 50 Hz — UC1's liveness watchdog
+    // depends on it.
     {
         auto f = buildZeroGr();
         int t = 0;
@@ -131,13 +140,15 @@ void UC1Device::workerLoop_()
 
     uint8_t keepaliveCounter = 0;
     auto    lastKeepalive    = std::chrono::steady_clock::now();
+    auto    lastGr           = std::chrono::steady_clock::now();
 
     while (!shuttingDown_) {
-        // Drain any pending sends; wake for keepalive on timeout.
+        // Drain any pending sends; wake for keepalive / GR on timeout.
+        // Short sleep so we don't drift past the 20 ms GR cadence.
         std::vector<uint8_t> frame;
         {
             std::unique_lock<std::mutex> lk(pending_->mu);
-            pending_->cv.wait_for(lk, std::chrono::milliseconds(50),
+            pending_->cv.wait_for(lk, std::chrono::milliseconds(10),
                 [&] { return !pending_->q.empty() || shuttingDown_; });
             if (shuttingDown_) break;
             if (!pending_->q.empty()) {
@@ -146,8 +157,20 @@ void UC1Device::workerLoop_()
             }
         }
 
-        // Keepalive tick.
         const auto now = std::chrono::steady_clock::now();
+
+        // GR stream — the primary 50 Hz liveness heartbeat. Always send
+        // SOMETHING every ~20 ms or UC1's firmware watchdog drops the
+        // connection.
+        if (now - lastGr >= kGrStreamInterval) {
+            auto gr = buildGrMeter(grDb_.load(std::memory_order_relaxed));
+            int t = 0;
+            libusb_bulk_transfer(handle_, kEpOut, gr.data(),
+                                 static_cast<int>(gr.size()), &t, 100);
+            lastGr = now;
+        }
+
+        // FF 1B keepalive at ~150 ms per counter advance.
         if (now - lastKeepalive >= kKeepaliveInterval) {
             auto ka = buildKeepalive(keepaliveCounter);
             int t = 0;

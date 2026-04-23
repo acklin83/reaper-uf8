@@ -362,7 +362,9 @@ void UC1Surface::refresh()
 void UC1Surface::pushGainReduction(float dB)
 {
     if (!device_) return;
-    device_->send(buildGrMeter(dB));
+    // UC1Device streams GR at 50 Hz on its own; we just update the
+    // cached value. No per-call send needed.
+    device_->setGainReduction(dB);
 }
 
 void UC1Surface::pushVu(uint8_t meter, uint8_t level)
