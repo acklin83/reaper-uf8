@@ -202,7 +202,13 @@ Plus `0x0C` = **Bus Comp IN** (from `uc1_08` positional evidence, direct-display
 
 All 16 Channel-Strip-area buttons + 1 Bus Comp button cover the UC1's full button inventory. Earlier apparent "Polarity doesn't emit events" was a physical-contact issue on the user side, not a firmware peculiarity — `uc1_19` confirms every button fires reliably when firmly pressed.
 
-**Plugin-context remapping still to verify:** `uc1_20` is planned to repeat the same 16-button sequence with SSL Native Channel Strip 2 loaded, to check whether button IDs stay constant across Channel Strip plugins or — like the top V-Pot knobs — get repurposed by plugin context. EQ Type's display label varies per plugin (Black/Orange/Brown for 4K E; Black/Pink for 4K G; In/Out for CS2), so at minimum the display content is plugin-aware; whether the button ID is stable remains to be shown.
+**Plugin context (tested with `uc1_20`, CS 2 loaded):** Button IDs are **stable** across 4K E and CS 2 — no per-plugin remapping, unlike the top V-Pots. What does change:
+
+- **Event emission is plugin-gated**: with CS 2, HF Bell (`0x08`) and EQ Type (`0x09`) emit no `FF 22` events — CS 2's EQ doesn't have a matching function. 4K E fires these normally.
+- **Display feedback per button varies**: Peak (`0x15`) shows `"Peak            In"` with CS 2 but no text with 4K E, matching user's note "Peak nur von CS2 verwendet". EQ Type's label varies per plugin (Black/Orange/Brown for 4K E, In/Out for CS 2, etc.) when it fires at all.
+- **Display text content obviously depends on plugin context** (the `In`/`Out` state of the toggled param).
+
+Rea-Sixty can ship a single stable button-ID table and forward each press to the focused plugin — buttons that the plugin doesn't implement simply no-op.
 
 ### Track-selection follow (host-driven)
 UC1 does not send a "track changed" event — track focus is driven by SSL 360° observing the DAW. `uc1_10` confirmed this: in the focus walk 1→2→3→4→1 the only novel payload was one OUT frame (`ff 66 2b 04 …`), no novel IN frames. Rea-Sixty's `FocusedTrack` must therefore push the retarget frame itself when REAPER's `SetTrackSelected` fires.
@@ -253,6 +259,7 @@ The SSL plugins ship GR to 360° over encrypted Thrift IPC (see `plugin-ipc-note
 | 2026-04-23 | `uc1_17_polarity_soloclear.pcapng` | Polarity + Solo + Solo Clear (20 s, 22 500 pkts) — `0x1C = Solo`, `0x1B = Solo Clear` via zone 0x03 display text; Polarity no events |
 | 2026-04-23 | `uc1_18_polarity_eqin_hold.pcapng` | Polarity + EQ IN + Gate Hold (with CS 2 loaded) (20 s, 23 888 pkts) — `0x0A = EQ IN`, `0x18 = Gate Hold` (CS 2 param); Polarity no events (physical contact issue, not firmware) |
 | 2026-04-23 | `uc1_19_buttons_4ke.pcapng` | All 16 Channel-Strip-area buttons, one press each, 4K E loaded (60 s, 67 384 pkts) — full button-ID map via zone 0x03 display text |
+| 2026-04-23 | `uc1_20_buttons_cs2.pcapng` | Same 16-button sequence with SSL Native Channel Strip 2 (60 s, 67 372 pkts) — IDs confirmed stable across plugins; HF Bell + EQ Type gated off by CS 2 |
 | 2026-04-22 | `uc1_01_init_clean.pcapng` | Init/wakeup sequence on fresh enumeration — 27944 pkts to address 28, endpoints 0x00/0x80/0x02/0x81 |
 | 2026-04-22 | `uc1_02_idle_baseline.pcapng` | 10 s idle heartbeat — 11288 pkts, ~1130 pkt/s, same endpoint set. Baseline input for every diff. |
 | 2026-04-22 | `uc1_03_plugin_presence.pcapng` | Plugin load/unload transitions (30 s, 34298 pkts, 315 novel): empty → +BusComp2 → +ChStrip2 → −BusComp2 → −ChStrip2 |
