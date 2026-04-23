@@ -221,10 +221,12 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
         return;
     }
 
-    // BC encoder — scroll only through tracks that have a plugin
-    // targeted by the Bus-Comp section (currently just Bus Compressor
-    // 2; the Link-System config page will eventually let users route
-    // other plugins here). ~3 ticks/click.
+    // BC encoder — jump to the next/prev track (relative to the
+    // currently focused track) that has a plugin targeted by the
+    // Bus-Comp section. "Next" = first BC track whose project index
+    // is greater than the focused track's; "prev" = first BC track
+    // whose project index is smaller. Works whether or not the
+    // focused track itself has a BC plugin.
     if (ev.id == knob::kBcEncoder) {
         static int acc = 0;
         static std::chrono::steady_clock::time_point lastT{};
@@ -233,43 +235,50 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
         const int n = CountTracks(nullptr);
         if (n <= 0) return;
 
-        // Collect all tracks that currently own a BC-section plugin.
-        std::vector<MediaTrack*> bcTracks;
-        bcTracks.reserve(n);
-        int curBcIdx = -1;
-        for (int i = 0; i < n; ++i) {
-            MediaTrack* t = GetTrack(nullptr, i);
-            if (!t) continue;
-            auto b = lookupBindingsOnTrack(t);
-            if (b.busCompMap) {
-                if (t == focusedTrack_) curBcIdx = static_cast<int>(bcTracks.size());
-                bcTracks.push_back(t);
-            }
+        int curIdx = -1;
+        if (focusedTrack_) {
+            curIdx = static_cast<int>(GetMediaTrackInfo_Value(
+                static_cast<MediaTrack*>(focusedTrack_), "IP_TRACKNUMBER")) - 1;
         }
 
-        if (bcTracks.empty()) {
-            if (logThis) ShowConsoleMsg("UC1 BC encoder: no track has Bus Comp\n");
+        const bool forward = step > 0;
+        const int stepsAbs = forward ? step : -step;
+        int probe = curIdx;
+        int found = -1;
+        for (int k = 0; k < stepsAbs; ++k) {
+            int next = -1;
+            if (forward) {
+                for (int i = probe + 1; i < n; ++i) {
+                    auto b = lookupBindingsOnTrack(GetTrack(nullptr, i));
+                    if (b.busCompMap) { next = i; break; }
+                }
+            } else {
+                for (int i = probe - 1; i >= 0; --i) {
+                    auto b = lookupBindingsOnTrack(GetTrack(nullptr, i));
+                    if (b.busCompMap) { next = i; break; }
+                }
+            }
+            if (next < 0) break;  // no more BC tracks in this direction
+            found = next;
+            probe = next;
+        }
+
+        if (found < 0) {
+            if (logThis) ShowConsoleMsg("UC1 BC encoder: no BC track in that direction\n");
             ++stats_.knobEventsHandled;
             return;
         }
 
-        // If focused track isn't itself BC-hosting, step from the
-        // first BC track instead of from -1 (would wrap weirdly).
-        if (curBcIdx < 0) curBcIdx = (step > 0) ? -1 : bcTracks.size();
-        int nextIdx = curBcIdx + step;
-        if (nextIdx < 0) nextIdx = 0;
-        if (nextIdx >= static_cast<int>(bcTracks.size()))
-            nextIdx = static_cast<int>(bcTracks.size()) - 1;
-
-        MediaTrack* tr = bcTracks[nextIdx];
-        SetOnlyTrackSelected(tr);
-        setFocusedTrack(tr);
-
+        MediaTrack* tr = GetTrack(nullptr, found);
+        if (tr) {
+            SetOnlyTrackSelected(tr);
+            setFocusedTrack(tr);
+        }
         if (logThis) {
-            char line[128];
+            char line[96];
             std::snprintf(line, sizeof(line),
-                "UC1 BC delta=%d step=%d → bc-track %d of %zu\n",
-                (int)ev.delta, step, nextIdx + 1, bcTracks.size());
+                "UC1 BC delta=%d step=%d → track %d\n",
+                (int)ev.delta, step, found + 1);
             ShowConsoleMsg(line);
         }
         ++stats_.knobEventsHandled;
