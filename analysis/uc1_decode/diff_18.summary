@@ -1,0 +1,9 @@
+# UC1 device_address = 35 (capture: captures/uc1/uc1_18_polarity_eqin_hold.pcapng)
+# baseline device_address = 28 (captures/uc1/uc1_02_idle_baseline.pcapng)
+# baseline: 8 unique payloads
+
+# summary
+#   baseline EP1 IN : 9336
+#   baseline EP2 OUT: 1134
+#   novel    EP1 IN : 679
+#   novel    EP2 OUT: 742

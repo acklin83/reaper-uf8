@@ -150,7 +150,7 @@ Relative encoder event, **6-bit signed delta** (range −32…+31). Positive = C
 | `0x0A` | LF Frequency |
 | `0x0B` | LF Gain |
 | `0x17` | Gate Release |
-| `0x18` | Gate Hold (knob exists; 4K E doesn't map it — other CS plugins might) |
+| `0x18` | Gate Hold — confirmed with SSL Native Channel Strip 2 (`uc1_18`); 4K E has no Gate Hold param |
 | `0x19` | Gate Threshold |
 | `0x1A` | Gate Range |
 | `0x1B` | Dyn Comp Release |
@@ -177,21 +177,18 @@ State byte: `0x01` = press, `0x00` = release. Middle byte (always `0x00` observe
 
 Button IDs mapped against user's pressed sequence in `uc1_08`:
 
-| `button_id` | Button | Evidence |
-|------------:|--------|----------|
-| `0x0A` | Bell HF | first press in uc1_08 sequence |
-| `0x0B` | Type (E) | second press in uc1_08 |
-| `0x0C` | Bus Comp IN | last press in uc1_08 |
-| `0x14` | Bell LF | uc1_08 sequence position |
-| `0x15` | Fast Attack (Comp) | uc1_08 sequence position |
-| `0x16` | Peak | uc1_08 sequence position |
-| `0x17` | Dyn In | uc1_08 sequence position |
-| `0x18` | Expand | uc1_08 sequence position |
-| `0x19` | Fast Attack (Gate) | uc1_08 sequence position |
-| `0x1A` | S/C Listen | `uc1_14` direct evidence — display zone 0x03 shows `"S/C Listen      On/Off"` during toggles of id 0x1A |
-| `0x1B` | EQ IN | `uc1_16` direct evidence — only id to fire while user pressed EQ IN 5× |
+**Direct-evidence mappings (from narrow single-button captures with display confirmation):**
 
-**Two UC1 buttons produce no `FF 22` event at all**: **Polarity** and **Solo Clear**. `uc1_16` confirmed Solo Clear sends nothing on the observed command bytes; Polarity was never attributable in `uc1_08` either. They may be handled via a different command family, surfaced only to SSL 360°'s internal state (mouse-visible), or wired off the USB path. A follow-up capture watching ALL command bytes during those two button presses is needed to close this gap — not a blocker for an initial implementation that simply ignores them.
+| `button_id` | Button | Source |
+|------------:|--------|--------|
+| `0x0A` | EQ IN | `uc1_18` — zone 0x03 shows `"EQ              In/Out"` toggling |
+| `0x1A` | S/C Listen | `uc1_14` — zone 0x03 shows `"S/C Listen      On/Off"` |
+| `0x1B` | Solo Clear | `uc1_17` — zone 0x03 shows `"Solo Clear      Off"` |
+| `0x1C` | Solo | `uc1_17` — zone 0x03 shows `"Solo            On"` |
+
+**Inferred from `uc1_08` sequence alignment only (likely unreliable — treat as TBD):** `0x0B`, `0x0C`, `0x14`, `0x15`, `0x16`, `0x17`, `0x18`, `0x19`. Candidate labels from user's reported order are Type (E), Bus Comp IN, Bell LF, Fast Attack, Peak, Dyn In, Expand, Fast Attack (Gate) — any specific mapping should be re-verified with a narrow per-button capture before relying on it in code. The `uc1_18` correction of `0x0A` (was inferred as "Bell HF", is actually EQ IN) shows the sequence alignment isn't trustworthy beyond ordinal proximity.
+
+**Button that doesn't emit `FF 22` on this firmware:** **Polarity** — zero events across `uc1_08`, `uc1_17`, `uc1_18`. Likely handled internally by SSL 360° (mouse-side only) or via a command family not yet surfaced in our captures. Initial Rea-Sixty implementation can ignore it.
 
 ### Track-selection follow (host-driven)
 UC1 does not send a "track changed" event — track focus is driven by SSL 360° observing the DAW. `uc1_10` confirmed this: in the focus walk 1→2→3→4→1 the only novel payload was one OUT frame (`ff 66 2b 04 …`), no novel IN frames. Rea-Sixty's `FocusedTrack` must therefore push the retarget frame itself when REAPER's `SetTrackSelected` fires.
@@ -238,7 +235,9 @@ The SSL plugins ship GR to 360° over encrypted Thrift IPC (see `plugin-ipc-note
 | Date | File | Summary |
 |------|------|---------|
 | 2026-04-23 | `uc1_15_knob_channelstrip_sweep.pcapng` | 4K E loaded, 20 CS pots swept sequentially (180 s, 209 802 pkts) — full CS knob-ID table via zone 0x03 display text |
-| 2026-04-23 | `uc1_16_missing_buttons.pcapng` | EQ IN + Solo Clear each pressed 5× (15 s, 16 990 pkts) — EQ IN = 0x1B confirmed; Solo Clear generates no `FF 22` events |
+| 2026-04-23 | `uc1_16_missing_buttons.pcapng` | User pressed EQ IN + Solo Clear each 5× (15 s, 16 990 pkts) — only `0x1B` fired; later proven to be Solo Clear (not EQ IN), user likely pressed wrong button |
+| 2026-04-23 | `uc1_17_polarity_soloclear.pcapng` | Polarity + Solo + Solo Clear (20 s, 22 500 pkts) — `0x1C = Solo`, `0x1B = Solo Clear` via zone 0x03 display text; Polarity no events |
+| 2026-04-23 | `uc1_18_polarity_eqin_hold.pcapng` | Polarity + EQ IN + Gate Hold (with CS 2 loaded) (20 s, 23 888 pkts) — `0x0A = EQ IN`, `0x18 = Gate Hold` (CS 2 param); Polarity again no events |
 | 2026-04-22 | `uc1_01_init_clean.pcapng` | Init/wakeup sequence on fresh enumeration — 27944 pkts to address 28, endpoints 0x00/0x80/0x02/0x81 |
 | 2026-04-22 | `uc1_02_idle_baseline.pcapng` | 10 s idle heartbeat — 11288 pkts, ~1130 pkt/s, same endpoint set. Baseline input for every diff. |
 | 2026-04-22 | `uc1_03_plugin_presence.pcapng` | Plugin load/unload transitions (30 s, 34298 pkts, 315 novel): empty → +BusComp2 → +ChStrip2 → −BusComp2 → −ChStrip2 |
