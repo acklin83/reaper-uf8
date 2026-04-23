@@ -144,8 +144,13 @@ int UC1Surface::poll()
 
 double UC1Surface::clickToDelta_(int8_t delta) const
 {
-    // Each encoder click = ~1/32 of a full param sweep. Fine mode = 1/4.
-    constexpr double kStepPerClick = 1.0 / 32.0;
+    // Each encoder click = ~1/64 of a full param sweep. Fine mode = 1/4
+    // of that (= 1/256 per click, effectively 256 clicks to traverse
+    // the full normalized range). 1/64 at default roughly matches SSL
+    // 360°'s perceived feel on the Bus Comp Threshold (40 dB range
+    // covered in ~200 encoder clicks = 0.2 dB/click vs. our 0.625 dB
+    // per click — slightly snappier but responsive).
+    constexpr double kStepPerClick = 1.0 / 64.0;
     double d = delta * kStepPerClick;
     if (fineMode_.load(std::memory_order_relaxed)) d *= 0.25;
     return d;
