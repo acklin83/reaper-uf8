@@ -1549,25 +1549,27 @@ void onTimer()
     pushZonesForVisibleSlots();
     if (g_uc1_surface) g_uc1_surface->poll();
 
-    // Once-per-second UC1 wire stats — prints deltas so we can see
-    // whether OUT flow is stalling or IN is dropping. Remove once the
-    // connection is stable.
+    // Once-per-second UC1 wire stats — only print if something is
+    // actually wrong (errors accumulating, or OUT flow stalled).
+    // Silent otherwise so the console stays readable while the user
+    // explores knob mappings.
     static auto lastStat = std::chrono::steady_clock::now();
-    static uint64_t prevOutFrames = 0, prevInBytes = 0, prevOutErrors = 0;
+    static uint64_t prevOutFrames = 0, prevOutErrors = 0;
     if (g_uc1_dev) {
         auto now = std::chrono::steady_clock::now();
         if (now - lastStat >= std::chrono::seconds(1)) {
             const auto of = uc1::debugOutFrames();
-            const auto ib = uc1::debugInBytes();
             const auto oe = uc1::debugOutErrors();
-            char line[128];
-            std::snprintf(line, sizeof(line),
-                "UC1 stats: OUT=%llu frames/s IN=%llu bytes/s errs=%llu\n",
-                (unsigned long long)(of - prevOutFrames),
-                (unsigned long long)(ib - prevInBytes),
-                (unsigned long long)(oe - prevOutErrors));
-            ShowConsoleMsg(line);
-            prevOutFrames = of; prevInBytes = ib; prevOutErrors = oe;
+            const auto dOf = of - prevOutFrames;
+            const auto dOe = oe - prevOutErrors;
+            if (dOe > 0 || dOf < 20) {
+                char line[128];
+                std::snprintf(line, sizeof(line),
+                    "UC1 WARN: OUT=%llu frames/s errs=%llu (expected ~50)\n",
+                    (unsigned long long)dOf, (unsigned long long)dOe);
+                ShowConsoleMsg(line);
+            }
+            prevOutFrames = of; prevOutErrors = oe;
             lastStat = now;
         }
     }

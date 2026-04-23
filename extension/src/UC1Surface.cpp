@@ -194,13 +194,14 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
 
     pushKnobReadout_(ev.id, tr, fxIdx, vst3Param, zone, labelForKnob(ev.id, busCompContext));
 
-    // Diagnostic — first N events per session dump "UC1 knob 0xNN
-    // 'OurLabel' → VST3 param P 'PluginLabel'" so we can spot any
-    // mapping mismatch between our knob-ID table and the actual
-    // plugin param layout. Remove once bindings are confirmed.
-    static int kDiagRemaining = 30;
-    if (kDiagRemaining > 0) {
-        --kDiagRemaining;
+    // Diagnostic — first 3 events per *unique* knob ID per session.
+    // Lets the user turn every UC1 knob in turn and see each one
+    // logged at least once without flooding the console. Remove once
+    // bindings are confirmed.
+    static int kPerIdRemaining[0x20] = { 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+                                         3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3 };
+    if (ev.id < 0x20 && kPerIdRemaining[ev.id] > 0) {
+        --kPerIdRemaining[ev.id];
         char pname[64] = {0};
         TrackFX_GetParamName(tr, fxIdx, vst3Param, pname, sizeof(pname));
         char line[160];
