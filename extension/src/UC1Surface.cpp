@@ -56,23 +56,27 @@ const char* labelForKnob(uint8_t knobId, bool busCompContext)
     return "";
 }
 
-// Pad or truncate a "<label><value>" pair to the 22-char zone width,
-// left-justifying label and right-justifying value with spaces between.
+// Build a zone-0x03/0x05 readout matching SSL 360°'s captured format:
+//   [label][padding to 16 chars][value]
+//
+// Total length = 16 + value.size() (22 for 6-char values like "12.1dB",
+// 23 for 7-char values like "-10.0dB" or "102.5Hz"). UC1's value-zone
+// LCD slots start at position 16; right-justifying into a fixed 22-char
+// field shifted 7-char values one left of that anchor, causing the
+// split "1    02.5Hz" / "-        10.0dB" rendering on hardware.
 std::string formatReadout(std::string_view label, std::string_view value)
 {
-    constexpr size_t kWidth = 22;
-    std::string out(kWidth, ' ');
+    constexpr size_t kLabelPad = 16;
+    std::string out;
+    out.reserve(kLabelPad + value.size());
+
     // std::min is macro-shadowed by WDL/swell — wrap to suppress expansion.
-    const size_t lmax = (std::min)(label.size(), kWidth);
-    std::memcpy(out.data(), label.data(), lmax);
-    if (value.size() >= kWidth - lmax) {
-        // Value runs into the label — truncate value from the left-hand
-        // side so the tail (usually "dB", "Hz", units) stays visible.
-        const size_t take = kWidth - lmax;
-        std::memcpy(out.data() + lmax, value.data() + (value.size() - take), take);
-    } else {
-        std::memcpy(out.data() + (kWidth - value.size()), value.data(), value.size());
+    const size_t lmax = (std::min)(label.size(), kLabelPad);
+    out.append(label.data(), lmax);
+    if (lmax < kLabelPad) {
+        out.append(kLabelPad - lmax, ' ');
     }
+    out.append(value.data(), value.size());
     return out;
 }
 
@@ -396,11 +400,11 @@ void UC1Surface::pushKnobReadout_(uint8_t knobId, void* trackRaw, int fxIdx,
     const double cur = TrackFX_GetParamNormalized(tr, fxIdx, vst3Param);
     TrackFX_FormatParamValueNormalized(tr, fxIdx, vst3Param, cur,
                                        formatted, sizeof(formatted));
-    // UC1 expects compact "X.XdB" / "X.XHz" / "X%" and a fixed-width
-    // value field so digits land in the right LCD slot. Non-numeric
-    // values ("OFF", "AUTO", "N/A") drop the unit entirely.
-    std::string value = padValueFixed(
-        stripUnitIfNonNumeric(compactUnit(formatted)), 7);
+    // UC1 expects compact "X.XdB" / "X.XHz" / "X%". Non-numeric values
+    // ("OFF", "AUTO", "N/A") drop the unit entirely. No padding — the
+    // readout builder anchors the value at position 16 regardless of
+    // length, which is what SSL 360° does in captures.
+    std::string value = stripUnitIfNonNumeric(compactUnit(formatted));
 
     auto readout = formatReadout(label, value);
 
@@ -422,7 +426,10 @@ void UC1Surface::pushKnobReadout_(uint8_t knobId, void* trackRaw, int fxIdx,
         ShowConsoleMsg(line);
     }
 
-    device_->send(buildDisplayText(zone, readout, 22));
+    // Variable-width readout — 22 for 6-char values, 23 for 7-char.
+    // UC1 accepts either; what matters is that value digits land at
+    // position 16 onwards.
+    device_->send(buildDisplayText(zone, readout, readout.size()));
 }
 
 void UC1Surface::pushButtonLed_(uint8_t buttonId, bool on)
