@@ -152,10 +152,35 @@ double UC1Surface::clickToDelta_(int8_t delta) const
 
 void UC1Surface::handleKnob_(const KnobEvent& ev)
 {
-    if (!focusedTrack_) { ++stats_.knobEventsSuppressed; return; }
+    // Diag-first: log every knob event before any suppression, so
+    // unmapped IDs (Attack TBD, any knob we haven't attributed) show
+    // up in the console. Per-ID budget of 3 keeps volume sane.
+    static int kPerIdRemaining[0x20] = { 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+                                         3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3 };
+    const bool logThis = (ev.id < 0x20 && kPerIdRemaining[ev.id] > 0);
+    if (logThis) --kPerIdRemaining[ev.id];
+
+    if (!focusedTrack_) {
+        if (logThis) {
+            char line[96];
+            std::snprintf(line, sizeof(line),
+                "UC1 knob 0x%02x delta=%d  (no focused track)\n",
+                ev.id, (int)ev.delta);
+            ShowConsoleMsg(line);
+        }
+        ++stats_.knobEventsSuppressed;
+        return;
+    }
 
     auto bindings = lookupBindingsOnTrack(focusedTrack_);
     if (!bindings.busCompMap && !bindings.channelMap) {
+        if (logThis) {
+            char line[96];
+            std::snprintf(line, sizeof(line),
+                "UC1 knob 0x%02x delta=%d  (track has no BC/CS plugin)\n",
+                ev.id, (int)ev.delta);
+            ShowConsoleMsg(line);
+        }
         ++stats_.knobEventsSuppressed;
         return;
     }
@@ -181,10 +206,29 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
         // Fall through as suppressed.
     }
 
-    if (!map) { ++stats_.knobEventsSuppressed; return; }
+    if (!map) {
+        if (logThis) {
+            char line[96];
+            std::snprintf(line, sizeof(line),
+                "UC1 knob 0x%02x delta=%d  (no matching domain binding)\n",
+                ev.id, (int)ev.delta);
+            ShowConsoleMsg(line);
+        }
+        ++stats_.knobEventsSuppressed; return;
+    }
 
     const int vst3Param = map->knobParam[ev.id];
-    if (vst3Param == kParamNone) { ++stats_.knobEventsSuppressed; return; }
+    if (vst3Param == kParamNone) {
+        if (logThis) {
+            char line[128];
+            std::snprintf(line, sizeof(line),
+                "UC1 knob 0x%02x delta=%d  unmapped in %s  (add to UC1PluginMap)\n",
+                ev.id, (int)ev.delta, map->shortName);
+            ShowConsoleMsg(line);
+        }
+        ++stats_.knobEventsSuppressed;
+        return;
+    }
 
     MediaTrack* tr = static_cast<MediaTrack*>(focusedTrack_);
     double cur = TrackFX_GetParamNormalized(tr, fxIdx, vst3Param);
@@ -194,14 +238,7 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
 
     pushKnobReadout_(ev.id, tr, fxIdx, vst3Param, zone, labelForKnob(ev.id, busCompContext));
 
-    // Diagnostic — first 3 events per *unique* knob ID per session.
-    // Lets the user turn every UC1 knob in turn and see each one
-    // logged at least once without flooding the console. Remove once
-    // bindings are confirmed.
-    static int kPerIdRemaining[0x20] = { 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-                                         3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3 };
-    if (ev.id < 0x20 && kPerIdRemaining[ev.id] > 0) {
-        --kPerIdRemaining[ev.id];
+    if (logThis) {
         char pname[64] = {0};
         TrackFX_GetParamName(tr, fxIdx, vst3Param, pname, sizeof(pname));
         char line[160];
