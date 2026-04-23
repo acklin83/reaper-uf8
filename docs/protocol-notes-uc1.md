@@ -305,6 +305,21 @@ Decoding map requires a targeted capture that shows individual digits
 in isolation (e.g. force-display "1", then "2", then "8", log which
 cells change). Defer until a specific need arises — track-select
 feature works without the 7-seg readout.
+
+**Structure from uc1_27 (110-position scroll)** — 18 cells involved,
+grouped by activity frequency (higher freq = digit that cycles more
+often during scroll):
+
+| Bank | Cells | Frequency | Likely digit |
+|------|-------|-----------|--------------|
+| 0x01 | 0x10..0x16 (7 cells) | 40..160 events | Ones digit |
+| 0x01 | 0x08..0x0E (7 cells) | 4..16 events | Tens digit |
+| 0x01 | 0x00,0x03..0x05 (4 of 7 cells) | 2 events each | Hundreds digit (only "1"-forming segments lit during 99→100 transition) |
+
+Per-segment mapping within each digit is not decoded — would need
+timeline alignment of FF 13 04 frames with CHANNEL-encoder events to
+correlate position-at-time with cell-state. `uc1_27_7seg_decode.pcapng`
+captures this data; decode is a later follow-up.
 | 2026-04-22 | `uc1_01_init_clean.pcapng` | Init/wakeup sequence on fresh enumeration — 27944 pkts to address 28, endpoints 0x00/0x80/0x02/0x81 |
 | 2026-04-22 | `uc1_02_idle_baseline.pcapng` | 10 s idle heartbeat — 11288 pkts, ~1130 pkt/s, same endpoint set. Baseline input for every diff. |
 | 2026-04-22 | `uc1_03_plugin_presence.pcapng` | Plugin load/unload transitions (30 s, 34298 pkts, 315 novel): empty → +BusComp2 → +ChStrip2 → −BusComp2 → −ChStrip2 |
