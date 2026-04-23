@@ -170,6 +170,39 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
     const bool logThis = (ev.id < 0x20 && kPerIdRemaining[ev.id] > 0);
     if (logThis) --kPerIdRemaining[ev.id];
 
+    // CHANNEL encoder — scrolls through REAPER tracks. Each click
+    // advances the track selection by 1 (positive = next track,
+    // negative = previous). Wraps at project bounds.
+    if (ev.id == knob::kChannelEncoder) {
+        const int n = CountTracks(nullptr);
+        if (n <= 0) return;
+        int cur = -1;
+        if (focusedTrack_) {
+            cur = static_cast<int>(
+                GetMediaTrackInfo_Value(static_cast<MediaTrack*>(focusedTrack_),
+                                        "IP_TRACKNUMBER")) - 1;
+        }
+        int next = cur + ev.delta;
+        if (next < 0) next = 0;
+        if (next >= n) next = n - 1;
+        MediaTrack* tr = GetTrack(nullptr, next);
+        if (tr) {
+            SetOnlyTrackSelected(tr);
+            // Ensure the focused track updates even if REAPER doesn't
+            // fire SetSurfaceSelected in the expected order.
+            setFocusedTrack(tr);
+        }
+        if (logThis) {
+            char line[96];
+            std::snprintf(line, sizeof(line),
+                "UC1 CHANNEL delta=%d → track %d of %d\n",
+                (int)ev.delta, next + 1, n);
+            ShowConsoleMsg(line);
+        }
+        ++stats_.knobEventsHandled;
+        return;
+    }
+
     if (!focusedTrack_) {
         if (logThis) {
             char line[96];

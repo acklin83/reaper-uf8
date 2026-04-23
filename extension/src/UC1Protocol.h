@@ -53,6 +53,11 @@ namespace knob {
     constexpr uint8_t kCSInputTrim  = 0x0C;
     constexpr uint8_t kCSFaderLevel = 0x16;
 
+    // Central control panel — CHANNEL encoder. SSL uses this to scroll
+    // through the Plug-in Mixer; Rea-Sixty uses it to scroll through
+    // REAPER's track selection.
+    constexpr uint8_t kChannelEncoder = 0x0D;
+
     // Dedicated Channel Strip left-side pots (EQ + filters)
     constexpr uint8_t kCSLowPass    = 0x00;
     constexpr uint8_t kCSHighPass   = 0x01;
