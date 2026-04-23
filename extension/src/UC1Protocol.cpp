@@ -176,31 +176,21 @@ std::vector<std::vector<uint8_t>> buildSevenSeg(unsigned int value)
     const uint8_t tens    = static_cast<uint8_t>((value / 10) % 10);
     const uint8_t hundreds= static_cast<uint8_t>((value / 100) % 10);
 
-    // Ones digit always shown.
+    // Always render all 3 digits with leading zeros — the user wants
+    // "001", "002" etc. rather than SSL's blank-leading convention.
     appendDigit(frames, 0x10, false, ones);
-    // Tens blank when value < 10 (no leading zero).
-    appendDigit(frames, 0x08, value < 10, tens);
-    // Hundreds: partial decode from uc1_27 — only the 4 cells we saw
-    // toggled during the 99→100 transition. Blank for < 100, else
-    // send the best-effort "1"-like pattern on those 4 cells for any
-    // 100..999 value. Refine with a targeted capture when needed.
-    if (value >= 100) {
-        // Observed cells when "1" appeared: 0x00, 0x03, 0x04, 0x05 all
-        // toggled. Render "hundreds" by lighting all 4 — if any of
-        // those correspond to "0" or "2" shapes, the display will be
-        // slightly wrong but the tens+ones will be correct.
+    appendDigit(frames, 0x08, false, tens);
+
+    // Hundreds: only 4 cells decoded (uc1_27 saw 0x00/0x03/0x04/0x05
+    // toggle during 99→100). For hundreds != 0 light all 4 (approx
+    // "1"-shape placeholder; visually off for digits other than "1"
+    // since we don't know the remaining 3 segments' cells). For
+    // hundreds == 0 clear those 4 cells — removes the stale "dash"
+    // the init-flood leaves in this position.
+    {
+        const uint8_t st = (hundreds != 0) ? 0x01 : 0x00;
         for (uint8_t c : {0x00, 0x03, 0x04, 0x05}) {
-            auto f = buildLedWrite(0x01, c, 0x01);
-            f[5] = 0x00;
-            uint32_t sum = 0;
-            for (size_t i = 1; i < f.size() - 1; ++i) sum += f[i];
-            f.back() = static_cast<uint8_t>(sum & 0xFF);
-            frames.push_back(std::move(f));
-        }
-    } else {
-        // Blank: clear all hundreds cells we know about.
-        for (uint8_t c : {0x00, 0x03, 0x04, 0x05}) {
-            auto f = buildLedWrite(0x01, c, 0x00);
+            auto f = buildLedWrite(0x01, c, st);
             f[5] = 0x00;
             uint32_t sum = 0;
             for (size_t i = 1; i < f.size() - 1; ++i) sum += f[i];
