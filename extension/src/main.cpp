@@ -1088,8 +1088,18 @@ void onUf8Input(const uint8_t* data, size_t len)
                 if (state != 0) {
                     g_touchLastPress[strip] = std::chrono::steady_clock::now();
                     g_touchReleasePending[strip].store(false);
-                    if (!g_touchReported[strip].exchange(true)) {
+                    const bool wasReported = g_touchReported[strip].exchange(true);
+                    if (!wasReported) {
                         if (g_dev) g_dev->send(uf8::buildMotorEnable(strip, false));
+                    }
+                    static int kDiagLimp = 12;
+                    if (kDiagLimp > 0) {
+                        --kDiagLimp;
+                        char buf[96];
+                        std::snprintf(buf, sizeof(buf),
+                            "UF8 touch→press strip=%d wasReported=%d sentLimp=%d\n",
+                            strip, wasReported, wasReported ? 0 : 1);
+                        ShowConsoleMsg(buf);
                     }
                 } else {
                     g_touchReleasePending[strip].store(true);
@@ -1696,6 +1706,14 @@ void commitDebouncedTouchReleases()
         const uint16_t pb  = linearVolumeToPb(uiVolLinear(tr));
         const uint8_t  lsb = static_cast<uint8_t>(pb & 0x7F);
         const uint8_t  msb = static_cast<uint8_t>((pb >> 7) & 0x7F);
+        static int kDiagEnable = 12;
+        if (kDiagEnable > 0) {
+            --kDiagEnable;
+            char buf[80];
+            std::snprintf(buf, sizeof(buf),
+                "UF8 touch→release strip=%d sentEnable=1\n", (int)s);
+            ShowConsoleMsg(buf);
+        }
         g_dev->send(uf8::buildMotorEnable(s, true));
         for (int i = 0; i < 3; ++i) {
             g_dev->send(uf8::buildFaderPosition(s, lsb, msb));
