@@ -7,7 +7,7 @@
 #include <condition_variable>
 #include <cstring>
 #include <mutex>
-#include <queue>
+#include <deque>
 #include <thread>
 
 #include "Protocol.h"
@@ -30,7 +30,7 @@ constexpr size_t   kInBufSize = 64;
 struct UF8Device::PendingSend {
     std::mutex              mu;
     std::condition_variable cv;
-    std::queue<std::vector<uint8_t>> q;
+    std::deque<std::vector<uint8_t>> q;
 };
 
 UF8Device::UF8Device()
@@ -217,7 +217,16 @@ void UF8Device::send(std::vector<uint8_t> frame)
 {
     {
         std::lock_guard<std::mutex> lk(pending_->mu);
-        pending_->q.push(std::move(frame));
+        pending_->q.push_back(std::move(frame));
+    }
+    pending_->cv.notify_one();
+}
+
+void UF8Device::sendPriority(std::vector<uint8_t> frame)
+{
+    {
+        std::lock_guard<std::mutex> lk(pending_->mu);
+        pending_->q.push_front(std::move(frame));
     }
     pending_->cv.notify_one();
 }
@@ -243,16 +252,20 @@ void UF8Device::workerLoop_()
     auto lastHeartbeat = std::chrono::steady_clock::now();
 
     while (!shuttingDown_) {
-        // Drain pending sends.
-        std::vector<uint8_t> frame;
+        // Drain pending sends — pull up to N frames per iteration so a
+        // burst of state pushes (VU, SEL colour, zones) doesn't stall
+        // latency-sensitive frames like motor-limp behind them. The
+        // worker still wakes on cv.notify_one() from send().
+        std::vector<std::vector<uint8_t>> batch;
         {
             std::unique_lock<std::mutex> lk(pending_->mu);
             pending_->cv.wait_for(lk, std::chrono::milliseconds(20),
                 [&] { return !pending_->q.empty() || shuttingDown_; });
             if (shuttingDown_) break;
-            if (!pending_->q.empty()) {
-                frame = std::move(pending_->q.front());
-                pending_->q.pop();
+            constexpr size_t kMaxBatch = 16;
+            while (!pending_->q.empty() && batch.size() < kMaxBatch) {
+                batch.push_back(std::move(pending_->q.front()));
+                pending_->q.pop_front();
             }
         }
 
@@ -267,7 +280,7 @@ void UF8Device::workerLoop_()
             lastHeartbeat = now;
         }
 
-        if (!frame.empty()) {
+        for (auto& frame : batch) {
             int transferred = 0;
             int rc = libusb_bulk_transfer(handle_, kEpOut,
                                           frame.data(),

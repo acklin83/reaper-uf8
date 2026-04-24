@@ -1090,7 +1090,11 @@ void onUf8Input(const uint8_t* data, size_t len)
                     g_touchReleasePending[strip].store(false);
                     const bool wasReported = g_touchReported[strip].exchange(true);
                     if (!wasReported) {
-                        if (g_dev) g_dev->send(uf8::buildMotorEnable(strip, false));
+                        // Priority send: motor-limp jumps the queue so
+                        // a burst of state pushes (VU/SEL/zones) can't
+                        // leave the motor engaged while the user is
+                        // already moving the fader.
+                        if (g_dev) g_dev->sendPriority(uf8::buildMotorEnable(strip, false));
                     }
                     static int kDiagLimp = 12;
                     if (kDiagLimp > 0) {
