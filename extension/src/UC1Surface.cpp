@@ -735,18 +735,18 @@ enum RingEncoding { Position, Bipolar, Additive };
 
 struct RingDef { const uint8_t* cells; int nCells; RingEncoding kind; };
 
-// Low Pass — 10 positions observed in dual_37, Position mode (single
-// LED lit at a time). Cells in capture order 0x95..0x9F. Visual
-// direction (pot CW = LED CW) is enforced by flipping the value to
-// (1-value) for inverted pots in handleKnob_ and refresh() before
-// calling pushKnobRing_. No cell reversal needed.
+// Low Pass — 11 LEDs (standard SSL EQ-ring count). 10 cells visible
+// in dual_37 (0x95, 0x97..0x9F); cell 0x96 didn't fire in that
+// capture because the user started the sweep at position 0x97 (3rd
+// LED) and moved right, never crossing the 2nd LED at 0x96. Adding
+// it gives the full 11-cell sequence 0x95..0x9F.
 constexpr uint8_t kLpfCells[] = {
-    0x95, 0x97, 0x98, 0x99, 0x9A, 0x9B, 0x9C, 0x9D, 0x9E, 0x9F,
+    0x95, 0x96, 0x97, 0x98, 0x99, 0x9A, 0x9B, 0x9C, 0x9D, 0x9E, 0x9F,
 };
 
 const RingDef* ringFor(uint8_t knobId)
 {
-    static const RingDef kLpf{kLpfCells, 10, Position};
+    static const RingDef kLpf{kLpfCells, 11, Position};
     switch (knobId) {
         case knob::kCSLowPass: return &kLpf;
         // TODO: other pots need per-cap cluster analysis to pin cells.
