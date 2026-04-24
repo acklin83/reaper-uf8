@@ -334,3 +334,120 @@ captures this data; decode is a later follow-up.
 | 2026-04-22 | `uc1_12_gr_dynamic.pcapng` | GR animated full range — 507 novel, 100 distinct 16-bit values `0x0026`..`0x0098` (3.8–15.2 dB) |
 | 2026-04-22 | `uc1_13_vu_meters.pcapng` | Test tones −20/−10/−6/0 dBFS — 245 novel OUT, `FF 13 04` VU family |
 | 2026-04-22 | `uc1_14_multiple_sc.pcapng` | Ext-SC button toggled — 8 novel IN + 25 novel OUT (LED feedback family) |
+
+## Decode pass 2026-04-24 — brightness, track colour, VU, GR, pot LED rings
+
+### LED + LCD brightness (`FF 14 02` + `FF 4F 02` + `FF 5C 02`)
+
+SSL 360° brightness slider → three coupled frames per step. `FF 4F 02` identical to UF8 (shared LCD-backlight encoding).
+
+| Step | `FF 14 02 <b> 00` | `FF 4F 02 <b> 00` | `FF 5C 02 00 <b>` |
+|------|-------------------|-------------------|--------------------|
+| dark   | `0x0A` | `0x18` | `0x08` |
+| dim    | `0x13` | `0x30` | `0x0F` |
+| half   | `0x20` | `0x50` | `0x19` |
+| bright | `0x26` | `0x60` | `0x1E` |
+| full   | `0x40` | `0xA0` | `0x32` |
+
+`FF 14 02` ≈ 2× `FF 2D 08` (UF8's LED brightness). Likely maps to UC1's denser LED surface.
+`FF 5C 02` role unclear — possibly Bus Comp GR meter baseline / status LEDs.
+
+### Focused-track colour (`FF 66 02 11 <palette_idx>`)
+
+The top bar on the UC1 LCD mirrors the focused track's colour. Single-byte palette index (range 0x01..0x0C observed); values match the UF8 palette-broadcast at the currently-focused strip's position. Fires on REAPER track-colour change AND on focus change.
+
+### Colour-bar enable flag (`FF 66 03 00 01 <flag>`)
+
+7-byte frame. `flag = 0x00` → central display shows "MAIN" (no SSL plugin on focused track). `flag = 0x01` → colour bar and plugin context active.
+
+### Central plugin label (`FF 66 05 01 <4 ASCII>`)
+
+9-byte frame carrying a 4-character label. Observed values: `"MAIN"` (no plugin), `"CS 2"` (SSL Native Channel Strip 2). Analog to UF8's `FF 66 06 17` Channel Strip Type zone.
+
+### Track-name carousel (`FF 66 25 02` and `FF 66 2B 04`)
+
+Two related frame families each containing a **3-slot track-name triple**:
+
+- `FF 66 25 02 <36 bytes> <chk>` — 41 bytes total. 3 × 12-byte slots.
+- `FF 66 2B 04 <42 bytes> <chk>` — 47 bytes total. 3 × 14-byte slots.
+
+Each slot is a zero-padded ASCII string (track name, e.g. `"1"`, `"TESTCS"`). Layout appears to be `[prev-track | current-track | next-track]` but alignment varies (leading zeros sometimes present). The smaller 12-byte slot corresponds to one UC1 display zone, the 14-byte slot to another.
+
+### GR meter — Channel Strip dynamics (`FF 13 04 01 <cell> 01 <state>`)
+
+UC1 has 5 dedicated GR LEDs on cells **0x5C..0x60** (bank 0x01). Each LED has 5 visible brightness states observed (plus off):
+
+| state | level |
+|-------|-------|
+| `0x00` | off |
+| `0x01`..`0x03` | threshold-entering flicker |
+| `0x19` | step 1 |
+| `0x2D` | step 2 |
+| `0x54` | step 3 |
+| `0x99` | step 4 |
+| `0xFF` | step 5 (full) |
+
+User's hypothesis that UF8's GR byte drives UC1 LEDs simultaneously confirmed via `dual_35`: both devices receive synchronized GR information, encoded differently (UF8 = single byte, UC1 = per-LED brightness).
+
+### VU meter LEDs — bank 0x02
+
+Input + Output VU strips on UC1 use bank `0x02` LED cells (different from GR which uses bank 0x01). Cells observed during `dual_36_cs_vu_ramp`:
+
+- Contiguous block `0x71..0x7C` (12 cells) — main VU segments
+- `0x3A..0x3E` (5 cells) — likely peak hold or second row
+- Multi-state cells `0x5B, 0x5C, 0x5D` with 5 brightness levels (same encoding as GR LEDs)
+- Isolated cells `0x45, 0x50, 0x66, 0x87` — dB-level markers or peak dots
+
+Exact cell-to-LED-position mapping and Input-vs-Output split needs offline alignment with the ramp timeline (deferred).
+
+### Pot LED rings — encoding (`FF 13 04 <bank> <cell> 00 <state>`)
+
+Each UC1 pot has an LED ring around it. Two-bank encoding:
+
+- **bank 0x01, state 0x00 / 0x01** — selection bitmap: which segments are lit (part of the arc)
+- **bank 0x02, state 0x00 / 0xFF** — brightness: per-segment on/off at the selected brightness
+
+Both banks use role byte `0x00` (not `0x01` which is the LED-mode used elsewhere). Same cell address is written to both banks on every pot tick.
+
+### Pot → cell clusters (from `dual_37..dual_41`)
+
+All UC1 pot sweeps produced FF 13 04 traffic on bank 01 + bank 02 simultaneously. Rough per-pot cell ranges (exact pot-to-cluster attribution requires re-listening to the capture order):
+
+| Pot (approx) | Cell range observed |
+|--------------|---------------------|
+| Low Pass | `0x95, 0x97, 0x98..0x9F` (10 cells) |
+| High Pass | `0x57, 0x63, 0x6C..0x6E` (5) |
+| HF Gain | `0x61..0x63` (3) |
+| HF Freq | `0x55..0x57` (3) |
+| HMF Gain | `0x34, 0x3F, 0x49, 0x4A` (4) |
+| HMF Freq | `0x3D..0x41` (5) |
+| HMF Q | `0x32..0x35` (4) |
+| LMF Gain | `0x27..0x2A` (4) |
+| LMF Freq | `0x1B..0x2A` (partial) |
+| Comp Ratio, Comp Thr, Comp Release | `0x72..0x91` range |
+| Gate Range, Gate Thr, Gate Release, Gate Hold | (nested in Dyn range) |
+| BC Threshold/Makeup/Ratio/Attack/Release/Mix/S-C HPF | `0xCB..0xF3` range |
+| Input Gain / Output Gain | `0xCB..0xD5`, `0x03..0x0C` (additive ring, not bi-polar) |
+
+Narrower clusters (3-4 cells) = 7-LED rings for BC attack/release/ratio.
+Wider clusters (10 cells) = 11-LED rings for EQ gain/freq.
+
+Precise pot → cell map will be tightened in a follow-up pass by correlating the capture's click timing with the user's hand-recorded pot order.
+
+### Session log (additions)
+
+| date | capture | finding |
+|------|---------|---------|
+| 2026-04-24 | `uc1_28_idle_baseline_v2.pcapng` | Fresh 10 s idle baseline for UC1 decode pass. |
+| 2026-04-24 | `uc1_29_led_brightness.pcapng` | UC1 brightness slider 5 steps — `FF 14 02` + `FF 4F 02` + `FF 5C 02` decoded. |
+| 2026-04-24 | `uc1_30_track_colour_bar.pcapng` | Track selection sweep — `FF 66 02 11` (colour), `FF 66 25 02` / `FF 66 2B 04` (track-name carousel), `FF 66 05 01` (MAIN label). |
+| 2026-04-24 | `uc1_32_slow_t1_t2.pcapng` | Slow T1↔T2 toggle — revealed `FF 66 03 00 01 <flag>` colour-bar-enable and `FF 66 05 01` CS 2 label. |
+| 2026-04-24 | `dual_33_sel_tracks.pcapng` | Dual-device baseline — SEL colour goes only to UF8. |
+| 2026-04-24 | `dual_34_colour_change.pcapng` | REAPER track-colour change — UC1 gets `FF 66 02 11 <palette_idx>`, UF8 gets `FF 66 09 18` palette broadcast. |
+| 2026-04-24 | `dual_35_cs_gr_ramp.pcapng` | Channel Strip GR ramp — UC1 bank 0x01 cells 0x5C..0x60 with 5-step brightness. |
+| 2026-04-24 | `dual_36_cs_vu_ramp.pcapng` | CS VU ramp — UC1 bank 0x02 cells 0x3A..0x3E, 0x71..0x7C, plus scattered markers. UF8 `FF 66 21 09` byte 6/7 = In/Out VU. |
+| 2026-04-24 | `dual_37_lpf_ring.pcapng` | Low Pass pot sweep — 10 cells `0x95..0x9F`, dual-bank encoding verified. |
+| 2026-04-24 | `dual_38_eq_pots.pcapng` | 11 EQ pots (HPF + HF/HMF/LMF/LF gain/freq/Q) — cell ranges extracted. |
+| 2026-04-24 | `dual_39_dyn_pots.pcapng` | 7 Dyn pots (Comp + Gate) — cell ranges `0x72..0x91`. |
+| 2026-04-24 | `dual_40_bc_pots.pcapng` | 7 BC pots — cell ranges `0xCB..0xF3`, 7-LED rings for attack/release/ratio. |
+| 2026-04-24 | `dual_41_io_gain.pcapng` | Input + Output gain — additive LED rings (lower LEDs stay lit as value increases). |

@@ -225,3 +225,89 @@ and can misroute colors.
 | 2026-04-21 | cap21_chan_no.pcapng | **Channel Number Zone** = `FF 66 <len> 14 <strip> <N ASCII>` — the small top-left digit in color bar. Sent per strip after each BANK → / BANK ←. |
 | 2026-04-21 | cap22_leds.pcapng | **Per-strip button LEDs** = `FF 3B 03 <id> 00 <state>` (7 B). Captured while UF8 in DAW Layer + REAPER Mackie Control Universal sending state changes. Initial MCU-note-style mapping guess was WRONG. |
 | 2026-04-21 | cap23_led_enum.pcapng | **LED ID map decoded**: `id = strip * 3 + type`, type 0=SEL, 1=MUTE, 2=SOLO (IDs 0x00..0x17). Three passes through 8 tracks each were visible as 3 × 8 events. REC ARM still unverified — was UF8-only mode during cap23, wasn't isolated. |
+
+## Decode pass 2026-04-24 — brightness, SEL colour, VU, GR
+
+### LED + LCD brightness (`FF 2D 08` + `FF 4F 02`)
+
+SSL 360° exposes a single **brightness slider** (5 steps: dark / dim / half / bright / full). Each slider click fires two coupled frames:
+
+- `FF 2D 08 00 00 <b> 00 <b> 00 <b> 00 <chk>` — **LED master brightness**. Triplet of identical bytes; likely per-RGB-channel driver. 12 bytes.
+- `FF 4F 02 <b> 00 <chk>` — **LCD / scribble backlight brightness**. Single byte. 6 bytes.
+
+| Step | `FF 2D 08` byte | `FF 4F 02` byte |
+|------|-----------------|------------------|
+| dark   | `0x05` | `0x18` |
+| dim    | `0x0A` | `0x30` |
+| half   | `0x10` | `0x50` |
+| bright | `0x13` | `0x60` |
+| full   | `0x20` | `0xA0` |
+
+Same `FF 4F 02` encoding used on UC1 → confirmed cross-device LCD-backlight format.
+
+### SEL LED per-strip colour (`FF 38/39 04 <cell>`)
+
+SSL 360° has an option "SEL Button Colour: White / DAW Colour". In **DAW Colour** mode each strip's SEL LED reflects its track colour; selected = bright, unselected = dim.
+
+Per-strip SEL LED cells (8-strip array, decreasing by 3):
+- strip 1 → `0x12`
+- strip 2 → `0x0F`
+- strip 3 → `0x0C`
+- strip 4 → `0x09`
+- strip 5 → `0x06`
+- strip 6 → `0x03`
+- strip 7 → `0x00`
+- strip 8 → `0x15` (wraps above strip 1 — verified in `cap30_sel_colour_toggle`)
+
+Frame pair per cell: `FF 38 04 <cell> 00 <a> <b> <chk>` + `FF 39 04 <cell> 00 <a> <b> <chk>`.
+
+**White mode** (SEL always-white, bright=selected):
+- Unselected: both frames `00 11 F1`
+- Selected: `FF 38` only with `00 FF FF`
+
+**DAW Colour mode:** FF38 + FF39 encode the track colour as 2-byte pair per frame. Exact RGB decode still TBD — bytes vary per colour but not a simple palette-index or RGB555/444 mapping. Saved for future offline work.
+
+### Selected-strip bitmask (`FF 66 03 06 <mask_lo> <mask_hi>`)
+
+Fires on selection change. 16-bit little-endian bitmask, one bit per strip:
+- strip 1 = bit 1 → `0x0002`
+- strip 2 = bit 2 → `0x0004`
+- strip 7 = bit 7 → `0x0080`
+- strip 8 = likely bit 8 → `0x0100` (high byte; not directly captured but extrapolated)
+
+### Track-colour palette broadcast (`FF 66 09 18 02 <8 indices>`)
+
+Confirmed on `cap_dual_34`: the long-known UF8 palette-broadcast frame fires on REAPER track-colour change, not just selection. Sub-cmd `0x02` before the 8 palette bytes — already documented above, now verified with per-change captures.
+
+### VU meter per strip (`FF 66 21 09 00 00 <in_b6> <out_b7> 00 … <chk>`)
+
+Previously classified as an idle heartbeat — actually carries VU data. 37-byte frame:
+- bytes 0–3: header `FF 66 21 09`
+- bytes 4–5: `00 00`
+- **byte 6**: Input VU level (0..31)
+- **byte 7**: Output VU level (0..31)
+- bytes 8–35: padding (`00 00 00 …`)
+- byte 36: checksum
+
+`FF 66 21 0A` is a sibling frame with the same structure (possibly strip-group 2 or a confirmation write). Same byte layout.
+
+During `dual_36_cs_vu_ramp` the user ramped input signal through a 16-level test rig with Dyn bypassed — byte 6 and byte 7 stayed equal across the entire ramp, confirming they're Input + Output of the same strip.
+
+### GR meter per strip (`FF 66 11 0F <gr_byte> 00 … <chk>`)
+
+21-byte frame. Single GR byte at payload position 0; rest zero-padded. Range observed 0x22..0x64 during a Channel Strip compressor ramp. UF8's on-screen GR arc renders from this single byte.
+
+### Session log (additions)
+
+| date | capture | finding |
+|------|---------|---------|
+| 2026-04-24 | `cap24_idle_baseline_v2.pcapng` | Refreshed 10 s idle baseline — 11 unique payloads, heartbeats only. |
+| 2026-04-24 | `cap25_led_brightness.pcapng` | Brightness slider forward sweep — `FF 2D 08` + `FF 4F 02` decoded for dim/half/bright/full. |
+| 2026-04-24 | `cap26_led_brightness_reverse.pcapng` | Reverse sweep — captured `dark` values to complete the 5-step table. |
+| 2026-04-24 | `cap27_sel_follows_colour.pcapng` | SEL LED in DAW-Colour mode — cell mapping partial (6 of 8 strips). |
+| 2026-04-24 | `cap28_sel_from_reaper.pcapng` | SEL triggered from REAPER TCP — 7 transitions, cell + bitmask pattern refined. |
+| 2026-04-24 | `cap30_sel_colour_toggle.pcapng` | Toggle White ↔ DAW Colour — 15-frame refresh burst per toggle, all 8 cells mapped. |
+| 2026-04-24 | `uc1/dual_33_sel_tracks.pcapng` | Dual-device (UF8 + UC1) track selection — confirmed SEL-colour goes only to UF8. |
+| 2026-04-24 | `uc1/dual_34_colour_change.pcapng` | REAPER track-colour changes — `FF 66 09 18` palette-broadcast fires per change. |
+| 2026-04-24 | `uc1/dual_35_cs_gr_ramp.pcapng` | CS compressor GR ramp — UF8 GR byte `FF 66 11 0F` range `0x22..0x64`. |
+| 2026-04-24 | `uc1/dual_36_cs_vu_ramp.pcapng` | CS VU ramp — `FF 66 21 09` bytes 6/7 carry Input/Output VU `0x00..0x1F`. |
