@@ -153,6 +153,57 @@ std::vector<uint8_t> buildVPotReadoutBar(const std::array<uint16_t, kStripCount>
 //   FF 66 0A 0C <strip> <4 bytes> 00 00 "dB" CKSUM  (14 bytes)
 std::vector<uint8_t> buildFaderDbReadout(uint8_t strip, std::string_view fourChars);
 
+// ---- Decoded 2026-04-24 ----
+
+// LED master brightness (all non-LCD LEDs on the UF8):
+//   FF 2D 08 00 00 <b> 00 <b> 00 <b> 00 CKSUM    (12 bytes)
+// The triplet carries identical brightness bytes in SSL 360° captures —
+// likely per-RGB-channel driver level. We mirror that (all 3 equal).
+// Per-step values: dark=0x05, dim=0x0A, half=0x10, bright=0x13, full=0x20.
+std::vector<uint8_t> buildLedBrightness(uint8_t level);
+
+// LCD / scribble backlight brightness:
+//   FF 4F 02 <b> 00 CKSUM     (6 bytes)
+// Per-step values: dark=0x18, dim=0x30, half=0x50, bright=0x60, full=0xA0.
+std::vector<uint8_t> buildLcdBrightness(uint8_t level);
+
+// VU meter — 8 strips × (input, output) per frame.
+// Previously classified as idle heartbeat `FF 66 21 09`. 37-byte frame:
+//   FF 66 21 09 00 00 <s0_in> <s0_out> <s1_in> <s1_out> … <s7_in> <s7_out> <14 × 00> CKSUM
+// Each level ∈ 0x00..0x1F. Sibling `FF 66 21 0A` has the same layout
+// (probably output-side or confirmation); we send both.
+// `levels` is [s0_in, s0_out, s1_in, s1_out, …] = 16 bytes.
+std::array<std::vector<uint8_t>, 2> buildVuMeter(const std::array<uint8_t, 16>& levels);
+
+// GR meter (single byte, focused-strip's CS dynamics):
+//   FF 66 11 0F <gr_byte> 00x15 CKSUM    (21 bytes)
+// Observed range 0x22..0x64 during a CS compressor ramp; larger = more
+// GR. UF8 renders the on-screen GR arc from this byte.
+std::vector<uint8_t> buildGrByte(uint8_t grByte);
+
+// Selected-strip 16-bit bitmask. Fires on selection change.
+//   FF 66 03 06 <lo> <hi> CKSUM    (7 bytes)
+// bit N = strip N selected (strip 1 = bit 1 = 0x0002, …, strip 8 = 0x0100).
+std::vector<uint8_t> buildSelectedStripMask(uint16_t mask);
+
+// SEL LED per-strip colour (bank 0x00 of the FF 38/39 family, NOT the
+// button-LED bank). Two coupled frames per strip — bytes encode a 2-byte
+// colour+brightness pair (FF38 = primary, FF39 = mirror/confirmation).
+//   FF 38 04 <cell> 00 <a> <b> CKSUM    (8 bytes)
+//   FF 39 04 <cell> 00 <a> <b> CKSUM    (8 bytes)
+// Cell → strip map (from cap30 decode): strip 1=0x12, 2=0x0F, 3=0x0C,
+// 4=0x09, 5=0x06, 6=0x03, 7=0x00, 8=0x15.
+// Byte semantics still partially TBD; we send white values (a=0x11,
+// b=0xF1 dim / a=0xFF, b=0xFF bright) as a safe default while the
+// track-colour-to-bytes mapping is refined.
+uint8_t selCellForStrip(uint8_t strip);
+std::array<std::vector<uint8_t>, 2> buildSelColour(uint8_t strip, uint8_t byteA, uint8_t byteB);
+
+// Convenience: build a pair of {FF38, FF39} for the "white dim"
+// (unselected) / "white bright" (selected) colour states — no track
+// colour lookup needed.
+std::array<std::vector<uint8_t>, 2> buildSelWhite(uint8_t strip, bool bright);
+
 // Verify a frame's checksum. Returns true if frame starts with FF and the
 // last byte matches sum(middle bytes) mod 256.
 bool verifyFrame(std::span<const uint8_t> frame);

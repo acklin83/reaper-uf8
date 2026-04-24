@@ -231,6 +231,74 @@ std::vector<uint8_t> buildChannelStripContext(std::string_view name);
 //   FF 66 2B 04 <14 zeros> <name 0..14 chars> <zeros to fill 42> <chk>
 std::vector<uint8_t> buildBusCompContext(std::string_view name);
 
+// ---- Decoded 2026-04-24 ----
+
+// LED master brightness (non-LCD LEDs on UC1):
+//   FF 14 02 <b> 00 CKSUM    (6 bytes)
+// Per-step: dark=0x0A, dim=0x13, half=0x20, bright=0x26, full=0x40.
+std::vector<uint8_t> buildLedBrightness(uint8_t level);
+
+// LCD / display backlight brightness. Same encoding as UF8's.
+//   FF 4F 02 <b> 00 CKSUM    (6 bytes)
+// Per-step: dark=0x18, dim=0x30, half=0x50, bright=0x60, full=0xA0.
+std::vector<uint8_t> buildLcdBrightness(uint8_t level);
+
+// Status / GR-area auxiliary brightness (role TBD; observed alongside
+// the main brightness changes).
+//   FF 5C 02 00 <b> CKSUM    (6 bytes)
+// Per-step: dark=0x08, dim=0x0F, half=0x19, bright=0x1E, full=0x32.
+std::vector<uint8_t> buildStatusBrightness(uint8_t level);
+
+// Focused-track colour bar. Single palette byte (same indices as UF8's
+// palette 0x01..0x0B, plus 0x00/0x0C-0x0F render OFF).
+//   FF 66 02 11 <palette_idx> CKSUM    (6 bytes)
+std::vector<uint8_t> buildFocusedColour(uint8_t paletteIdx);
+
+// Colour-bar enable flag (and "MAIN" mode toggle). flag=0x01 shows the
+// plugin-context colour bar; flag=0x00 puts UC1 in MAIN/idle mode.
+//   FF 66 03 00 01 <flag> CKSUM    (7 bytes)
+std::vector<uint8_t> buildColourBarEnable(bool on);
+
+// Central label — 4-character plugin-type tag shown in the central LCD
+// area. "MAIN" when no SSL plugin is focused; "CS 2", "4K E", "BC 2",
+// etc. when a plugin is loaded. Observed analog to UF8's Channel Strip
+// Type zone but UC1-specific framing.
+//   FF 66 05 01 <4 ASCII> CKSUM    (9 bytes)
+std::vector<uint8_t> buildCentralLabel(std::string_view fourChars);
+
+// Track-name carousel — 3-slot version for both small (0x02) and large
+// (0x04) zones. Each slot is left-aligned, zero-padded to its slot
+// width; slots are [prev, current, next] in the frame.
+//   FF 66 25 02 <3 × 12-byte slots> CKSUM    (41 bytes)
+//   FF 66 2B 04 <3 × 14-byte slots> CKSUM    (47 bytes)
+std::vector<uint8_t> buildTrackNameTripleSmall(std::string_view prev,
+                                               std::string_view curr,
+                                               std::string_view next);
+std::vector<uint8_t> buildTrackNameTripleLarge(std::string_view prev,
+                                               std::string_view curr,
+                                               std::string_view next);
+
+// Convenience constants for brightness levels (matches decoded table).
+namespace brightness {
+    constexpr uint8_t kDark   = 0x0A;
+    constexpr uint8_t kDim    = 0x13;
+    constexpr uint8_t kHalf   = 0x20;
+    constexpr uint8_t kBright = 0x26;
+    constexpr uint8_t kFull   = 0x40;
+
+    constexpr uint8_t kLcdDark   = 0x18;
+    constexpr uint8_t kLcdDim    = 0x30;
+    constexpr uint8_t kLcdHalf   = 0x50;
+    constexpr uint8_t kLcdBright = 0x60;
+    constexpr uint8_t kLcdFull   = 0xA0;
+
+    constexpr uint8_t kStatusDark   = 0x08;
+    constexpr uint8_t kStatusDim    = 0x0F;
+    constexpr uint8_t kStatusHalf   = 0x19;
+    constexpr uint8_t kStatusBright = 0x1E;
+    constexpr uint8_t kStatusFull   = 0x32;
+}
+
 // ---- Frame parser (UC1 → host, EP 0x81) ----
 //
 // EP 0x81 IN frames arrive as a 2-byte USB poll token `31 XX` followed

@@ -112,6 +112,12 @@ std::atomic<bool> g_pageDirty{false};
 // automatic plug-in-param mode. Same invalidation path as a page change.
 std::atomic<bool> g_forcePan{false};
 
+// Per-strip cache for the SEL-follows-DAW-Colour LED state. Avoids
+// sending FF 38/39 every tick — only on actual changes. Value encodes
+// 0xFF for "bright" / 0x00 for "dim" / 0xFE as "unset".
+uint8_t g_lastSelBright[8] = {0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE};
+uint16_t g_lastSelMask = 0xFFFF;  // 0xFFFF = "unset" sentinel
+
 // Read the "UI" volume for a track — reflects the same value the REAPER
 // mixer displays, including automation playback and the effect of a
 // just-applied CSurf_OnVolumeChange. Safer than GetMediaTrackInfo_Value
@@ -1590,12 +1596,108 @@ void commitDebouncedTouchReleases()
     }
 }
 
+// Linear peak (0..1) → UF8 VU byte (0..31). -60 dBFS → 0, 0 dBFS → 31.
+// Uniform log-scale mapping across 60 dB. Matches the visible behaviour
+// on SSL's VU strips closely enough for Phase 1.
+uint8_t peakToVuByte(double peak)
+{
+    if (peak <= 0.0) return 0;
+    const double dbfs = 20.0 * std::log10(peak);
+    if (dbfs >= 0.0)  return 0x1F;
+    if (dbfs <= -60.0) return 0x00;
+    const double f = (dbfs + 60.0) / 60.0;  // 0..1
+    const int byte = static_cast<int>(f * 31.0 + 0.5);
+    return static_cast<uint8_t>(std::clamp(byte, 0, 0x1F));
+}
+
+std::array<uint8_t, 16> g_lastVuLevels{};
+bool g_vuInit = false;
+
+// UF8 GR byte. Source is undefined until a plugin-GR probe is wired —
+// keep at 0 so the display doesn't show stale SSL-360°-left state. When
+// a GR provider exists it can call pushUf8Gr(byte) to update.
+uint8_t g_uf8GrByte = 0;
+uint8_t g_lastUf8GrByte = 0xFE;  // sentinel "unset"
+
+void pushVuMeter()
+{
+    if (!g_dev || !g_dev->isOpen()) return;
+
+    const int trackCount = CountTracks(nullptr);
+    const int bankOffset = g_bankOffset.load();
+    std::array<uint8_t, 16> levels{};
+    for (int s = 0; s < 8; ++s) {
+        const int idx = s + bankOffset;
+        if (idx >= trackCount) continue;
+        MediaTrack* tr = GetTrack(nullptr, idx);
+        if (!tr) continue;
+        // Left = channel 0, right = channel 1. REAPER's peak is the
+        // channel's post-fader tap; pre-fader VU isn't exposed via this
+        // call, so "in" and "out" end up mirroring each other for mono
+        // fader moves. Good enough until a JSFX probe exposes pre-fader.
+        const double pl = Track_GetPeakInfo(tr, 0);
+        const double pr = Track_GetPeakInfo(tr, 1);
+        levels[s * 2 + 0] = peakToVuByte(pl);     // "input"
+        levels[s * 2 + 1] = peakToVuByte(pr);     // "output"
+    }
+    if (g_vuInit && levels == g_lastVuLevels) return;
+    g_vuInit = true;
+    g_lastVuLevels = levels;
+    auto frames = uf8::buildVuMeter(levels);
+    g_dev->send(std::move(frames[0]));
+    g_dev->send(std::move(frames[1]));
+}
+
+void pushSelColourBar()
+{
+    if (!g_dev || !g_dev->isOpen()) return;
+
+    const int trackCount = CountTracks(nullptr);
+    const int bankOffset = g_bankOffset.load();
+
+    // Determine each visible strip's selection state + compute the mask
+    // for the selected strip. Empty slots (past trackCount) default to
+    // unselected. The 16-bit mask has bit (strip+1) set for the
+    // currently-selected strip (T1=0x02, T2=0x04, …, T8=0x0100).
+    uint16_t mask = 0;
+    for (int s = 0; s < 8; ++s) {
+        const int idx = s + bankOffset;
+        MediaTrack* tr = (idx < trackCount) ? GetTrack(nullptr, idx) : nullptr;
+        const bool sel = tr && GetMediaTrackInfo_Value(tr, "I_SELECTED") > 0.5;
+        const uint8_t target = sel ? 0xFF : 0x00;
+        if (sel) mask |= static_cast<uint16_t>(1 << (s + 1));
+        if (g_lastSelBright[s] != target) {
+            g_lastSelBright[s] = target;
+            // White-mode LED update. DAW-Colour byte encoding is still
+            // partial; white mode is visually correct even without the
+            // per-track palette-to-bytes decode, since unselected=dim
+            // and selected=bright matches SSL's default behaviour.
+            auto frames = uf8::buildSelWhite(static_cast<uint8_t>(s), sel);
+            if (!frames[0].empty()) g_dev->send(std::move(frames[0]));
+            if (!frames[1].empty()) g_dev->send(std::move(frames[1]));
+        }
+    }
+    if (mask != g_lastSelMask) {
+        g_lastSelMask = mask;
+        g_dev->send(uf8::buildSelectedStripMask(mask));
+    }
+}
+
 void onTimer()
 {
     drainInputQueue();
     commitDebouncedTouchReleases();
     if (g_sync) g_sync->refresh(reaperColorForVisibleSlot);
     pushZonesForVisibleSlots();
+    pushSelColourBar();
+    pushVuMeter();
+    // UF8 GR — push only on change. Without a GR data source we leave
+    // g_uf8GrByte at 0 which clears the meter. A future JSFX probe
+    // updates the byte via a dedicated setter.
+    if (g_dev && g_dev->isOpen() && g_uf8GrByte != g_lastUf8GrByte) {
+        g_lastUf8GrByte = g_uf8GrByte;
+        g_dev->send(uf8::buildGrByte(g_uf8GrByte));
+    }
     if (g_uc1_surface) g_uc1_surface->poll();
 
     // Once-per-second UC1 wire stats — only print if something is

@@ -170,6 +170,23 @@ bool UC1Device::open()
     // Post-flood settle.
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
+    // LED + LCD brightness — default "full" (decoded 2026-04-24,
+    // captures uc1_29). Three coupled frames: LED master + LCD
+    // backlight + status-area brightness.
+    {
+        auto sendBright = [&](const std::vector<uint8_t>& f) {
+            int t = 0;
+            libusb_bulk_transfer(handle_, kEpOut,
+                                 const_cast<uint8_t*>(f.data()),
+                                 static_cast<int>(f.size()),
+                                 &t, 500);
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        };
+        sendBright(buildLedBrightness(brightness::kFull));
+        sendBright(buildLcdBrightness(brightness::kLcdFull));
+        sendBright(buildStatusBrightness(brightness::kStatusFull));
+    }
+
     shuttingDown_ = false;
     worker_ = std::thread([this]{ workerLoop_(); });
 

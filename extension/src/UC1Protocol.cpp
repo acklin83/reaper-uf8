@@ -284,4 +284,91 @@ std::optional<KnobEvent> parseKnobEvent(std::span<const uint8_t> bytes)
     return ev;
 }
 
+// --- Decoded 2026-04-24 ---
+
+std::vector<uint8_t> buildLedBrightness(uint8_t level)
+{
+    // FF 14 02 <b> 00 CKSUM
+    const uint8_t data[2] = {level, 0x00};
+    return buildFrame(0x14, data);
+}
+
+std::vector<uint8_t> buildLcdBrightness(uint8_t level)
+{
+    // FF 4F 02 <b> 00 CKSUM
+    const uint8_t data[2] = {level, 0x00};
+    return buildFrame(0x4F, data);
+}
+
+std::vector<uint8_t> buildStatusBrightness(uint8_t level)
+{
+    // FF 5C 02 00 <b> CKSUM — byte order inverted vs the other two
+    const uint8_t data[2] = {0x00, level};
+    return buildFrame(0x5C, data);
+}
+
+std::vector<uint8_t> buildFocusedColour(uint8_t paletteIdx)
+{
+    // FF 66 02 11 <palette> CKSUM
+    const uint8_t data[2] = {0x11, paletteIdx};
+    return buildFrame(0x66, data);
+}
+
+std::vector<uint8_t> buildColourBarEnable(bool on)
+{
+    // FF 66 03 00 01 <flag> CKSUM
+    const uint8_t data[3] = {0x00, 0x01, static_cast<uint8_t>(on ? 0x01 : 0x00)};
+    return buildFrame(0x66, data);
+}
+
+std::vector<uint8_t> buildCentralLabel(std::string_view fourChars)
+{
+    // FF 66 05 01 <4 ASCII> CKSUM
+    uint8_t data[5];
+    data[0] = 0x01;
+    for (int i = 0; i < 4; ++i) {
+        data[1 + i] = (i < static_cast<int>(fourChars.size()))
+                          ? static_cast<uint8_t>(fourChars[i])
+                          : 0x20;
+    }
+    return buildFrame(0x66, data);
+}
+
+namespace {
+void writeSlot(uint8_t* dst, size_t slotWidth, std::string_view text)
+{
+    const size_t n = std::min(text.size(), slotWidth);
+    for (size_t i = 0; i < n; ++i) dst[i] = static_cast<uint8_t>(text[i]);
+    for (size_t i = n; i < slotWidth; ++i) dst[i] = 0x00;
+}
+}
+
+std::vector<uint8_t> buildTrackNameTripleSmall(std::string_view prev,
+                                               std::string_view curr,
+                                               std::string_view next)
+{
+    // FF 66 25 02 + 3 × 12-byte slots + CKSUM
+    constexpr size_t kSlot = 12;
+    std::vector<uint8_t> data(1 + 3 * kSlot, 0x00);
+    data[0] = 0x02;
+    writeSlot(&data[1 + 0 * kSlot], kSlot, prev);
+    writeSlot(&data[1 + 1 * kSlot], kSlot, curr);
+    writeSlot(&data[1 + 2 * kSlot], kSlot, next);
+    return buildFrame(0x66, data);
+}
+
+std::vector<uint8_t> buildTrackNameTripleLarge(std::string_view prev,
+                                               std::string_view curr,
+                                               std::string_view next)
+{
+    // FF 66 2B 04 + 3 × 14-byte slots + CKSUM
+    constexpr size_t kSlot = 14;
+    std::vector<uint8_t> data(1 + 3 * kSlot, 0x00);
+    data[0] = 0x04;
+    writeSlot(&data[1 + 0 * kSlot], kSlot, prev);
+    writeSlot(&data[1 + 1 * kSlot], kSlot, curr);
+    writeSlot(&data[1 + 2 * kSlot], kSlot, next);
+    return buildFrame(0x66, data);
+}
+
 } // namespace uc1

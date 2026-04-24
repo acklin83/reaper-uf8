@@ -270,6 +270,147 @@ std::array<std::vector<uint8_t>, 2> buildPluginMixerHeartbeat()
     return {build(0x15), build(0x16)};
 }
 
+// --- Decoded 2026-04-24 ---
+
+std::vector<uint8_t> buildLedBrightness(uint8_t level)
+{
+    // FF 2D 08 00 00 <b> 00 <b> 00 <b> 00 CKSUM
+    std::vector<uint8_t> f;
+    f.reserve(12);
+    f.push_back(kFrameMagic);
+    const std::array<uint8_t, 11> body{0x2D, 0x08, 0x00, 0x00,
+                                        level, 0x00, level, 0x00,
+                                        level, 0x00, 0x00};
+    (void)body;
+    // Actually the payload is 10 bytes after FF: 2D 08 00 00 <b> 00 <b> 00 <b> 00.
+    // Let me rebuild without the trailing 0x00.
+    f.clear();
+    f.push_back(kFrameMagic);
+    f.push_back(0x2D);
+    f.push_back(0x08);
+    f.push_back(0x00);
+    f.push_back(0x00);
+    f.push_back(level);
+    f.push_back(0x00);
+    f.push_back(level);
+    f.push_back(0x00);
+    f.push_back(level);
+    f.push_back(0x00);
+    std::span<const uint8_t> payload{f.data() + 1, f.size() - 1};
+    f.push_back(checksum(payload));
+    return f;
+}
+
+std::vector<uint8_t> buildLcdBrightness(uint8_t level)
+{
+    // FF 4F 02 <b> 00 CKSUM
+    std::vector<uint8_t> f;
+    f.reserve(6);
+    f.push_back(kFrameMagic);
+    f.push_back(0x4F);
+    f.push_back(0x02);
+    f.push_back(level);
+    f.push_back(0x00);
+    std::span<const uint8_t> payload{f.data() + 1, f.size() - 1};
+    f.push_back(checksum(payload));
+    return f;
+}
+
+std::array<std::vector<uint8_t>, 2> buildVuMeter(const std::array<uint8_t, 16>& levels)
+{
+    auto build = [&](uint8_t subcmd) {
+        std::vector<uint8_t> f;
+        f.reserve(37);
+        f.push_back(kFrameMagic);
+        f.push_back(0x66);
+        f.push_back(0x21);
+        f.push_back(subcmd);
+        f.push_back(0x00);
+        f.push_back(0x00);
+        for (auto b : levels) f.push_back(b);        // 16 bytes: 8 × (in, out)
+        for (int i = 0; i < 14; ++i) f.push_back(0x00);
+        std::span<const uint8_t> payload{f.data() + 1, f.size() - 1};
+        f.push_back(checksum(payload));
+        return f;
+    };
+    return {build(0x09), build(0x0A)};
+}
+
+std::vector<uint8_t> buildGrByte(uint8_t grByte)
+{
+    // FF 66 11 0F <gr> 00×15 CKSUM  (21 bytes: 3 hdr + 17 data + 1 chk = 21)
+    std::vector<uint8_t> f;
+    f.reserve(21);
+    f.push_back(kFrameMagic);
+    f.push_back(0x66);
+    f.push_back(0x11);
+    f.push_back(0x0F);
+    f.push_back(grByte);
+    for (int i = 0; i < 15; ++i) f.push_back(0x00);
+    std::span<const uint8_t> payload{f.data() + 1, f.size() - 1};
+    f.push_back(checksum(payload));
+    return f;
+}
+
+std::vector<uint8_t> buildSelectedStripMask(uint16_t mask)
+{
+    // FF 66 03 06 <lo> <hi> CKSUM
+    std::vector<uint8_t> f;
+    f.reserve(7);
+    f.push_back(kFrameMagic);
+    f.push_back(0x66);
+    f.push_back(0x03);
+    f.push_back(0x06);
+    f.push_back(static_cast<uint8_t>(mask & 0xFF));
+    f.push_back(static_cast<uint8_t>((mask >> 8) & 0xFF));
+    std::span<const uint8_t> payload{f.data() + 1, f.size() - 1};
+    f.push_back(checksum(payload));
+    return f;
+}
+
+uint8_t selCellForStrip(uint8_t strip)
+{
+    // From cap30 decode: strip 1..7 step down from 0x12 by 3, strip 8 wraps to 0x15.
+    static constexpr uint8_t kMap[8] = {0x12, 0x0F, 0x0C, 0x09, 0x06, 0x03, 0x00, 0x15};
+    return (strip < 8) ? kMap[strip] : 0x00;
+}
+
+static std::vector<uint8_t> buildSelFrame(uint8_t cmd, uint8_t cell, uint8_t a, uint8_t b)
+{
+    std::vector<uint8_t> f;
+    f.reserve(8);
+    f.push_back(kFrameMagic);
+    f.push_back(cmd);
+    f.push_back(0x04);
+    f.push_back(cell);
+    f.push_back(0x00);
+    f.push_back(a);
+    f.push_back(b);
+    std::span<const uint8_t> payload{f.data() + 1, f.size() - 1};
+    f.push_back(checksum(payload));
+    return f;
+}
+
+std::array<std::vector<uint8_t>, 2> buildSelColour(uint8_t strip, uint8_t byteA, uint8_t byteB)
+{
+    const uint8_t cell = selCellForStrip(strip);
+    return {buildSelFrame(0x38, cell, byteA, byteB),
+            buildSelFrame(0x39, cell, byteA, byteB)};
+}
+
+std::array<std::vector<uint8_t>, 2> buildSelWhite(uint8_t strip, bool bright)
+{
+    // From cap30: white-dim = 00 11 F1 (both FF38 and FF39 symmetric).
+    // white-bright: only FF 38 fires with 00 FF FF; FF 39 is omitted by SSL.
+    // We mirror that behaviour — for `bright` the FF 39 entry is an empty
+    // vector the caller should skip-if-empty.
+    if (bright) {
+        const uint8_t cell = selCellForStrip(strip);
+        return {buildSelFrame(0x38, cell, 0xFF, 0xFF), std::vector<uint8_t>{}};
+    }
+    return buildSelColour(strip, 0x11, 0xF1);
+}
+
 bool verifyFrame(std::span<const uint8_t> frame)
 {
     if (frame.size() < 3) return false;

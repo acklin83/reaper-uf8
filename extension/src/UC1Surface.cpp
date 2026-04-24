@@ -7,6 +7,7 @@
 #include <string>
 
 #include "reaper_plugin_functions.h"
+#include "Palette.h"  // uf8::quantize for UC1 focused-track colour
 
 // Defined in main.cpp — scroll REAPER's MCP so the just-selected track
 // is visible (and, on UF8, rebank the 8-strip window around it). Shared
@@ -817,8 +818,30 @@ void UC1Surface::refresh()
         }
     }
 
-    device_->send(buildChannelStripContext(csName));
-    device_->send(buildBusCompContext(bcName));
+    // Track-name carousel — 3 slots [prev, current, next].
+    // REAPER track index is 0-based; focused track is the middle slot.
+    // Empty slot strings leave the slot's zero-pad intact so edge cases
+    // (first/last track) don't show stale names.
+    auto nameOfIdx = [](int idx) -> std::string {
+        const int n = CountTracks(nullptr);
+        if (idx < 0 || idx >= n) return "";
+        MediaTrack* t = GetTrack(nullptr, idx);
+        char buf[128] = {0};
+        if (GetSetMediaTrackInfo_String(t, "P_NAME", buf, false) && buf[0]) return buf;
+        char fallback[16];
+        std::snprintf(fallback, sizeof(fallback), "Trk %d", idx + 1);
+        return fallback;
+    };
+    int curIdx = -1;
+    if (focusedTrack_) {
+        curIdx = static_cast<int>(GetMediaTrackInfo_Value(
+            static_cast<MediaTrack*>(focusedTrack_), "IP_TRACKNUMBER")) - 1;
+    }
+    const std::string prevName = nameOfIdx(curIdx - 1);
+    const std::string currName = nameOfIdx(curIdx);
+    const std::string nextName = nameOfIdx(curIdx + 1);
+    device_->send(buildTrackNameTripleSmall(prevName, currName, nextName));
+    device_->send(buildTrackNameTripleLarge(prevName, currName, nextName));
 
     // 7-segment position indicator — show the REAPER track number
     // (1-based) on the central red display. Matches the MAIN/ROUTING
@@ -832,16 +855,33 @@ void UC1Surface::refresh()
         }
     }
 
-    // Plugin-name tag (zone 0x10) — shows which CS plugin variant is
-    // currently driving the Channel Strip section. Bus Comp 2 isn't
-    // reflected here in captures; when neither plugin is present we
-    // leave zone 0x10 blank so SSL-style "No Plug-ins" status lives
-    // in zone 0x04 (which we don't populate yet).
-    const char* nameTag =
+    // Central label — 4-char plugin-type tag shown in the UC1 central
+    // LCD. "MAIN" when no SSL plugin is focused, otherwise the plugin's
+    // shortName ("CS 2", "BC 2", "4K E" …). Also drives the
+    // colour-bar-enable flag that gates the coloured top-stripe
+    // rendering: 0x01 when plugin context exists, 0x00 for MAIN.
+    const bool havePlugin = bindings.channelMap || bindings.busCompMap;
+    device_->send(buildColourBarEnable(havePlugin));
+    const char* label =
         bindings.channelMap ? bindings.channelMap->shortName :
         bindings.busCompMap ? bindings.busCompMap->shortName :
-        "    ";
-    device_->send(buildDisplayText(zone::kPluginNameTag, nameTag, 4));
+        "MAIN";
+    device_->send(buildCentralLabel(label));
+
+    // Focused-track colour bar — single palette byte. Uses the same
+    // quantizer as UF8's color-bar (uf8::quantize on the track's
+    // 0xRRGGBB colour). When no plugin is loaded the bar is inactive
+    // anyway (colour-bar-enable=0), but we still push a palette=0x00
+    // to clear stale state.
+    {
+        uint8_t palette = 0x00;
+        if (focusedTrack_) {
+            MediaTrack* t = static_cast<MediaTrack*>(focusedTrack_);
+            const uint32_t rgb = static_cast<uint32_t>(GetTrackColor(t)) & 0x00FFFFFFu;
+            palette = (rgb == 0) ? 0x00 : uf8::quantize(rgb);
+        }
+        device_->send(buildFocusedColour(palette));
+    }
 
     // Push each button's LED to mirror its current plugin-param state.
     // We walk the full button-ID range and ask the appropriate binding
@@ -942,9 +982,34 @@ void UC1Surface::refresh()
 void UC1Surface::pushGainReduction(float dB)
 {
     if (!device_) return;
-    // UC1Device streams GR at 50 Hz on its own; we just update the
-    // cached value. No per-call send needed.
+    // Bus Comp meter (FF 5B 02) — UC1Device streams this at 50 Hz on
+    // its own; just update the cached value.
     device_->setGainReduction(dB);
+
+    // Channel-Strip Dynamics GR LEDs (5 discrete LEDs at bank=0x01,
+    // cells 0x5C..0x60, per-LED brightness with 5 visible steps).
+    // Mapping: ~3 dB per LED, 5 steps per LED = 0.6 dB per step.
+    // Brightness states from the capture: {0x19, 0x2D, 0x54, 0x99, 0xFF}.
+    static const uint8_t kLevels[5] = {0x19, 0x2D, 0x54, 0x99, 0xFF};
+    static uint8_t lastStates[5] = {0xFE, 0xFE, 0xFE, 0xFE, 0xFE};
+
+    float gr = dB;
+    if (gr < 0) gr = 0;
+    const int pos = static_cast<int>(gr / 0.6f);  // 0..24 across 15 dB
+    const int active = (pos / 5 > 4) ? 4 : (pos / 5);   // which LED (0..4)
+    const int sub    = (pos % 5 > 4) ? 4 : (pos % 5);   // sub-level 0..4
+
+    uint8_t target[5] = {0, 0, 0, 0, 0};
+    for (int i = 0; i < active; ++i) target[i] = 0xFF;  // fully past this LED → full
+    target[active] = (pos == 0 && gr < 0.3f) ? 0x00 : kLevels[sub];
+    // LEDs past active stay 0
+
+    for (int i = 0; i < 5; ++i) {
+        if (target[i] != lastStates[i]) {
+            lastStates[i] = target[i];
+            device_->send(buildLedWrite(0x01, static_cast<uint8_t>(0x5C + i), target[i]));
+        }
+    }
 }
 
 void UC1Surface::pushVu(uint8_t meter, uint8_t level)

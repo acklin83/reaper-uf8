@@ -188,6 +188,15 @@ bool UF8Device::open()
         sendFrame(buildFaderDbReadout(s, "    "));
         sendFrame(buildValueLine(s, ""));
     }
+
+    // LED + LCD brightness — push "full" by default at open time so the
+    // display isn't stuck at whatever level SSL 360° last left it.
+    // Per-step values decoded in cap25/cap26 (2026-04-24). These two
+    // frames mirror what SSL 360° sends when the brightness slider is
+    // dragged to "full".
+    sendFrame(buildLedBrightness(0x20));  // full = 0x20
+    sendFrame(buildLcdBrightness(0xA0));  // full = 0xA0
+
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
     return true;
