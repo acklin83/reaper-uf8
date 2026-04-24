@@ -2,9 +2,12 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 #include "reaper_plugin_functions.h"
 #include "Palette.h"  // uf8::quantize for UC1 focused-track colour
@@ -370,6 +373,7 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
     TrackFX_SetParamNormalized(tr, fxIdx, vst3Param, next);
 
     pushKnobReadout_(ev.id, tr, fxIdx, vst3Param, zone, labelForKnob(ev.id, busCompContext));
+    pushKnobRing_(ev.id, next);
 
     if (logThis) {
         char pname[64] = {0};
@@ -712,6 +716,111 @@ int UC1Surface::channelInParam_(void* trackRaw, int fxIdx)
         }
     }
     return -1;
+}
+
+namespace {
+// Pot LED ring cell maps, extracted from 2026-04-24 captures (dual_37..
+// dual_41). Cells are in the SSL-captured write order; that order
+// should approximate the LED arc sweep CCW→CW, but visual
+// verification is pending. Encoding per pot:
+//   Position: value maps to single-LED-highlight at index v*N
+//   Bipolar:  center = middle LED lit, fills outward
+//   Additive: value fills LEDs cumulatively from index 0
+enum RingEncoding { Position, Bipolar, Additive };
+
+struct RingDef { const uint8_t* cells; int nCells; RingEncoding kind; };
+
+// Low Pass — 10 cells observed in dual_37.
+constexpr uint8_t kLpfCells[] = {
+    0x95, 0x97, 0x98, 0x99, 0x9A, 0x9B, 0x9C, 0x9D, 0x9E, 0x9F,
+};
+
+const RingDef* ringFor(uint8_t knobId)
+{
+    static const RingDef kLpf{kLpfCells, 10, Additive};
+    switch (knobId) {
+        case knob::kCSLowPass: return &kLpf;
+        // TODO: other pots need per-cap cluster analysis to pin cells.
+    }
+    return nullptr;
+}
+} // namespace
+
+void UC1Surface::pushKnobRing_(uint8_t knobId, double normalized)
+{
+    if (!device_) return;
+    const RingDef* def = ringFor(knobId);
+    if (!def) return;  // knob not yet mapped — no LED update
+
+    if (normalized < 0.0) normalized = 0.0;
+    if (normalized > 1.0) normalized = 1.0;
+
+    // Per-knob state cache so we only push cells that changed state.
+    static std::unordered_map<uint8_t, std::vector<uint8_t>> lastStates;
+    auto& last = lastStates[knobId];
+    if (static_cast<int>(last.size()) != def->nCells) {
+        last.assign(def->nCells, 0xFE);  // "unset" sentinel
+    }
+
+    // Determine which cells should be lit based on encoding.
+    std::vector<uint8_t> target(def->nCells, 0);
+    switch (def->kind) {
+        case Position: {
+            int idx = static_cast<int>(normalized * (def->nCells - 1) + 0.5);
+            if (idx < 0) idx = 0;
+            if (idx >= def->nCells) idx = def->nCells - 1;
+            target[idx] = 1;
+            break;
+        }
+        case Bipolar: {
+            // Center = 0.5 → middle LED; fill outward as value moves
+            // away from center in either direction.
+            const int mid = (def->nCells - 1) / 2;
+            const int fromCenter = static_cast<int>(
+                std::abs(normalized - 0.5) * (def->nCells - 1) + 0.5);
+            const int start = (normalized < 0.5) ? (mid - fromCenter) : mid;
+            const int end   = (normalized < 0.5) ? mid : (mid + fromCenter);
+            for (int i = 0; i < def->nCells; ++i) {
+                if (i >= start && i <= end) target[i] = 1;
+            }
+            break;
+        }
+        case Additive: {
+            int n = static_cast<int>(normalized * def->nCells + 0.5);
+            if (n > def->nCells) n = def->nCells;
+            for (int i = 0; i < n; ++i) target[i] = 1;
+            break;
+        }
+    }
+
+    // Push changes: dual-bank encoding per cell. Bank 0x01 (role 0x00)
+    // = selection 0/1. Bank 0x02 (role 0x00) = brightness 0/FF.
+    for (int i = 0; i < def->nCells; ++i) {
+        if (last[i] == target[i]) continue;
+        last[i] = target[i];
+        const uint8_t cell = def->cells[i];
+        const uint8_t selState = target[i] ? 0x01 : 0x00;
+        const uint8_t brState  = target[i] ? 0xFF : 0x00;
+        // buildLedWrite uses role=0x01 by default; pot rings use role=0x00.
+        // Build frames manually to override role.
+        auto make = [](uint8_t bank, uint8_t cell, uint8_t state) {
+            std::vector<uint8_t> f;
+            f.reserve(8);
+            f.push_back(0xFF);
+            f.push_back(0x13);
+            f.push_back(0x04);
+            f.push_back(bank);
+            f.push_back(cell);
+            f.push_back(0x00);     // role
+            f.push_back(state);
+            uint32_t sum = 0;
+            for (size_t k = 1; k < f.size(); ++k) sum += f[k];
+            f.push_back(static_cast<uint8_t>(sum & 0xFF));
+            return f;
+        };
+        device_->send(make(0x01, cell, selState));
+        device_->send(make(0x02, cell, brState));
+    }
 }
 
 void UC1Surface::pushButtonLed_(uint8_t buttonId, bool on)

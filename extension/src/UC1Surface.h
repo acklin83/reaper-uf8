@@ -102,6 +102,11 @@ private:
     // Push LED-cell state for a button after it toggles.
     void pushButtonLed_(uint8_t buttonId, bool on);
 
+    // Push the LED ring around a rotary pot. `normalized` is the 0..1
+    // VST3 param value. Cell layout per knob is stored in a static
+    // table (cap37..cap41); knobs not yet mapped no-op silently.
+    void pushKnobRing_(uint8_t knobId, double normalized);
+
     // Find the VST3 param index of the SSL Channel Strip's internal
     // "Channel In" switch on the given track+fx slot. Scans param
     // names for common spellings ("CsIn", "ChannelIn", "Channel In"…)

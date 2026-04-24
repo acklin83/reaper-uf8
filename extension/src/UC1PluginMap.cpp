@@ -56,6 +56,16 @@ PluginBindings makeBusComp2Bindings()
 // correspond to plugin params — those live on the track or are surface
 // modifiers. Left kParamNone here; surface handles them.
 
+// Apply the "knob goes the wrong way" inversions the user reported after
+// hardware testing 2026-04-24: Low Pass and the two Mid-Q knobs run
+// physically CCW = VST3 value up, so we flip the sign at dispatch time.
+static void applyCsInversions(PluginBindings& b)
+{
+    b.inverted[knob::kCSLowPass] = true;
+    b.inverted[knob::kCSHmfQ]    = true;
+    b.inverted[knob::kCSLmfQ]    = true;
+}
+
 PluginBindings makeChannelStrip2Bindings()
 {
     auto b = makeEmpty("Channel Strip 2", "CS 2");
@@ -99,22 +109,126 @@ PluginBindings makeChannelStrip2Bindings()
     b.buttonParam[button::kFastAttGate] = 28;  // GateAttack (Gate F.Attack)
     b.buttonParam[button::kScListen]    = 37;  // Listen
 
-    // Channel IN toggles plugin bypass — handled via TrackFX_SetEnabled.
-    // Polarity, Solo, Cut, Solo Clear, Fine aren't plugin params.
-
+    applyCsInversions(b);
     return b;
 }
 
-// ---- 4K E / 4K G / 4K B placeholders --------------------------------------
-//
-// Param indices exist in the UF8 PluginMap (kCs2Slots counterparts). When
-// we wire these up we'll mirror the CS 2 binding above but with the
-// matching indices from k4kESlots / k4kGSlots / k4kBSlots. Leaving as
-// empty binders for now keeps them discoverable by match-string even if
-// knob/button routing returns kParamNone — surface just ignores events.
-PluginBindings make4kEBindings() { return makeEmpty("4K E", "4K E"); }
-PluginBindings make4kGBindings() { return makeEmpty("4K G", "4K G"); }
-PluginBindings make4kBBindings() { return makeEmpty("4K B", "4K B"); }
+// ---- 4K E ------------------------------------------------------------------
+// VST3 param indices from kCs2Slots' "4K E" counterpart (PluginMap.cpp).
+// Same UC1 knob/button layout; differences: EQ Type is "EQ Colour", no
+// Comp Peak, no Gate Hold.
+PluginBindings make4kEBindings()
+{
+    auto b = makeEmpty("4K E", "4K E");
+    b.knobParam[knob::kCSLowPass]       = 15;
+    b.knobParam[knob::kCSHighPass]      = 14;
+    b.knobParam[knob::kCSHfGain]        = 31;
+    b.knobParam[knob::kCSHfFreq]        = 30;
+    b.knobParam[knob::kCSHmfGain]       = 28;
+    b.knobParam[knob::kCSHmfFreq]       = 27;
+    b.knobParam[knob::kCSHmfQ]          = 29;
+    b.knobParam[knob::kCSLmfGain]       = 25;
+    b.knobParam[knob::kCSLmfFreq]       = 24;
+    b.knobParam[knob::kCSLmfQ]          = 26;
+    b.knobParam[knob::kCSLfFreq]        = 21;
+    b.knobParam[knob::kCSLfGain]        = 22;
+    b.knobParam[knob::kCSInputTrim]     =  2;
+    b.knobParam[knob::kCSFaderLevel]    =  6;
+    b.knobParam[knob::kCSCompThreshold] = 36;
+    b.knobParam[knob::kCSCompRatio]     = 35;
+    b.knobParam[knob::kCSCompRelease]   = 37;
+    b.knobParam[knob::kCSGateThreshold] = 43;
+    b.knobParam[knob::kCSGateRange]     = 42;
+    b.knobParam[knob::kCSGateRelease]   = 44;
+    // Gate Hold not present on 4K E
+    b.buttonParam[button::kHfBell]      = 32;
+    b.buttonParam[button::kEqType]      = 19;  // EQ Colour
+    b.buttonParam[button::kEqIn]        = 18;
+    b.buttonParam[button::kLfBell]      = 23;
+    b.buttonParam[button::kFastAttComp] = 39;
+    // Comp Peak not present on 4K E
+    b.buttonParam[button::kDynIn]       = 33;
+    b.buttonParam[button::kExpand]      = 46;
+    b.buttonParam[button::kFastAttGate] = 45;
+    b.buttonParam[button::kScListen]    = 47;
+    applyCsInversions(b);
+    return b;
+}
+
+// ---- 4K G ------------------------------------------------------------------
+// Full-featured G-series strip. No Gate Hold, no Comp Peak.
+PluginBindings make4kGBindings()
+{
+    auto b = makeEmpty("4K G", "4K G");
+    b.knobParam[knob::kCSLowPass]       = 21;
+    b.knobParam[knob::kCSHighPass]      = 20;
+    b.knobParam[knob::kCSHfGain]        = 36;
+    b.knobParam[knob::kCSHfFreq]        = 35;
+    b.knobParam[knob::kCSHmfGain]       = 33;
+    b.knobParam[knob::kCSHmfFreq]       = 32;
+    b.knobParam[knob::kCSHmfQ]          = 34;
+    b.knobParam[knob::kCSLmfGain]       = 29;
+    b.knobParam[knob::kCSLmfFreq]       = 28;
+    b.knobParam[knob::kCSLmfQ]          = 30;
+    b.knobParam[knob::kCSLfFreq]        = 24;
+    b.knobParam[knob::kCSLfGain]        = 25;
+    b.knobParam[knob::kCSInputTrim]     =  6;
+    b.knobParam[knob::kCSFaderLevel]    = 12;
+    b.knobParam[knob::kCSCompThreshold] = 40;
+    b.knobParam[knob::kCSCompRatio]     = 39;
+    b.knobParam[knob::kCSCompRelease]   = 41;
+    b.knobParam[knob::kCSGateThreshold] = 47;
+    b.knobParam[knob::kCSGateRange]     = 46;
+    b.knobParam[knob::kCSGateRelease]   = 48;
+    b.buttonParam[button::kHfBell]      = 37;
+    b.buttonParam[button::kEqType]      = 23;  // EQ Colour
+    b.buttonParam[button::kEqIn]        = 22;
+    b.buttonParam[button::kLfBell]      = 26;
+    b.buttonParam[button::kFastAttComp] = 43;
+    b.buttonParam[button::kDynIn]       = 38;
+    b.buttonParam[button::kExpand]      = 50;
+    b.buttonParam[button::kFastAttGate] = 49;
+    b.buttonParam[button::kScListen]    = 51;
+    applyCsInversions(b);
+    return b;
+}
+
+// ---- 4K B ------------------------------------------------------------------
+// Simpler B-series: no EQ Type, no Fast-Attack (Comp/Gate), no Gate Hold,
+// no Comp Peak.
+PluginBindings make4kBBindings()
+{
+    auto b = makeEmpty("4K B", "4K B");
+    b.knobParam[knob::kCSLowPass]       = 11;
+    b.knobParam[knob::kCSHighPass]      = 10;
+    b.knobParam[knob::kCSHfGain]        = 26;
+    b.knobParam[knob::kCSHfFreq]        = 25;
+    b.knobParam[knob::kCSHmfGain]       = 23;
+    b.knobParam[knob::kCSHmfFreq]       = 22;
+    b.knobParam[knob::kCSHmfQ]          = 24;
+    b.knobParam[knob::kCSLmfGain]       = 20;
+    b.knobParam[knob::kCSLmfFreq]       = 19;
+    b.knobParam[knob::kCSLmfQ]          = 21;
+    b.knobParam[knob::kCSLfFreq]        = 16;
+    b.knobParam[knob::kCSLfGain]        = 17;
+    b.knobParam[knob::kCSInputTrim]     =  2;
+    b.knobParam[knob::kCSFaderLevel]    =  6;
+    b.knobParam[knob::kCSCompThreshold] = 31;
+    b.knobParam[knob::kCSCompRatio]     = 30;
+    b.knobParam[knob::kCSCompRelease]   = 32;
+    b.knobParam[knob::kCSGateThreshold] = 35;
+    b.knobParam[knob::kCSGateRange]     = 34;
+    b.knobParam[knob::kCSGateRelease]   = 36;
+    b.buttonParam[button::kHfBell]      = 27;
+    // No EQ Type on 4K B
+    b.buttonParam[button::kEqIn]        = 14;
+    b.buttonParam[button::kLfBell]      = 18;
+    b.buttonParam[button::kDynIn]       = 28;
+    b.buttonParam[button::kExpand]      = 37;
+    b.buttonParam[button::kScListen]    = 41;
+    applyCsInversions(b);
+    return b;
+}
 
 // Registry. Order: most-specific substring first (same convention as the
 // UF8 PluginMap). BC 2's match string wouldn't collide with any of the
