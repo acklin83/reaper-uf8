@@ -61,9 +61,11 @@ PluginBindings makeBusComp2Bindings()
 // physically CCW = VST3 value up, so we flip the sign at dispatch time.
 static void applyCsInversions(PluginBindings& b)
 {
-    b.inverted[knob::kCSLowPass] = true;
-    b.inverted[knob::kCSHmfQ]    = true;
-    b.inverted[knob::kCSLmfQ]    = true;
+    b.inverted[knob::kCSLowPass]        = true;
+    b.inverted[knob::kCSHmfQ]           = true;
+    b.inverted[knob::kCSLmfQ]           = true;
+    b.inverted[knob::kCSCompThreshold]  = true;
+    b.inverted[knob::kCSGateThreshold]  = true;
 }
 
 PluginBindings makeChannelStrip2Bindings()
