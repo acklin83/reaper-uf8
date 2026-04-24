@@ -25,6 +25,33 @@ Planned capture sessions for decoding the SSL UC1 USB protocol. Order matters: `
 | 13 | `uc1_13_vu_meters.pcapng` | Play calibrated test tones at –20, –10, –6, 0 dBFS, ~2 s each with silence between. Compressor bypassed so VU reflects input/output cleanly. Goal: VU LED frame format + mapping of level → LED index. |
 | 14 | `uc1_14_multiple_sc.pcapng` | External sidechain ON. Cycle between 2–3 different sidechain sources in REAPER (different tracks routed to the comp's SC input). Include one cycle of SC on → off → on. Goal: external-SC indicator frames + any source-identity frames. |
 
+## Planned: LED brightness + colour (2026-04-24)
+
+Settings UI needs the global-brightness frame and the per-class LED-colour frames. SSL 360° exposes both as sliders / pickers in its app UI — sniff while the user drags them.
+
+**Device selection:** run one UC1-focused pass and one UF8-focused pass (other device physically disconnected for clean attribution). Tables below are the UC1 pass; mirror filenames as `uf8_NN_…` for the UF8 pass.
+
+| # | File | Action in SSL 360° |
+|---|------|--------------------|
+| 28 | `uc1_28_idle_baseline_v2.pcapng` | 10 s idle with current SSL 360° version — fresh baseline in case the app version has drifted since `uc1_02`. |
+| 29 | `uc1_29_led_brightness.pcapng` | Open 360°'s device-settings panel. Drag LED-brightness slider from min → max in ~5 even steps, pause ~2 s at each. Goal: identify the single-frame brightness command + its value range. |
+| 30 | `uc1_30_led_colour_solo.pcapng` | Change the palette colour SSL assigns to the **Solo** indicator LED (if 360° exposes it). Pick 3–4 distinct colours, pause 2 s per change. Goal: decode colour command for fixed-purpose LEDs (non-strip). |
+| 31 | `uc1_31_led_colour_scribble.pcapng` | UF8-only — skip for UC1 pass. Change the "strip accent colour" or "SEL follows track colour" toggle, toggle 3× with 2 s pauses. |
+| 32 | `uc1_32_brightness_power_cycle.pcapng` | Power-cycle UC1 with brightness slider at 25 % (non-default). 360° should re-push the current setting post-enumeration — confirms the brightness frame is in the init flood / replay too. |
+
+### Pre-capture checklist
+
+- Windows host up, SSH reachable (`sshpass -p claudepass ssh claude@192.168.177.197`).
+- UC1 on `\\.\USBPcap3`, UF8 disconnected.
+- SSL 360° running, target device selected.
+- Wireshark/USBPcap ready, one capture window per step (10 s each).
+
+### After each capture
+
+- `scp` to `captures/uc1/` on mac, write sibling `.md` (action + timing + SSL-360°-version).
+- Run `python3 analysis/parse_usbpcap_uc1.py <file>.pcapng --baseline captures/uc1/uc1_28_idle_baseline_v2.pcapng`.
+- Log novel-payload frames in `docs/protocol-notes-uc1.md` under a new "LED brightness + colour" section.
+
 ## Notes for the person at the keyboard
 
 - Start Wireshark on the UC1's USBPcap interface **before** the action, stop **~2 s after**. Two-second pre/post buffers help the diff tool align.
