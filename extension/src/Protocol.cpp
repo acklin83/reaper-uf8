@@ -318,6 +318,11 @@ std::vector<uint8_t> buildLcdBrightness(uint8_t level)
 
 std::array<std::vector<uint8_t>, 2> buildVuMeter(const std::array<uint8_t, 16>& levels)
 {
+    // Frame: FF 66 21 <subcmd> <strip0_in><strip0_out> … <strip7_in><strip7_out>
+    //   <16 × 00> CKSUM
+    // Strip 0 starts at payload byte 1 (right after sub-cmd), no leading
+    // padding. The two "00 00" bytes visible in baseline captures were
+    // from empty strip 0 + strip 1 inputs, not an intrinsic header.
     auto build = [&](uint8_t subcmd) {
         std::vector<uint8_t> f;
         f.reserve(37);
@@ -325,10 +330,8 @@ std::array<std::vector<uint8_t>, 2> buildVuMeter(const std::array<uint8_t, 16>& 
         f.push_back(0x66);
         f.push_back(0x21);
         f.push_back(subcmd);
-        f.push_back(0x00);
-        f.push_back(0x00);
         for (auto b : levels) f.push_back(b);        // 16 bytes: 8 × (in, out)
-        for (int i = 0; i < 14; ++i) f.push_back(0x00);
+        for (int i = 0; i < 16; ++i) f.push_back(0x00);
         std::span<const uint8_t> payload{f.data() + 1, f.size() - 1};
         f.push_back(checksum(payload));
         return f;
@@ -370,8 +373,12 @@ std::vector<uint8_t> buildSelectedStripMask(uint16_t mask)
 
 uint8_t selCellForStrip(uint8_t strip)
 {
-    // From cap30 decode: strip 1..7 step down from 0x12 by 3, strip 8 wraps to 0x15.
-    static constexpr uint8_t kMap[8] = {0x12, 0x0F, 0x0C, 0x09, 0x06, 0x03, 0x00, 0x15};
+    // From cap30 decode (re-interpreted after 2026-04-24 test): UF8's
+    // leftmost strip 0 = cell 0x15; each strip right decrements cell
+    // by 3. Original table had strips misread as 1-indexed because the
+    // capture's REAPER project had a "TESTCS" track at index 0 before
+    // the numbered tracks, so "T1 click" landed on UF8 strip 1 (not 0).
+    static constexpr uint8_t kMap[8] = {0x15, 0x12, 0x0F, 0x0C, 0x09, 0x06, 0x03, 0x00};
     return (strip < 8) ? kMap[strip] : 0x00;
 }
 

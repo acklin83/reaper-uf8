@@ -1751,7 +1751,7 @@ void pushSelColourBar()
         MediaTrack* tr = (idx < trackCount) ? GetTrack(nullptr, idx) : nullptr;
         const bool sel = tr && GetMediaTrackInfo_Value(tr, "I_SELECTED") > 0.5;
         const uint8_t target = sel ? 0xFF : 0x00;
-        if (sel) mask |= static_cast<uint16_t>(1 << (s + 1));
+        if (sel) mask |= static_cast<uint16_t>(1 << s);
         if (g_lastSelBright[s] != target) {
             g_lastSelBright[s] = target;
             // White-mode LED update. DAW-Colour byte encoding is still
