@@ -378,10 +378,11 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
     if (logThis) {
         char pname[64] = {0};
         TrackFX_GetParamName(tr, fxIdx, vst3Param, pname, sizeof(pname));
-        char line[160];
+        char line[192];
         std::snprintf(line, sizeof(line),
-            "UC1 knob 0x%02x '%s' delta=%d → VST3 param %d '%s' val=%.3f\n",
+            "UC1 knob 0x%02x '%s' plug=%s inv=%d delta=%d → param %d '%s' val=%.3f\n",
             ev.id, labelForKnob(ev.id, busCompContext),
+            map->shortName, map->inverted[ev.id] ? 1 : 0,
             (int)ev.delta, vst3Param, pname, next);
         ShowConsoleMsg(line);
     }
@@ -730,14 +731,18 @@ enum RingEncoding { Position, Bipolar, Additive };
 
 struct RingDef { const uint8_t* cells; int nCells; RingEncoding kind; };
 
-// Low Pass — 10 cells observed in dual_37.
+// Low Pass — 10 positions observed in dual_37, Position mode (single
+// LED lit at a time). Cell sequence from timing analysis:
+// 0x95 → 0x97 → 0x98 → 0x99 → 0x9A → 0x9B → 0x9C → 0x9D → 0x9E → 0x9F.
+// The 0x96 gap is intentional (either non-existent cell or permanent
+// marker).
 constexpr uint8_t kLpfCells[] = {
     0x95, 0x97, 0x98, 0x99, 0x9A, 0x9B, 0x9C, 0x9D, 0x9E, 0x9F,
 };
 
 const RingDef* ringFor(uint8_t knobId)
 {
-    static const RingDef kLpf{kLpfCells, 10, Additive};
+    static const RingDef kLpf{kLpfCells, 10, Position};
     switch (knobId) {
         case knob::kCSLowPass: return &kLpf;
         // TODO: other pots need per-cap cluster analysis to pin cells.
@@ -843,10 +848,11 @@ void UC1Surface::pushButtonLed_(uint8_t buttonId, bool on)
     uint8_t stateOn = led::kStateOn;
     if (buttonId == button::kSoloClear) {
         stateOn = 0x01;
-    } else if (buttonId == button::kSolo     ||
-               buttonId == button::kCut      ||
-               buttonId == button::kPolarity ||
-               buttonId == button::kChannelIn)
+    } else if (buttonId == button::kSolo      ||
+               buttonId == button::kCut       ||
+               buttonId == button::kPolarity  ||
+               buttonId == button::kChannelIn ||
+               buttonId == button::kBusCompIn)
     {
         // Central-section track buttons all use bank 0x01 + state 0x01
         // for their LEDs. Confirmed empirically: the bank 0x02 cells
@@ -1025,11 +1031,18 @@ void UC1Surface::refresh()
 
         bool on = false;
         switch (classifyButton(btn)) {
-            case ControlDomain::BusComp:
+            case ControlDomain::BusComp: {
+                // Bus Comp IN (the only button in this domain) uses the
+                // bank=0x01/state=0x01 override just like the other
+                // central-section track buttons. LED reflects plugin
+                // enabled state; defaults to on when BC is present.
+                bool bcOn = false;
                 if (bindings.busCompMap && tr) {
-                    on = TrackFX_GetEnabled(tr, bindings.busCompFxIdx);
+                    bcOn = TrackFX_GetEnabled(tr, bindings.busCompFxIdx);
                 }
-                break;
+                pushButtonLed_(btn, bcOn);
+                continue;
+            }
             case ControlDomain::ChannelStrip:
                 if (btn == button::kChannelIn) {
                     // ChannelIn uses the bank=0x01/state=0x01 LED
