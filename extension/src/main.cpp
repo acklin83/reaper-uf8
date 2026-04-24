@@ -1838,7 +1838,12 @@ custom_action_register_t g_actionBrightnessDown{
 int g_cmdBrightnessUp = 0;
 int g_cmdBrightnessDown = 0;
 
-bool hookCommand(int command, int /*flag*/)
+// hookcommand2 is the correct hook for custom_action dispatch per SDK
+// note at reaper_plugin.h:1086. hookcommand (v1) only catches actions
+// triggered via menu/keyboard, not custom_action registered entries.
+bool hookCommand2(KbdSectionInfo* /*sec*/, int command,
+                  int /*val*/, int /*val2*/, int /*relmode*/,
+                  HWND /*hwnd*/)
 {
     if (command == 0) return false;
     if (command == g_cmdBrightnessUp)   { brightnessUp();   return true; }
@@ -1884,7 +1889,7 @@ extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(
     // when we register — stash it for dispatch in hookCommand.
     g_cmdBrightnessUp   = plugin_register("custom_action", &g_actionBrightnessUp);
     g_cmdBrightnessDown = plugin_register("custom_action", &g_actionBrightnessDown);
-    plugin_register("hookcommand", reinterpret_cast<void*>(hookCommand));
+    plugin_register("hookcommand2", reinterpret_cast<void*>(hookCommand2));
 
     return 1;
 }
