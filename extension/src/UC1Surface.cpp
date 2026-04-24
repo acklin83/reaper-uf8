@@ -1018,4 +1018,79 @@ void UC1Surface::pushVu(uint8_t meter, uint8_t level)
     device_->send(buildVuMeter(meter, level));
 }
 
+void UC1Surface::pushCsVu(float dbInput, float dbOutput)
+{
+    if (!device_) return;
+
+    // Per-LED dB thresholds — from user's capture brief
+    // (dual_36_cs_vu_ramp: "16 Stück je auf: alle aus, -60, -50, -40,
+    // -30, -27, -24, -21, -18, -15, -12, -9, -6, -3, -2, -1 und 0").
+    static constexpr float kDbThreshold[16] = {
+        -60.f, -50.f, -40.f, -30.f, -27.f, -24.f, -21.f, -18.f,
+        -15.f, -12.f,  -9.f,  -6.f,  -3.f,  -2.f,  -1.f,   0.f,
+    };
+    // 5 brightness steps per LED — observed states on cells 0x5B..0x5D
+    // during the ramp. Indexed 0 (dim) → 4 (full).
+    static constexpr uint8_t kBrightnessSteps[5] = {
+        0x19, 0x2D, 0x54, 0x99, 0xFF,
+    };
+
+    // Cell ordering guess, LOW → HIGH dB. 16 Input cells and 16 Output
+    // cells. First three input cells (0x5B..0x5D) match the multi-state
+    // cells from the capture; remaining order is a best-guess that the
+    // user can verify visually and correct. Output cells split from the
+    // remaining 8 non-multi-state cells; needs visual verification.
+    static constexpr uint8_t kInputCells[16] = {
+        0x5B, 0x5C, 0x5D, 0x71, 0x72, 0x73, 0x74, 0x75,
+        0x76, 0x77, 0x78, 0x79, 0x7A, 0x7B, 0x7C, 0x87,
+    };
+    static constexpr uint8_t kOutputCells[16] = {
+        // Guess: leftover cells not used by input meter. We likely
+        // don't have all 16; user reports after visual test.
+        0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x45, 0x50, 0x66,
+        // Fill with zeros for missing cells (skipped by send loop).
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    };
+
+    auto dBtoState = [](float dB) -> std::pair<int, uint8_t> {
+        // Returns (active_led_index 0..16, brightness_state for that led).
+        // active_led_index < 16 means LED 0..active-1 are full, LED active
+        // is at the returned brightness, LEDs >= active+1 are off.
+        // Returns (16, 0xFF) for full-scale (all LEDs lit).
+        if (dB < kDbThreshold[0]) return {0, 0x00};  // all off
+        if (dB >= kDbThreshold[15]) return {16, 0xFF};  // all on
+        int i = 15;
+        while (i > 0 && dB < kDbThreshold[i]) --i;
+        // dB is between threshold[i] and threshold[i+1]: LEDs 0..i full,
+        // LED i+1 transitioning.
+        const float span = kDbThreshold[i + 1] - kDbThreshold[i];
+        const float frac = (span > 0) ? (dB - kDbThreshold[i]) / span : 0.f;
+        const int sub = static_cast<int>(frac * 5.f);
+        const int s = (sub < 0) ? 0 : (sub > 4 ? 4 : sub);
+        return {i + 1, kBrightnessSteps[s]};
+    };
+
+    auto pushMeter = [&](const uint8_t* cells, float dB, uint8_t (&lastStates)[16]) {
+        auto [active, brightness] = dBtoState(dB);
+        for (int i = 0; i < 16; ++i) {
+            if (cells[i] == 0x00) continue;  // missing cell (outputs w/o mapping)
+            uint8_t target;
+            if (i < active) target = 0xFF;
+            else if (i == active) target = brightness;
+            else target = 0x00;
+            if (lastStates[i] != target) {
+                lastStates[i] = target;
+                device_->send(buildLedWrite(0x02, cells[i], target));
+            }
+        }
+    };
+
+    static uint8_t lastIn[16]  = {0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE,
+                                   0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE};
+    static uint8_t lastOut[16] = {0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE,
+                                   0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE};
+    pushMeter(kInputCells,  dbInput,  lastIn);
+    pushMeter(kOutputCells, dbOutput, lastOut);
+}
+
 } // namespace uc1

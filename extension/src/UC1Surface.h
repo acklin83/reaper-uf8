@@ -69,6 +69,15 @@ public:
     // meter: 0 = input, 1 = output.
     void pushVu(uint8_t meter, uint8_t level);
 
+    // Push Channel Strip I/O VU meters. Input + Output in dBFS.
+    // Drives the 16-LED Input meter + 16-LED Output meter on UC1
+    // using the dB-threshold table from the user's capture brief:
+    // LEDs light at -60, -50, -40, -30, -27, -24, -21, -18, -15,
+    // -12, -9, -6, -3, -2, -1, 0 dBFS. Each LED has 5 brightness
+    // steps for smooth transitions between thresholds (cells 0x5B..
+    // observed with states 0x19 / 0x2D / 0x54 / 0x99 / 0xFF).
+    void pushCsVu(float dbInput, float dbOutput);
+
     // For diagnostics.
     SurfaceStats stats() const { return stats_; }
     const std::string& lastError() const { return lastError_; }

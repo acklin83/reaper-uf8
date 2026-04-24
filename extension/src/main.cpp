@@ -118,6 +118,87 @@ std::atomic<bool> g_forcePan{false};
 uint8_t g_lastSelBright[8] = {0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE};
 uint16_t g_lastSelMask = 0xFFFF;  // 0xFFFF = "unset" sentinel
 
+// ---- Brightness management (LED + LCD on both devices) ----
+//
+// SSL 360° exposes 5 brightness steps ("dark / dim / half / bright /
+// full"). Until the Phase 2 settings UI is built we expose two REAPER
+// custom actions that cycle up/down through those steps, persisted to
+// ExtState so the user's choice survives REAPER restarts.
+enum BrightnessLevel {
+    BL_Dark   = 0,
+    BL_Dim    = 1,
+    BL_Half   = 2,
+    BL_Bright = 3,
+    BL_Full   = 4,
+};
+std::atomic<int> g_brightness{BL_Full};
+
+struct BrightnessBytes {
+    uint8_t uf8_led; uint8_t uf8_lcd;
+    uint8_t uc1_led; uint8_t uc1_lcd; uint8_t uc1_status;
+};
+constexpr BrightnessBytes kBrightnessTable[5] = {
+    {0x05, 0x18, 0x0A, 0x18, 0x08},  // dark
+    {0x0A, 0x30, 0x13, 0x30, 0x0F},  // dim
+    {0x10, 0x50, 0x20, 0x50, 0x19},  // half
+    {0x13, 0x60, 0x26, 0x60, 0x1E},  // bright
+    {0x20, 0xA0, 0x40, 0xA0, 0x32},  // full
+};
+
+void pushBrightness(int level)
+{
+    if (level < 0) level = 0;
+    if (level > 4) level = 4;
+    const auto& b = kBrightnessTable[level];
+    if (g_dev && g_dev->isOpen()) {
+        g_dev->send(uf8::buildLedBrightness(b.uf8_led));
+        g_dev->send(uf8::buildLcdBrightness(b.uf8_lcd));
+    }
+    if (g_uc1_dev && g_uc1_dev->isOpen()) {
+        g_uc1_dev->send(uc1::buildLedBrightness(b.uc1_led));
+        g_uc1_dev->send(uc1::buildLcdBrightness(b.uc1_lcd));
+        g_uc1_dev->send(uc1::buildStatusBrightness(b.uc1_status));
+    }
+}
+
+void applyBrightness()
+{
+    const int lvl = g_brightness.load();
+    pushBrightness(lvl);
+    char buf[8];
+    std::snprintf(buf, sizeof(buf), "%d", lvl);
+    SetExtState("rea_sixty", "brightness", buf, true);  // persist=true
+}
+
+void loadBrightness()
+{
+    const char* s = GetExtState("rea_sixty", "brightness");
+    if (s && *s) {
+        int lvl = std::atoi(s);
+        if (lvl < 0) lvl = 0;
+        if (lvl > 4) lvl = 4;
+        g_brightness.store(lvl);
+    }
+}
+
+bool brightnessUp()
+{
+    int cur = g_brightness.load();
+    if (cur >= BL_Full) return false;
+    g_brightness.store(cur + 1);
+    applyBrightness();
+    return true;
+}
+
+bool brightnessDown()
+{
+    int cur = g_brightness.load();
+    if (cur <= BL_Dark) return false;
+    g_brightness.store(cur - 1);
+    applyBrightness();
+    return true;
+}
+
 // Read the "UI" volume for a track — reflects the same value the REAPER
 // mixer displays, including automation playback and the effect of a
 // just-applied CSurf_OnVolumeChange. Safer than GetMediaTrackInfo_Value
@@ -660,6 +741,11 @@ ReaSixtySurface::ReaSixtySurface()
     }
 
     plugin_register("timer", reinterpret_cast<void*>(onTimer));
+
+    // Push the persisted brightness level to both devices now that
+    // they're open. If no ExtState yet (first-run), defaults to "full".
+    loadBrightness();
+    applyBrightness();
 }
 
 ReaSixtySurface::~ReaSixtySurface()
@@ -1691,6 +1777,21 @@ void onTimer()
     pushZonesForVisibleSlots();
     pushSelColourBar();
     pushVuMeter();
+    // UC1 VU — same peak data, mapped to the focused track's L/R
+    // channels. Single meter-pair on UC1 (not per-strip).
+    if (g_uc1_surface) {
+        void* focus = g_uc1_surface->focusedTrack();
+        if (focus) {
+            MediaTrack* tr = static_cast<MediaTrack*>(focus);
+            const double pl = Track_GetPeakInfo(tr, 0);
+            const double pr = Track_GetPeakInfo(tr, 1);
+            auto peakToDb = [](double p) -> float {
+                if (p <= 0.0) return -120.f;
+                return static_cast<float>(20.0 * std::log10(p));
+            };
+            g_uc1_surface->pushCsVu(peakToDb(pl), peakToDb(pr));
+        }
+    }
     // UF8 GR — push only on change. Without a GR data source we leave
     // g_uf8GrByte at 0 which clears the meter. A future JSFX probe
     // updates the byte via a dedicated setter.
@@ -1726,6 +1827,25 @@ void onTimer()
     }
 }
 
+// Brightness custom actions — registered at plugin entry point. REAPER
+// dispatches via hookcommand. Unique-section-id 0 = main section.
+custom_action_register_t g_actionBrightnessUp{
+    0, "REASIXTY_BRIGHTNESS_UP", "Rea-Sixty: Brightness up", nullptr,
+};
+custom_action_register_t g_actionBrightnessDown{
+    0, "REASIXTY_BRIGHTNESS_DOWN", "Rea-Sixty: Brightness down", nullptr,
+};
+int g_cmdBrightnessUp = 0;
+int g_cmdBrightnessDown = 0;
+
+bool hookCommand(int command, int /*flag*/)
+{
+    if (command == 0) return false;
+    if (command == g_cmdBrightnessUp)   { brightnessUp();   return true; }
+    if (command == g_cmdBrightnessDown) { brightnessDown(); return true; }
+    return false;
+}
+
 } // anonymous
 
 // External hook so UC1Surface (different TU) can trigger the same
@@ -1759,5 +1879,12 @@ extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(
     // calls createReaSixty() to instantiate ReaSixtySurface, which
     // opens the UF8 and starts the timer.
     plugin_register("csurf", &g_csurfReg);
+
+    // Custom actions: brightness up/down. REAPER assigns a command ID
+    // when we register — stash it for dispatch in hookCommand.
+    g_cmdBrightnessUp   = plugin_register("custom_action", &g_actionBrightnessUp);
+    g_cmdBrightnessDown = plugin_register("custom_action", &g_actionBrightnessDown);
+    plugin_register("hookcommand", reinterpret_cast<void*>(hookCommand));
+
     return 1;
 }

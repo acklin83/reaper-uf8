@@ -189,13 +189,9 @@ bool UF8Device::open()
         sendFrame(buildValueLine(s, ""));
     }
 
-    // LED + LCD brightness — push "full" by default at open time so the
-    // display isn't stuck at whatever level SSL 360° last left it.
-    // Per-step values decoded in cap25/cap26 (2026-04-24). These two
-    // frames mirror what SSL 360° sends when the brightness slider is
-    // dragged to "full".
-    sendFrame(buildLedBrightness(0x20));  // full = 0x20
-    sendFrame(buildLcdBrightness(0xA0));  // full = 0xA0
+    // LED + LCD brightness is set by main.cpp after open() using the
+    // brightness level persisted in REAPER's ExtState. We don't push
+    // here so the user's choice survives device re-open.
 
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
