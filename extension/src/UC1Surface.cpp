@@ -832,6 +832,18 @@ void UC1Surface::refresh()
         std::snprintf(fallback, sizeof(fallback), "Trk %d", idx + 1);
         return fallback;
     };
+    // BC-name carousel: only populate slots for tracks that host a Bus
+    // Comp 2 (or another BC-mapped plugin). Tracks without BC get an
+    // empty slot so the bottom-right display doesn't duplicate the
+    // main/CS carousel.
+    auto bcNameOfIdx = [&nameOfIdx](int idx) -> std::string {
+        const int n = CountTracks(nullptr);
+        if (idx < 0 || idx >= n) return "";
+        MediaTrack* t = GetTrack(nullptr, idx);
+        const auto b = lookupBindingsOnTrack(t);
+        if (!b.busCompMap) return "";  // no BC on this track → empty slot
+        return nameOfIdx(idx);
+    };
     int curIdx = -1;
     if (focusedTrack_) {
         curIdx = static_cast<int>(GetMediaTrackInfo_Value(
@@ -841,7 +853,10 @@ void UC1Surface::refresh()
     const std::string currName = nameOfIdx(curIdx);
     const std::string nextName = nameOfIdx(curIdx + 1);
     device_->send(buildTrackNameTripleSmall(prevName, currName, nextName));
-    device_->send(buildTrackNameTripleLarge(prevName, currName, nextName));
+    device_->send(buildTrackNameTripleLarge(
+        bcNameOfIdx(curIdx - 1),
+        bcNameOfIdx(curIdx),
+        bcNameOfIdx(curIdx + 1)));
 
     // 7-segment position indicator — show the REAPER track number
     // (1-based) on the central red display. Matches the MAIN/ROUTING
