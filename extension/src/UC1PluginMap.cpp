@@ -153,7 +153,9 @@ PluginBindings make4kEBindings()
     b.buttonParam[button::kExpand]      = 46;
     b.buttonParam[button::kFastAttGate] = 45;
     b.buttonParam[button::kScListen]    = 47;
-    applyCsInversions(b);
+    // 4K E has opposite VST3-value semantic from CS 2 for several knobs
+    // (LP, HMF/LMF Q, Comp/Gate Threshold). User confirmed 2026-04-24:
+    // applying the CS-2 inversions here makes the pot motion flip.
     return b;
 }
 
@@ -191,7 +193,7 @@ PluginBindings make4kGBindings()
     b.buttonParam[button::kExpand]      = 50;
     b.buttonParam[button::kFastAttGate] = 49;
     b.buttonParam[button::kScListen]    = 51;
-    applyCsInversions(b);
+    // 4K G skips CS-2 inversions (same VST3 semantic as 4K E — see above).
     return b;
 }
 
@@ -228,7 +230,7 @@ PluginBindings make4kBBindings()
     b.buttonParam[button::kDynIn]       = 28;
     b.buttonParam[button::kExpand]      = 37;
     b.buttonParam[button::kScListen]    = 41;
-    applyCsInversions(b);
+    // 4K B skips CS-2 inversions (same VST3 semantic as 4K E — see above).
     return b;
 }
 

@@ -373,7 +373,11 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
     TrackFX_SetParamNormalized(tr, fxIdx, vst3Param, next);
 
     pushKnobReadout_(ev.id, tr, fxIdx, vst3Param, zone, labelForKnob(ev.id, busCompContext));
-    pushKnobRing_(ev.id, next);
+    // Pass the visual position (flipped when the pot is inverted) so
+    // the LED ring goes CW when the pot goes CW — independent of which
+    // way the VST3 param value moves.
+    const double visual = map->inverted[ev.id] ? (1.0 - next) : next;
+    pushKnobRing_(ev.id, visual);
 
     if (logThis) {
         char pname[64] = {0};
@@ -732,10 +736,10 @@ enum RingEncoding { Position, Bipolar, Additive };
 struct RingDef { const uint8_t* cells; int nCells; RingEncoding kind; };
 
 // Low Pass — 10 positions observed in dual_37, Position mode (single
-// LED lit at a time). Cell sequence from timing analysis:
-// 0x95 → 0x97 → 0x98 → 0x99 → 0x9A → 0x9B → 0x9C → 0x9D → 0x9E → 0x9F.
-// The 0x96 gap is intentional (either non-existent cell or permanent
-// marker).
+// LED lit at a time). Cells in capture order 0x95..0x9F. Visual
+// direction (pot CW = LED CW) is enforced by flipping the value to
+// (1-value) for inverted pots in handleKnob_ and refresh() before
+// calling pushKnobRing_. No cell reversal needed.
 constexpr uint8_t kLpfCells[] = {
     0x95, 0x97, 0x98, 0x99, 0x9A, 0x9B, 0x9C, 0x9D, 0x9E, 0x9F,
 };
@@ -1113,6 +1117,33 @@ void UC1Surface::refresh()
     // don't linger until the JSFX probe next ticks.
     if (bindings.busCompMap) {
         device_->send(buildZeroGr());
+    }
+
+    // Push every mapped knob's LED ring immediately on focus change so
+    // the rings reflect the current plugin state without waiting for
+    // the user to actually move a knob. Reads the normalized VST3
+    // value for each knob that has a ring mapping defined.
+    if (tr && bindings.channelMap) {
+        for (uint8_t knobId = 0; knobId < 0x20; ++knobId) {
+            const int vst3Param = bindings.channelMap->knobParam[knobId];
+            if (vst3Param == kParamNone) continue;
+            const double v = TrackFX_GetParamNormalized(
+                tr, bindings.channelFxIdx, vst3Param);
+            const double visual =
+                bindings.channelMap->inverted[knobId] ? (1.0 - v) : v;
+            pushKnobRing_(knobId, visual);
+        }
+    }
+    if (tr && bindings.busCompMap) {
+        for (uint8_t knobId = 0; knobId < 0x20; ++knobId) {
+            const int vst3Param = bindings.busCompMap->knobParam[knobId];
+            if (vst3Param == kParamNone) continue;
+            const double v = TrackFX_GetParamNormalized(
+                tr, bindings.busCompFxIdx, vst3Param);
+            const double visual =
+                bindings.busCompMap->inverted[knobId] ? (1.0 - v) : v;
+            pushKnobRing_(knobId, visual);
+        }
     }
 }
 
