@@ -46,11 +46,6 @@ public:
     // worker thread push it over bulk OUT.
     void send(std::vector<uint8_t> frame);
 
-    // Priority send — inserts at the front of the queue so latency-
-    // sensitive frames (motor-limp on touch press) don't wait behind
-    // a burst of state pushes (VU, SEL colour, zones).
-    void sendPriority(std::vector<uint8_t> frame);
-
     // Register a callback for incoming button events. Called on the worker
     // thread — keep it short, hop to REAPER's thread via main_OnCommand or
     // similar if you need to touch REAPER state.

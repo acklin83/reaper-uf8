@@ -851,18 +851,6 @@ void onUf8Input(const uint8_t* data, size_t len)
             // We only queue while the user is actively touching the fader,
             // so REAPER's motor echo doesn't feed back.
             const uint8_t strip = data[i + 3];
-            // Diag — first ~12 fader-position events so we can confirm
-            // touch-gated queueing works.
-            static int kDiagFader = 16;
-            if (kDiagFader > 0 && strip < 8) {
-                --kDiagFader;
-                char buf[96];
-                std::snprintf(buf, sizeof(buf),
-                    "UF8 fader strip=%d lsb=0x%02x msb=0x%02x touchReported=%d\n",
-                    strip, data[i + 4] & 0x7F, data[i + 5] & 0x7F,
-                    g_touchReported[strip].load() ? 1 : 0);
-                ShowConsoleMsg(buf);
-            }
             if (strip < 8 && g_touchReported[strip].load()) {
                 const uint8_t lsb = data[i + 4] & 0x7F;
                 const uint8_t msb = data[i + 5] & 0x7F;
@@ -1065,16 +1053,6 @@ void onUf8Input(const uint8_t* data, size_t len)
             // the touch state is purely local.
             const uint8_t strip = data[i + 3];
             const uint8_t state = data[i + 4];
-            // Diag — first ~8 touch events so we can confirm the path
-            // reaches here + see press/release sequence.
-            static int kDiagTouch = 12;
-            if (kDiagTouch > 0) {
-                --kDiagTouch;
-                char buf[80];
-                std::snprintf(buf, sizeof(buf),
-                    "UF8 touch strip=%d state=%d\n", strip, state);
-                ShowConsoleMsg(buf);
-            }
             if (strip < 8) {
                 // UF8 in PM mode does not auto-release the fader motor
                 // on capacitive touch (that behaviour is only present in
@@ -1088,22 +1066,8 @@ void onUf8Input(const uint8_t* data, size_t len)
                 if (state != 0) {
                     g_touchLastPress[strip] = std::chrono::steady_clock::now();
                     g_touchReleasePending[strip].store(false);
-                    const bool wasReported = g_touchReported[strip].exchange(true);
-                    if (!wasReported) {
-                        // Priority send: motor-limp jumps the queue so
-                        // a burst of state pushes (VU/SEL/zones) can't
-                        // leave the motor engaged while the user is
-                        // already moving the fader.
-                        if (g_dev) g_dev->sendPriority(uf8::buildMotorEnable(strip, false));
-                    }
-                    static int kDiagLimp = 12;
-                    if (kDiagLimp > 0) {
-                        --kDiagLimp;
-                        char buf[96];
-                        std::snprintf(buf, sizeof(buf),
-                            "UF8 touch→press strip=%d wasReported=%d sentLimp=%d\n",
-                            strip, wasReported, wasReported ? 0 : 1);
-                        ShowConsoleMsg(buf);
+                    if (!g_touchReported[strip].exchange(true)) {
+                        if (g_dev) g_dev->send(uf8::buildMotorEnable(strip, false));
                     }
                 } else {
                     g_touchReleasePending[strip].store(true);
