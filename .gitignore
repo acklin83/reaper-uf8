@@ -17,6 +17,9 @@ venv/
 .vscode/
 .idea/
 
+# Scratch
+.tmp/
+
 # Large captures — keep selective ones via git add -f
 captures/**/*.pcapng
 captures/**/*.pcap
