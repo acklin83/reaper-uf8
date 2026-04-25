@@ -1627,11 +1627,17 @@ void pushZonesForVisibleSlots()
             g_dev->send(uf8::buildFaderDbReadout(static_cast<uint8_t>(s), dbStr));
         }
 
-        // Motor echo: push the fader target every tick, including during
-        // touch. While the motor is limp the firmware won't physically
-        // move the fader, but the target update still lands so the
-        // re-enable on release fires into an already-up-to-date target.
-        {
+        // Motor echo: push the fader target every tick — but NOT while
+        // the strip is touch-reported. Position commands during touch
+        // re-engage the motor against the user's hand: the user moves
+        // the fader, drainInputQueue applies the new volume, and the
+        // very next tick reads the new volume back, sees pb changed,
+        // and sends a fresh fader-position frame. Firmware treats that
+        // as "drive to target" — not the limp-target-update we'd hoped
+        // for. commitDebouncedTouchReleases sends the authoritative
+        // position multiple times right after motor-enable, so we lose
+        // nothing by staying silent during touch.
+        if (!g_touchReported[s].load()) {
             const uint16_t pb = linearVolumeToPb(volLin);
             if (!g_faderPbInit || pb != g_lastFaderPb[s]) {
                 g_lastFaderPb[s] = pb;
@@ -1694,35 +1700,14 @@ void commitDebouncedTouchReleases()
         g_touchReleasePending[s].store(false);
         if (!g_touchReported[s].exchange(false)) continue;
 
-        if (!g_dev) continue;
-        MediaTrack* tr = g_slotTrack[s];
-        if (!tr) continue;
-
-        // Firmware behaviour observed in PM mode: position commands sent
-        // while the motor is limp are silently discarded (the target
-        // remembered for the eventual re-enable is the last position
-        // pushed while the motor was active — i.e. the pre-touch value).
-        // Workaround: send enable first and immediately follow with the
-        // new position multiple times. The first hundred microseconds
-        // after enable the motor briefly heads toward its stale target;
-        // the rapid follow-up position commands flip the target before
-        // the fader has visibly moved.
-        const uint16_t pb  = linearVolumeToPb(uiVolLinear(tr));
-        const uint8_t  lsb = static_cast<uint8_t>(pb & 0x7F);
-        const uint8_t  msb = static_cast<uint8_t>((pb >> 7) & 0x7F);
-        static int kDiagEnable = 12;
-        if (kDiagEnable > 0) {
-            --kDiagEnable;
-            char buf[80];
-            std::snprintf(buf, sizeof(buf),
-                "UF8 touch→release strip=%d sentEnable=1\n", (int)s);
-            ShowConsoleMsg(buf);
-        }
-        g_dev->send(uf8::buildMotorEnable(s, true));
-        for (int i = 0; i < 3; ++i) {
-            g_dev->send(uf8::buildFaderPosition(s, lsb, msb));
-        }
-        g_lastFaderPb[s] = pb;
+        // No host action on release: SSL 360° sends nothing between
+        // touches (cap32, 2026-04-25) — motor stays limp until the next
+        // outbound FF 1E position command, which implicitly re-engages
+        // it. Our motor-echo path in pushZonesForVisibleSlots fires on
+        // the next timer tick if REAPER's volume differs from
+        // g_lastFaderPb[s] (which is stale because we skipped pushes
+        // during touch), so the fader's current position lands without
+        // a stale-target jump.
     }
 }
 

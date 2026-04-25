@@ -251,6 +251,17 @@ void UF8Device::workerLoop_()
     uint8_t hb4[13] = {0xff, 0x66, 0x09, 0x16, 0, 0, 0, 0, 0, 0, 0, 0, 0x85};
     auto lastHeartbeat = std::chrono::steady_clock::now();
 
+    // Plugin-Mixer keepalive: FF 1B 01 <counter 0-3> <chk>. Captured in
+    // cap32 (2026-04-25) firing every ~150 ms while SSL 360° is in PM
+    // mode. UC1 already does this; UF8 was missing it. Without this
+    // keepalive the firmware appears to ignore motor-limp commands —
+    // i.e. our FF 1D 02 strip 00 frames make it onto the wire (verified
+    // via /tmp/reaper_uf8_motor.log) but the motor stays engaged. Same
+    // 4-phase counter pattern as UC1.
+    constexpr auto kPmKeepaliveInterval = std::chrono::milliseconds(150);
+    auto lastPmKeepalive = std::chrono::steady_clock::now();
+    uint8_t pmCounter = 0;
+
     while (!shuttingDown_) {
         // Drain pending sends — pull up to N frames per iteration so a
         // burst of state pushes (VU, SEL colour, zones) doesn't stall
@@ -278,6 +289,16 @@ void UF8Device::workerLoop_()
             libusb_bulk_transfer(handle_, kEpOut, hb3, sizeof(hb3), &t, 100);
             libusb_bulk_transfer(handle_, kEpOut, hb4, sizeof(hb4), &t, 100);
             lastHeartbeat = now;
+        }
+
+        // PM keepalive every 150 ms (counter cycles 0..3).
+        if (now - lastPmKeepalive >= kPmKeepaliveInterval) {
+            uint8_t ka[5] = {0xff, 0x1b, 0x01, pmCounter,
+                             static_cast<uint8_t>(0x1b + 0x01 + pmCounter)};
+            int t = 0;
+            libusb_bulk_transfer(handle_, kEpOut, ka, sizeof(ka), &t, 100);
+            pmCounter = (pmCounter + 1) & 0x03;
+            lastPmKeepalive = now;
         }
 
         for (auto& frame : batch) {
