@@ -1742,6 +1742,7 @@ uint8_t peakToVuByte(double peak)
 
 std::array<uint8_t, 16> g_lastVuLevels{};
 bool g_vuInit = false;
+std::chrono::steady_clock::time_point g_lastVuPushTime{};
 
 // UF8 GR byte. Source is undefined until a plugin-GR probe is wired —
 // keep at 0 so the display doesn't show stale SSL-360°-left state. When
@@ -1770,7 +1771,30 @@ void pushVuMeter()
         levels[s * 2 + 0] = peakToVuByte(pl);     // "input"
         levels[s * 2 + 1] = peakToVuByte(pr);     // "output"
     }
-    if (g_vuInit && levels == g_lastVuLevels) return;
+    // Throttle: peak bytes are 0..31, so a single audio sample drift can
+    // toggle one byte every tick → 30 Hz of OUT frames during playback,
+    // saturating the queue and pushing latency-sensitive frames (motor-
+    // limp on touch press) hundreds of ms behind. Push only when either
+    //   (a) some byte moved by ≥ 2 (suppresses jitter), OR
+    //   (b) ≥ 50 ms passed AND any byte changed at all (so slow decays
+    //       still update smoothly without flooding).
+    if (g_vuInit) {
+        if (levels == g_lastVuLevels) return;
+        uint8_t maxDelta = 0;
+        for (size_t i = 0; i < levels.size(); ++i) {
+            const uint8_t d = levels[i] > g_lastVuLevels[i]
+                            ? levels[i] - g_lastVuLevels[i]
+                            : g_lastVuLevels[i] - levels[i];
+            if (d > maxDelta) maxDelta = d;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (maxDelta < 2 && now - g_lastVuPushTime < std::chrono::milliseconds(50)) {
+            return;
+        }
+        g_lastVuPushTime = now;
+    } else {
+        g_lastVuPushTime = std::chrono::steady_clock::now();
+    }
     g_vuInit = true;
     g_lastVuLevels = levels;
     auto frames = uf8::buildVuMeter(levels);
