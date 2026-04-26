@@ -724,213 +724,103 @@ int UC1Surface::channelInParam_(void* trackRaw, int fxIdx)
 }
 
 namespace {
-// Pot LED ring cell maps, extracted from 2026-04-24 captures (dual_37..
-// dual_41). Cells are in the SSL-captured write order; that order
-// should approximate the LED arc sweep CCW→CW, but visual
-// verification is pending. Encoding per pot:
-//   Position: value maps to single-LED-highlight at index v*N
-//   Bipolar:  center = middle LED lit, fills outward
-//   Additive: value fills LEDs cumulatively from index 0
-enum RingEncoding { Position, Bipolar, Additive };
-
-// `centerIdx` is used by Bipolar rings: the index in `cells` whose LED
-// is the always-lit center (e.g. 0 dB on a gain pot). SSL writes bank01
-// for non-center cells only; bank02 covers all cells. -1 = unused.
-struct RingDef { const uint8_t* cells; int nCells; RingEncoding kind; int centerIdx; };
-
-// Cell maps below extracted from uc1_15_knob_channelstrip_sweep.pcapng
-// (full CS+Dyn sweep, 22 knobs) and dual_40_bc_pots / uc1_04..07 (BC
-// pots) by correlating EP 0x81 IN knob events (`FF 24 02 <id> <delta>`)
-// with EP 0x02 OUT LED writes, midpoint-bucketed per knob-id.
+// Pot LED ring cell maps. ALL UC1 pot rings render as a single moving
+// LED dot — the "Kerbe" of the analog knob. No fill/trace, regardless
+// of the underlying parameter (gain, frequency, threshold, etc.). This
+// is what SSL 360° does natively for the FREQ + Q knobs and what we
+// want for every pot.
 //
-// Encoding cues from bank02 brightness states:
-//   - 00/FF only          → Position (single dot, on/off)
-//   - 00/19/33/4C/FF      → gradient fill: Bipolar (gain knobs, center
-//                            cell missing from bank01) or Additive
-//                            (threshold/mix knobs, no center skip).
-//
-// For Bipolar rings, `centerIdx` points at the always-lit center cell;
-// pushKnobRing_ skips bank01 writes there to mirror SSL's wire format.
+// Cell map source: uc1_15_knob_channelstrip_sweep.pcapng (full CS+Dyn
+// sweep, 22 knobs), dual_40_bc_pots.pcapng + uc1_04..07 (BC pots).
+// Per-knob attribution by correlating EP 0x81 IN knob events
+// (`FF 24 02 <id> <delta>`) with EP 0x02 OUT LED writes, midpoint-
+// bucketed by knob-id transitions.
+struct RingDef { const uint8_t* cells; int nCells; };
 
-// ---- EQ section ----
+// ---- EQ section (12 knobs, all Position) ----
+constexpr uint8_t kLpfCells[]    = {0x95,0x96,0x97,0x98,0x99,0x9A,0x9B,0x9C,0x9D,0x9E,0x9F};
+constexpr uint8_t kHpfCells[]    = {0x8A,0x8B,0x8C,0x8D,0x8E,0x8F,0x90,0x91,0x92,0x93,0x94};
+constexpr uint8_t kHfGainCells[] = {0x7E,0x7F,0x80,0x81,0x82,0x83,0x84,0x85,0x86,0x87,0x88};
+constexpr uint8_t kHfFreqCells[] = {0x73,0x74,0x75,0x76,0x77,0x78,0x79,0x7A,0x7B,0x7C,0x7D};
+constexpr uint8_t kHmfGainCells[]= {0x68,0x69,0x6A,0x6B,0x6C,0x6D,0x6E,0x6F,0x70,0x71,0x72};
+constexpr uint8_t kHmfFreqCells[]= {0x5D,0x5E,0x5F,0x60,0x61,0x62,0x63,0x64,0x65,0x66,0x67};
+constexpr uint8_t kHmfQCells[]   = {0x52,0x53,0x54,0x55,0x56,0x57,0x58,0x59,0x5A,0x5B,0x5C};
+constexpr uint8_t kLmfGainCells[]= {0x45,0x46,0x47,0x48,0x49,0x4A,0x4B,0x4C,0x4D,0x4E,0x4F};
+constexpr uint8_t kLmfFreqCells[]= {0x3A,0x3B,0x3C,0x3D,0x3E,0x3F,0x40,0x41,0x42,0x43,0x44};
+constexpr uint8_t kLmfQCells[]   = {0x2F,0x30,0x31,0x32,0x33,0x34,0x35,0x36,0x37,0x38,0x39};
+constexpr uint8_t kLfFreqCells[] = {0x24,0x25,0x26,0x27,0x28,0x29,0x2A,0x2B,0x2C,0x2D,0x2E};
+constexpr uint8_t kLfGainCells[] = {0x18,0x19,0x1A,0x1B,0x1C,0x1D,0x1E,0x1F,0x20,0x21,0x22};
 
-// Low Pass (0x00) — Position, 11 cells.
-constexpr uint8_t kLpfCells[] = {
-    0x95, 0x96, 0x97, 0x98, 0x99, 0x9A, 0x9B, 0x9C, 0x9D, 0x9E, 0x9F,
-};
-// High Pass (0x01) — Position, 11 cells.
-constexpr uint8_t kHpfCells[] = {
-    0x8A, 0x8B, 0x8C, 0x8D, 0x8E, 0x8F, 0x90, 0x91, 0x92, 0x93, 0x94,
-};
-// HF Gain (0x02) — Bipolar, 11 cells, center 0x83 (idx 5).
-constexpr uint8_t kHfGainCells[] = {
-    0x7E, 0x7F, 0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88,
-};
-// HF Freq (0x03) — Position, 11 cells.
-constexpr uint8_t kHfFreqCells[] = {
-    0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7A, 0x7B, 0x7C, 0x7D,
-};
-// HMF Gain (0x04) — Bipolar, 11 cells, center 0x6D (idx 5).
-constexpr uint8_t kHmfGainCells[] = {
-    0x68, 0x69, 0x6A, 0x6B, 0x6C, 0x6D, 0x6E, 0x6F, 0x70, 0x71, 0x72,
-};
-// HMF Freq (0x05) — Position, 11 cells.
-constexpr uint8_t kHmfFreqCells[] = {
-    0x5D, 0x5E, 0x5F, 0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67,
-};
-// HMF Q (0x06) — Position, 11 cells.
-constexpr uint8_t kHmfQCells[] = {
-    0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5A, 0x5B, 0x5C,
-};
-// LMF Gain (0x07) — Bipolar, 11 cells, center 0x4A (idx 5).
-constexpr uint8_t kLmfGainCells[] = {
-    0x45, 0x46, 0x47, 0x48, 0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0x4F,
-};
-// LMF Freq (0x08) — Position, 11 cells.
-constexpr uint8_t kLmfFreqCells[] = {
-    0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F, 0x40, 0x41, 0x42, 0x43, 0x44,
-};
-// LMF Q (0x09) — Position, 11 cells.
-constexpr uint8_t kLmfQCells[] = {
-    0x2F, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39,
-};
-// LF Freq (0x0A) — Position, 11 cells.
-constexpr uint8_t kLfFreqCells[] = {
-    0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E,
-};
-// LF Gain (0x0B) — Bipolar, 11 cells, center 0x1D (idx 5).
-constexpr uint8_t kLfGainCells[] = {
-    0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20, 0x21, 0x22,
-};
+// ---- Channel Strip I/O (Input Trim + Fader Level) ----
+constexpr uint8_t kInputTrimCells[]  = {0xC0,0xC1,0xC2,0xC3,0xC4,0xC5,0xC6,0xC7,0xC8,0xC9,0xCA};
+constexpr uint8_t kFaderLevelCells[] = {0x0E,0x0F,0x10,0x11,0x12,0x13,0x14,0x15,0x16,0x17};
 
-// ---- Channel Strip I/O ----
+// ---- Dyn / Gate section (7 knobs) ----
+constexpr uint8_t kGateReleaseCells[]   = {0x7C,0x7D,0x7E,0x7F,0x80,0x81,0x82,0x83,0x84,0x85,0x86};
+constexpr uint8_t kGateHoldCells[]      = {0x87,0x88,0x89,0x8A,0x8B,0x8C,0x8D,0x8E,0x8F,0x90,0x91};
+constexpr uint8_t kGateThresholdCells[] = {0x72,0x73,0x74,0x75,0x76,0x77,0x78,0x79,0x7A,0x7B};
+constexpr uint8_t kGateRangeCells[]     = {0x62,0x63,0x64,0x65,0x66,0x67,0x68,0x69,0x6A,0x6B,0x6C,0x6D,0x6E,0x6F,0x70};
+constexpr uint8_t kCompReleaseCells[]   = {0x50,0x51,0x52,0x53,0x54,0x55,0x56,0x57,0x58,0x59,0x5A};
+constexpr uint8_t kCompThresholdCells[] = {0x46,0x47,0x48,0x49,0x4A,0x4B,0x4C,0x4D,0x4E,0x4F};
+constexpr uint8_t kCompRatioCells[]     = {0x3B,0x3C,0x3D,0x3E,0x3F,0x40,0x41,0x42,0x43,0x44};
 
-// Input Trim (0x0C) — Bipolar, 11 cells, center 0xC5 (idx 5).
-constexpr uint8_t kInputTrimCells[] = {
-    0xC0, 0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9, 0xCA,
-};
-// Fader Level (0x16) — Additive, 10 cells. (Fader is unipolar, fills
-// from bottom as level rises.)
-constexpr uint8_t kFaderLevelCells[] = {
-    0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
-};
-
-// ---- Dyn / Gate section ----
-
-// Gate Release (0x17) — Position, 11 cells.
-constexpr uint8_t kGateReleaseCells[] = {
-    0x7C, 0x7D, 0x7E, 0x7F, 0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86,
-};
-// Gate Hold (0x18) — Position, 11 cells.
-constexpr uint8_t kGateHoldCells[] = {
-    0x87, 0x88, 0x89, 0x8A, 0x8B, 0x8C, 0x8D, 0x8E, 0x8F, 0x90, 0x91,
-};
-// Gate Threshold (0x19) — Additive, 10 cells.
-constexpr uint8_t kGateThresholdCells[] = {
-    0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7A, 0x7B,
-};
-// Gate Range (0x1A) — Bipolar, 15 cells, center 0x66 (idx 5). Range
-// 0x62..0x70 with gap at 0x66 (cell 0x66 is the center LED, not skipped
-// from the array — cells listed include it because bank02 writes there).
-constexpr uint8_t kGateRangeCells[] = {
-    0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6A,
-    0x6B, 0x6C, 0x6D, 0x6E, 0x6F, 0x70,
-};
-// Comp Release (0x1B) — Position, 11 cells.
-constexpr uint8_t kCompReleaseCells[] = {
-    0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5A,
-};
-// Comp Threshold (0x1C) — Additive, 10 cells.
-constexpr uint8_t kCompThresholdCells[] = {
-    0x46, 0x47, 0x48, 0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0x4F,
-};
-// Comp Ratio (0x1D) — Additive, 10 cells.
-constexpr uint8_t kCompRatioCells[] = {
-    0x3B, 0x3C, 0x3D, 0x3E, 0x3F, 0x40, 0x41, 0x42, 0x43, 0x44,
-};
-
-// ---- Bus Comp section ----
-
-// BC Ratio (0x0E) — Position, 7 cells (BC standard ring size).
-constexpr uint8_t kBcRatioCells[] = {
-    0xD6, 0xD7, 0xD8, 0xD9, 0xDA, 0xDB, 0xDC,
-};
-// BC Side-Chain HPF (0x0F) — Position, 11 cells (frequency knob).
-constexpr uint8_t kBcScHpfCells[] = {
-    0xCB, 0xCC, 0xCD, 0xCE, 0xCF, 0xD0, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5,
-};
-// BC Attack (0x10) — Position, 7 cells.
-constexpr uint8_t kBcAttackCells[] = {
-    0xDD, 0xDE, 0xDF, 0xE0, 0xE1, 0xE2, 0xE3,
-};
-// BC Release (0x11) — Position, 7 cells (wraps byte boundary 0xFA..0x00).
-constexpr uint8_t kBcReleaseCells[] = {
-    0xFA, 0xFB, 0xFC, 0xFD, 0xFE, 0xFF, 0x00,
-};
-// BC Threshold (0x12) — Additive, 10 cells (from uc1_04).
-constexpr uint8_t kBcThresholdCells[] = {
-    0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0xEA, 0xEB, 0xEC, 0xED,
-};
-// BC Makeup (0x13) — Bipolar, partial 5-cell observed (0xEF..0xF3).
-// Full ring extent uncertain (no full sweep capture). Center 0xF1 (idx 2).
-constexpr uint8_t kBcMakeupCells[] = {
-    0xEF, 0xF0, 0xF1, 0xF2, 0xF3,
-};
-// BC Mix (0x14) — Additive, 10 cells.
-constexpr uint8_t kBcMixCells[] = {
-    0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C,
-};
+// ---- Bus Comp section (7 knobs) ----
+constexpr uint8_t kBcRatioCells[]    = {0xD6,0xD7,0xD8,0xD9,0xDA,0xDB,0xDC};
+constexpr uint8_t kBcScHpfCells[]    = {0xCB,0xCC,0xCD,0xCE,0xCF,0xD0,0xD1,0xD2,0xD3,0xD4,0xD5};
+constexpr uint8_t kBcAttackCells[]   = {0xDD,0xDE,0xDF,0xE0,0xE1,0xE2,0xE3};
+// BC Release wraps the byte boundary (0xFA..0xFF then 0x00).
+constexpr uint8_t kBcReleaseCells[]  = {0xFA,0xFB,0xFC,0xFD,0xFE,0xFF,0x00};
+constexpr uint8_t kBcThresholdCells[]= {0xE4,0xE5,0xE6,0xE7,0xE8,0xE9,0xEA,0xEB,0xEC,0xED};
+// BC Makeup — only 5 cells captured (no full sweep). Likely 7 cells
+// on the hardware. Re-capture to confirm.
+constexpr uint8_t kBcMakeupCells[]   = {0xEF,0xF0,0xF1,0xF2,0xF3};
+constexpr uint8_t kBcMixCells[]      = {0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0A,0x0B,0x0C};
 
 const RingDef* ringFor(uint8_t knobId)
 {
-    // Position rings (centerIdx = -1).
-    static const RingDef kLpf          {kLpfCells,           11, Position, -1};
-    static const RingDef kHpf          {kHpfCells,           11, Position, -1};
-    static const RingDef kHfFreq       {kHfFreqCells,        11, Position, -1};
-    static const RingDef kHmfFreq      {kHmfFreqCells,       11, Position, -1};
-    static const RingDef kHmfQ         {kHmfQCells,          11, Position, -1};
-    static const RingDef kLmfFreq      {kLmfFreqCells,       11, Position, -1};
-    static const RingDef kLmfQ         {kLmfQCells,          11, Position, -1};
-    static const RingDef kLfFreq       {kLfFreqCells,        11, Position, -1};
-    static const RingDef kGateRelease  {kGateReleaseCells,   11, Position, -1};
-    static const RingDef kGateHold     {kGateHoldCells,      11, Position, -1};
-    static const RingDef kCompRelease  {kCompReleaseCells,   11, Position, -1};
-    static const RingDef kBcRatio      {kBcRatioCells,        7, Position, -1};
-    static const RingDef kBcScHpf      {kBcScHpfCells,       11, Position, -1};
-    static const RingDef kBcAttack     {kBcAttackCells,       7, Position, -1};
-    static const RingDef kBcRelease    {kBcReleaseCells,      7, Position, -1};
-
-    // Bipolar rings (gain pots — center cell always lit, bank01 skips it).
-    static const RingDef kHfGain       {kHfGainCells,        11, Bipolar,  5};
-    static const RingDef kHmfGain      {kHmfGainCells,       11, Bipolar,  5};
-    static const RingDef kLmfGain      {kLmfGainCells,       11, Bipolar,  5};
-    static const RingDef kLfGain       {kLfGainCells,        11, Bipolar,  5};
-    static const RingDef kInputTrim    {kInputTrimCells,     11, Bipolar,  5};
-    static const RingDef kGateRange    {kGateRangeCells,     15, Bipolar,  7};
-    static const RingDef kBcMakeup     {kBcMakeupCells,       5, Bipolar,  2};
-
-    // Additive rings (threshold / mix / level — fill from one end).
-    static const RingDef kFaderLevel   {kFaderLevelCells,    10, Additive, -1};
-    static const RingDef kGateThr      {kGateThresholdCells, 10, Additive, -1};
-    static const RingDef kCompThr      {kCompThresholdCells, 10, Additive, -1};
-    static const RingDef kCompRatio    {kCompRatioCells,     10, Additive, -1};
-    static const RingDef kBcThr        {kBcThresholdCells,   10, Additive, -1};
-    static const RingDef kBcMix        {kBcMixCells,         10, Additive, -1};
+    static const RingDef kLpf       {kLpfCells,        11};
+    static const RingDef kHpf       {kHpfCells,        11};
+    static const RingDef kHfGain    {kHfGainCells,     11};
+    static const RingDef kHfFreq    {kHfFreqCells,     11};
+    static const RingDef kHmfGain   {kHmfGainCells,    11};
+    static const RingDef kHmfFreq   {kHmfFreqCells,    11};
+    static const RingDef kHmfQ      {kHmfQCells,       11};
+    static const RingDef kLmfGain   {kLmfGainCells,    11};
+    static const RingDef kLmfFreq   {kLmfFreqCells,    11};
+    static const RingDef kLmfQ      {kLmfQCells,       11};
+    static const RingDef kLfFreq    {kLfFreqCells,     11};
+    static const RingDef kLfGain    {kLfGainCells,     11};
+    static const RingDef kInputTrim {kInputTrimCells,  11};
+    static const RingDef kFaderLevel{kFaderLevelCells, 10};
+    static const RingDef kGateRelease  {kGateReleaseCells,   11};
+    static const RingDef kGateHold     {kGateHoldCells,      11};
+    static const RingDef kGateThr      {kGateThresholdCells, 10};
+    static const RingDef kGateRange    {kGateRangeCells,     15};
+    static const RingDef kCompRelease  {kCompReleaseCells,   11};
+    static const RingDef kCompThr      {kCompThresholdCells, 10};
+    static const RingDef kCompRatio    {kCompRatioCells,     10};
+    static const RingDef kBcRatio   {kBcRatioCells,     7};
+    static const RingDef kBcScHpf   {kBcScHpfCells,    11};
+    static const RingDef kBcAttack  {kBcAttackCells,    7};
+    static const RingDef kBcRelease {kBcReleaseCells,   7};
+    static const RingDef kBcThr     {kBcThresholdCells,10};
+    static const RingDef kBcMakeup  {kBcMakeupCells,    5};
+    static const RingDef kBcMix     {kBcMixCells,      10};
 
     switch (knobId) {
-        // EQ section
-        case knob::kCSLowPass:        return &kLpf;
-        case knob::kCSHighPass:       return &kHpf;
-        case knob::kCSHfGain:         return &kHfGain;
-        case knob::kCSHfFreq:         return &kHfFreq;
-        case knob::kCSHmfGain:        return &kHmfGain;
-        case knob::kCSHmfFreq:        return &kHmfFreq;
-        case knob::kCSHmfQ:           return &kHmfQ;
-        case knob::kCSLmfGain:        return &kLmfGain;
-        case knob::kCSLmfFreq:        return &kLmfFreq;
-        case knob::kCSLmfQ:           return &kLmfQ;
-        case knob::kCSLfFreq:         return &kLfFreq;
-        case knob::kCSLfGain:         return &kLfGain;
+        // EQ
+        case knob::kCSLowPass:    return &kLpf;
+        case knob::kCSHighPass:   return &kHpf;
+        case knob::kCSHfGain:     return &kHfGain;
+        case knob::kCSHfFreq:     return &kHfFreq;
+        case knob::kCSHmfGain:    return &kHmfGain;
+        case knob::kCSHmfFreq:    return &kHmfFreq;
+        case knob::kCSHmfQ:       return &kHmfQ;
+        case knob::kCSLmfGain:    return &kLmfGain;
+        case knob::kCSLmfFreq:    return &kLmfFreq;
+        case knob::kCSLmfQ:       return &kLmfQ;
+        case knob::kCSLfFreq:     return &kLfFreq;
+        case knob::kCSLfGain:     return &kLfGain;
         // Channel Strip I/O
         case knob::kCSInputTrim:      return &kInputTrim;
         case knob::kCSFaderLevel:     return &kFaderLevel;
@@ -971,42 +861,16 @@ void UC1Surface::pushKnobRing_(uint8_t knobId, double normalized)
         last.assign(def->nCells, 0xFE);  // "unset" sentinel
     }
 
-    // Determine which cells should be lit based on encoding.
+    // Position-only rendering: a single LED dot at the index that
+    // corresponds to the current value (the "Kerbe" of the analog knob).
     std::vector<uint8_t> target(def->nCells, 0);
-    switch (def->kind) {
-        case Position: {
-            int idx = static_cast<int>(normalized * (def->nCells - 1) + 0.5);
-            if (idx < 0) idx = 0;
-            if (idx >= def->nCells) idx = def->nCells - 1;
-            target[idx] = 1;
-            break;
-        }
-        case Bipolar: {
-            // Center = 0.5 → middle LED; fill outward as value moves
-            // away from center in either direction.
-            const int mid = (def->nCells - 1) / 2;
-            const int fromCenter = static_cast<int>(
-                std::abs(normalized - 0.5) * (def->nCells - 1) + 0.5);
-            const int start = (normalized < 0.5) ? (mid - fromCenter) : mid;
-            const int end   = (normalized < 0.5) ? mid : (mid + fromCenter);
-            for (int i = 0; i < def->nCells; ++i) {
-                if (i >= start && i <= end) target[i] = 1;
-            }
-            break;
-        }
-        case Additive: {
-            int n = static_cast<int>(normalized * def->nCells + 0.5);
-            if (n > def->nCells) n = def->nCells;
-            for (int i = 0; i < n; ++i) target[i] = 1;
-            break;
-        }
-    }
+    int idx = static_cast<int>(normalized * (def->nCells - 1) + 0.5);
+    if (idx < 0) idx = 0;
+    if (idx >= def->nCells) idx = def->nCells - 1;
+    target[idx] = 1;
 
-    // Push changes: dual-bank encoding per cell. Bank 0x01 (role 0x00)
-    // = selection 0/1. Bank 0x02 (role 0x00) = brightness 0/FF. For
-    // Bipolar rings the center cell is permanently lit and SSL never
-    // writes bank01 to it — mirror that to avoid an extraneous "arc-
-    // member" write to the center LED.
+    // Dual-bank encoding per cell. Bank 0x01 (role 0x00) = selection 0/1,
+    // bank 0x02 (role 0x00) = brightness 0/FF. Both banks always written.
     auto make = [](uint8_t bank, uint8_t cell, uint8_t state) {
         std::vector<uint8_t> f;
         f.reserve(8);
@@ -1028,10 +892,7 @@ void UC1Surface::pushKnobRing_(uint8_t knobId, double normalized)
         const uint8_t cell = def->cells[i];
         const uint8_t selState = target[i] ? 0x01 : 0x00;
         const uint8_t brState  = target[i] ? 0xFF : 0x00;
-        const bool isCenter = (def->kind == Bipolar && i == def->centerIdx);
-        if (!isCenter) {
-            device_->send(make(0x01, cell, selState));
-        }
+        device_->send(make(0x01, cell, selState));
         device_->send(make(0x02, cell, brState));
     }
 }
