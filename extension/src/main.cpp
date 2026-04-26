@@ -1746,15 +1746,28 @@ void commitDebouncedTouchReleases()
         const bool wasReported = g_touchReported[s].exchange(false);
         if (!wasReported) continue;
 
-        // Force the motor-echo path to fire a fresh FF 1E position push
-        // on the next timer tick — even if REAPER's volume didn't change
-        // during the touch (a tap with no movement). Without this, dedup
-        // sees pb == g_lastFaderPb and skips the push, leaving the motor
-        // stuck in limp mode (which the touch-press handler put it in).
-        // The implicit motor re-engage rides on the FF 1E command, so
-        // skipping the push means the fader never reacts to subsequent
-        // REAPER volume changes.
-        g_lastFaderPb[s] = 0xFFFF;
+        if (!g_dev) continue;
+        MediaTrack* tr = g_slotTrack[s];
+        if (!tr) continue;
+
+        // cap32 showed SSL360 sending nothing motor-related between touches
+        // — it relied on the next FF 1E position push to "implicitly
+        // re-engage" the motor. In our PM-mode setup that implicit
+        // re-engage doesn't actually move the fader: motor stays limp,
+        // FF 1E commands are accepted as a target update but the fader
+        // doesn't follow.
+        //
+        // Explicit re-engage works as long as we push the current REAPER
+        // position FIRST (so the firmware's target is up-to-date), THEN
+        // send FF 1D 02 strip 01. Without the position-first ordering the
+        // firmware briefly drives toward a stale internal target and the
+        // fader visibly jumps.
+        const uint16_t pb  = linearVolumeToPb(uiVolLinear(tr));
+        const uint8_t  lsb = static_cast<uint8_t>(pb & 0x7F);
+        const uint8_t  msb = static_cast<uint8_t>((pb >> 7) & 0x7F);
+        g_dev->send(uf8::buildFaderPosition(static_cast<uint8_t>(s), lsb, msb));
+        g_dev->send(uf8::buildMotorEnable(static_cast<uint8_t>(s), true));
+        g_lastFaderPb[s] = pb;
 
         // No host action on release: SSL 360° sends nothing between
         // touches (cap32, 2026-04-25) — motor stays limp until the next
