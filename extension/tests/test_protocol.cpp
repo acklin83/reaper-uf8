@@ -146,10 +146,24 @@ int main()
         EXPECT(hex(f) == "ff38041700"  "11f0" "54"
                          "ff39041700"  "11f0" "55");
     }
-    // CUT Strip 1 (cell 0x16), ON: ff 38 04 16 00 3f f0 81 + ff 39 04 16 00 00 f0 43
+    // CUT Strip 1 (cell 0x16), ON, with explicit ORANGE colour to lock the
+    // cap31 byte tables (replicates SSL360's CUT-orange):
+    {
+        auto f = buildLedColourPair(0, LedClass::Cut, true, ledColourOrange());
+        EXPECT(hex(f) == "ff380416003ff081ff3904160000f043");
+    }
+    // Default CUT colour is RED (cap33 bytes) — different from SSL360's orange:
+    //   FF38 04 16 00 0F F0 + FF39 04 16 00 00 F0
     {
         auto f = buildLedColourPair(0, LedClass::Cut, true);
-        EXPECT(hex(f) == "ff380416003ff081ff3904160000f043");
+        EXPECT(hex(f) == "ff380416000ff051ff3904160000f043");
+    }
+    // SEL Strip 1 with track-colour RED → expect cap33 red bright
+    //   FF38 04 15 00 0F F0  + FF39 04 15 00 00 F0
+    {
+        auto f = buildLedColourPair(0, LedClass::Sel, true,
+                                    ledColourForTrackRgb(0xFF0000));
+        EXPECT(hex(f) == "ff380415000ff050ff3904150000f042");
     }
     // SEL Strip 1 (cell 0x15), ON: ff 38 04 15 00 ff ff 4f + ff 39 04 15 00 00 f0 42
     {

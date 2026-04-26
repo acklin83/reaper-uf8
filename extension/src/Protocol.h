@@ -128,13 +128,41 @@ std::vector<uint8_t> buildLedCommand(uint8_t ledId, bool on);
 // ON state:  FF38 = bright colour bytes, FF39 = base colour bytes.
 // OFF state: FF38 == FF39 = dim colour bytes.
 enum class LedClass : uint8_t {
-    Solo = 0,    // yellow
-    Cut  = 1,    // orange
-    Sel  = 2,    // white
+    Solo = 0,
+    Cut  = 1,
+    Sel  = 2,
 };
+
+// 4 bytes drive a coloured LED in DAW-Colour mode: bright pair (when lit)
+// + dim pair (when un-lit). All four come from cap31/cap33 byte tables.
+struct LedColour {
+    uint8_t aBright;
+    uint8_t bBright;
+    uint8_t aDim;
+    uint8_t bDim;
+};
+
+// Class defaults — yellow for SOLO, red for CUT, white for SEL.
+LedColour ledColourYellow();   // SOLO
+LedColour ledColourRed();      // CUT
+LedColour ledColourWhite();    // SEL when track has no custom colour
+LedColour ledColourOrange();   // SSL360 default for CUT (cap31), still available
+
+// Map a REAPER track-colour (0x00RRGGBB) onto SSL360's SEL DAW-Colour
+// palette by Euclidean nearest-match against the 10 distinct anchors
+// captured in cap33. A track with no custom colour (rgb == 0) returns
+// `ledColourWhite()`.
+LedColour ledColourForTrackRgb(uint32_t rgb);
+
+// Default colour for a class when no track-colour override is requested.
+LedColour ledColourClassDefault(LedClass cls);
 
 // Build the FF 38 + FF 39 frame pair. Returns 16 bytes (two 8-byte frames
 // concatenated). Caller sends both as a single OUT.
+std::vector<uint8_t> buildLedColourPair(uint8_t strip, LedClass cls, bool on,
+                                        LedColour colour);
+
+// Convenience overload — uses ledColourClassDefault(cls) for the colour.
 std::vector<uint8_t> buildLedColourPair(uint8_t strip, LedClass cls, bool on);
 
 // Channel Number Zone — the small numeric digit top-left of each scribble

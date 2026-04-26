@@ -1,6 +1,7 @@
 #include "Protocol.h"
 
 #include <cstring>
+#include <limits>
 #include <numeric>
 
 namespace uf8 {
@@ -184,25 +185,77 @@ std::vector<uint8_t> buildLedCommand(uint8_t ledId, bool on)
     return frame;
 }
 
-std::vector<uint8_t> buildLedColourPair(uint8_t strip, LedClass cls, bool on)
+// LED colour constants. Bright = lit, dim = unlit. cap31 (yellow/orange/
+// white) and cap33 (12-colour DAW palette) supply the byte pairs.
+LedColour ledColourYellow() { return {0xEF, 0xF0, 0x11, 0xF0}; }
+LedColour ledColourOrange() { return {0x3F, 0xF0, 0x12, 0xF0}; }
+LedColour ledColourRed()    { return {0x0F, 0xF0, 0x01, 0xF0}; }
+LedColour ledColourWhite()  { return {0xFF, 0xFF, 0x11, 0xF1}; }
+
+LedColour ledColourClassDefault(LedClass cls)
 {
-    // cap31 colour-byte tables. Each entry: {ff38_a, ff38_b, ff39_a, ff39_b}
-    struct Bytes { uint8_t a38, b38, a39, b39; };
-    constexpr Bytes kSoloOn  = {0xEF, 0xF0, 0x00, 0xF0};
-    constexpr Bytes kSoloOff = {0x11, 0xF0, 0x11, 0xF0};
-    constexpr Bytes kCutOn   = {0x3F, 0xF0, 0x00, 0xF0};
-    constexpr Bytes kCutOff  = {0x12, 0xF0, 0x12, 0xF0};
-    constexpr Bytes kSelOn   = {0xFF, 0xFF, 0x00, 0xF0};
-    constexpr Bytes kSelOff  = {0x11, 0xF1, 0x11, 0xF1};
-
-    Bytes c;
     switch (cls) {
-        case LedClass::Solo: c = on ? kSoloOn : kSoloOff; break;
-        case LedClass::Cut:  c = on ? kCutOn  : kCutOff;  break;
-        case LedClass::Sel:  c = on ? kSelOn  : kSelOff;  break;
+        case LedClass::Solo: return ledColourYellow();
+        case LedClass::Cut:  return ledColourRed();
+        case LedClass::Sel:  return ledColourWhite();
     }
+    return ledColourWhite();
+}
 
-    const uint8_t cell = static_cast<uint8_t>(0x17 - 3 * strip - static_cast<uint8_t>(cls));
+namespace {
+// SEL DAW-Colour palette anchors — captured in cap33 by sweeping 12
+// REAPER track-colours through SSL360's quantizer.  Ordered so that the
+// nearest-match function below picks the visually-closest entry by
+// Euclidean RGB distance.
+struct PaletteEntry {
+    uint8_t r, g, b;
+    LedColour bytes;
+};
+
+constexpr PaletteEntry kSelPalette[] = {
+    {255,   0,   0, {0x0F, 0xF0, 0x01, 0xF0}}, // red
+    {255, 128,   0, {0x3F, 0xF0, 0x12, 0xF0}}, // orange
+    {255, 255,   0, {0xEF, 0xF0, 0x11, 0xF0}}, // yellow
+    {  0, 255,   0, {0xF0, 0xF0, 0x10, 0xF0}}, // green (also lime)
+    {  0, 255, 255, {0xF0, 0xFF, 0x10, 0xF1}}, // cyan (also lightblue)
+    {  0,   0, 255, {0x00, 0xFF, 0x00, 0xF1}}, // blue
+    {128,   0, 255, {0x03, 0xFF, 0x01, 0xF3}}, // purple
+    {255,   0, 255, {0x2F, 0xF4, 0x12, 0xF1}}, // magenta
+    {255,   0, 128, {0x0F, 0xFF, 0x01, 0xF1}}, // pink
+    {255, 255, 255, {0xFF, 0xFF, 0x11, 0xF1}}, // white
+};
+} // namespace
+
+LedColour ledColourForTrackRgb(uint32_t rgb)
+{
+    if (rgb == 0) return ledColourWhite();
+    const int r = static_cast<int>((rgb >> 16) & 0xFF);
+    const int g = static_cast<int>((rgb >> 8)  & 0xFF);
+    const int b = static_cast<int>( rgb        & 0xFF);
+    int bestDist = std::numeric_limits<int>::max();
+    LedColour best = ledColourWhite();
+    for (const auto& p : kSelPalette) {
+        const int dr = r - p.r, dg = g - p.g, db = b - p.b;
+        const int d  = dr*dr + dg*dg + db*db;
+        if (d < bestDist) { bestDist = d; best = p.bytes; }
+    }
+    return best;
+}
+
+std::vector<uint8_t> buildLedColourPair(uint8_t strip, LedClass cls, bool on,
+                                        LedColour colour)
+{
+    const uint8_t a38 = on ? colour.aBright : colour.aDim;
+    const uint8_t b38 = on ? colour.bBright : colour.bDim;
+    // FF39's bytes when ON: empirically always (00, F0) across cap31 and
+    // every cap33 palette entry — independent of bBright. Treat it as the
+    // fixed "base / off-state" companion frame the firmware overlays under
+    // FF38's bright colour.
+    const uint8_t a39 = on ? 0x00 : colour.aDim;
+    const uint8_t b39 = on ? 0xF0 : colour.bDim;
+
+    const uint8_t cell = static_cast<uint8_t>(
+        0x17 - 3 * strip - static_cast<uint8_t>(cls));
 
     std::vector<uint8_t> frame;
     frame.reserve(16);
@@ -213,8 +266,8 @@ std::vector<uint8_t> buildLedColourPair(uint8_t strip, LedClass cls, bool on)
     frame.push_back(0x04);
     frame.push_back(cell);
     frame.push_back(0x00);
-    frame.push_back(c.a38);
-    frame.push_back(c.b38);
+    frame.push_back(a38);
+    frame.push_back(b38);
     {
         std::span<const uint8_t> payload{frame.data() + 1, frame.size() - 1};
         frame.push_back(checksum(payload));
@@ -227,14 +280,19 @@ std::vector<uint8_t> buildLedColourPair(uint8_t strip, LedClass cls, bool on)
     frame.push_back(0x04);
     frame.push_back(cell);
     frame.push_back(0x00);
-    frame.push_back(c.a39);
-    frame.push_back(c.b39);
+    frame.push_back(a39);
+    frame.push_back(b39);
     {
         std::span<const uint8_t> payload{frame.data() + f2 + 1, 6};
         frame.push_back(checksum(payload));
     }
 
     return frame;
+}
+
+std::vector<uint8_t> buildLedColourPair(uint8_t strip, LedClass cls, bool on)
+{
+    return buildLedColourPair(strip, cls, on, ledColourClassDefault(cls));
 }
 
 std::vector<uint8_t> buildChannelNumber(uint8_t strip, std::string_view digits)

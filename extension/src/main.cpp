@@ -579,20 +579,43 @@ bool ReaSixtySurface::GetTouchState(MediaTrack* tr, int isPan)
 // off until a cap23b verifies its id range.
 enum class LedClass : uint8_t { Sel = 0, Mute = 1, Solo = 2, Arm = 3 };
 
+// Resolve the LED colour for a given class on a given track. SEL pulls from
+// REAPER's track-colour (snapped to SSL360's DAW-Colour palette); SOLO and
+// CUT use class defaults (yellow / red). When the user later wires a
+// settings UI for per-class overrides, this is the spot to read them.
+uf8::LedColour ledColourFor(LedClass cls, MediaTrack* tr)
+{
+    if (cls == LedClass::Sel && tr) {
+        const uint32_t rgb = static_cast<uint32_t>(GetTrackColor(tr)) & 0x00FFFFFFu;
+        return uf8::ledColourForTrackRgb(rgb);
+    }
+    switch (cls) {
+        case LedClass::Solo: return uf8::ledColourYellow();
+        case LedClass::Mute: return uf8::ledColourRed();
+        case LedClass::Sel:  return uf8::ledColourWhite();
+        default:             return uf8::ledColourWhite();
+    }
+}
+
+uf8::LedClass toUf8LedClass(LedClass cls)
+{
+    switch (cls) {
+        case LedClass::Solo: return uf8::LedClass::Solo;
+        case LedClass::Mute: return uf8::LedClass::Cut;
+        case LedClass::Sel:  return uf8::LedClass::Sel;
+        default:             return uf8::LedClass::Sel;
+    }
+}
+
 void sendLed(LedClass cls, MediaTrack* tr, bool on)
 {
     if (!g_dev) return;
     if (cls == LedClass::Arm) return;   // gate ARM until its colour-pair is captured
     for (int s = 0; s < 8; ++s) {
         if (g_slotTrack[s] != tr) continue;
-        uf8::LedClass devCls;
-        switch (cls) {
-            case LedClass::Solo: devCls = uf8::LedClass::Solo; break;
-            case LedClass::Mute: devCls = uf8::LedClass::Cut;  break;
-            case LedClass::Sel:  devCls = uf8::LedClass::Sel;  break;
-            default: return;
-        }
-        g_dev->send(uf8::buildLedColourPair(static_cast<uint8_t>(s), devCls, on));
+        const uf8::LedClass devCls = toUf8LedClass(cls);
+        const uf8::LedColour col = ledColourFor(cls, tr);
+        g_dev->send(uf8::buildLedColourPair(static_cast<uint8_t>(s), devCls, on, col));
         return;
     }
 }
@@ -1439,9 +1462,12 @@ void pushZonesForVisibleSlots()
             // so it's gated inside sendLed itself.
             if (g_dev) {
                 const auto strip = static_cast<uint8_t>(s);
-                g_dev->send(uf8::buildLedColourPair(strip, uf8::LedClass::Sel,  sel));
-                g_dev->send(uf8::buildLedColourPair(strip, uf8::LedClass::Cut,  mute));
-                g_dev->send(uf8::buildLedColourPair(strip, uf8::LedClass::Solo, solo));
+                g_dev->send(uf8::buildLedColourPair(strip, uf8::LedClass::Sel,  sel,
+                                                    ledColourFor(LedClass::Sel,  t)));
+                g_dev->send(uf8::buildLedColourPair(strip, uf8::LedClass::Cut,  mute,
+                                                    ledColourFor(LedClass::Mute, t)));
+                g_dev->send(uf8::buildLedColourPair(strip, uf8::LedClass::Solo, solo,
+                                                    ledColourFor(LedClass::Solo, t)));
                 (void)arm;
             }
         }

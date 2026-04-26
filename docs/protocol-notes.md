@@ -286,8 +286,37 @@ for SOLO/MUTE; `00 F0` for SEL) to FF39.
 
 **SEL DAW-Colour mode** is the per-track-colour variant of the SEL row —
 same frame pair, same cell, but `<a> <b>` carries the track's colour
-(byte-pair encoding still empirical, no RGB decode yet — replay captured
-values per palette index when implementing).
+quantized to SSL360's 10-entry palette. cap33 (2026-04-26) swept 12
+REAPER track-colours through the SEL LED in PM Layer and captured these
+byte pairs:
+
+| Colour    | RGB         | Bright (a, b) | Dim (a, b) |
+|-----------|-------------|---------------|------------|
+| red       | 255,0,0     | `0F F0`       | `01 F0`    |
+| orange    | 255,128,0   | `3F F0`       | `12 F0`    |
+| yellow    | 255,255,0   | `EF F0`       | `11 F0`    |
+| green/lime| 0,255,0 / 128,255,0 | `F0 F0`       | `10 F0`    |
+| cyan/lblue| 0,255,255 / 0,128,255 | `F0 FF`     | `10 F1`    |
+| blue      | 0,0,255     | `00 FF`       | `00 F1`    |
+| purple    | 128,0,255   | `03 FF`       | `01 F3`    |
+| magenta   | 255,0,255   | `2F F4`       | `12 F1`    |
+| pink      | 255,0,128   | `0F FF`       | `01 F1`    |
+| white     | 255,255,255 | `FF FF`       | `11 F1`    |
+
+Bit-pattern: `a` hi-nibble ≈ green, `a` lo-nibble ≈ red, `b` lo-nibble
+≈ blue, `b` hi-nibble = `F`. Bright = full-scale 0..F per channel; dim
+= compressed 0..3. SSL applies its own quantization (128-mid-tones snap
+to 0 or full). FF39's `b` byte is **always `0xF0`** when lit — the
+"all-FF" pattern only ever appears in FF38.
+
+PM Layer fires the same FF 38/39 family — confirmed in cap33 (cap31 had
+only proved DAW Layer). The extension uses this in PM Layer for SEL
+track-colour LEDs.
+
+SSL360 itself reserves DAW-Colour-by-track for SEL only; SOLO/CUT writes
+during bank-shift use a fixed `0F F0` indicator, not track colour.
+Firmware-level the cells are cell-agnostic though, so the extension is
+free to drive SOLO/CUT in any colour.
 
 ### Selected-strip bitmask (`FF 66 03 06 <mask_lo> <mask_hi>`)
 
@@ -334,3 +363,4 @@ During `dual_36_cs_vu_ramp` the user ramped input signal through a 16-level test
 | 2026-04-24 | `uc1/dual_35_cs_gr_ramp.pcapng` | CS compressor GR ramp — UF8 GR byte `FF 66 11 0F` range `0x22..0x64`. |
 | 2026-04-24 | `uc1/dual_36_cs_vu_ramp.pcapng` | CS VU ramp — `FF 66 21 09` bytes 6/7 carry Input/Output VU `0x00..0x1F`. |
 | 2026-04-26 | `cap31_solo_cut_led_colours.pcapng` | SOLO/MUTE/SEL LED colour decoded — unified `FF 38/39 04 <cell>` pair, cell range 0x00..0x17 covers all 24 per-strip LEDs (replaces FF 3B mono path). Yellow/orange/white byte tables captured. |
+| 2026-04-26 | `cap33_sel_palette_sweep.pcapng` | SEL DAW-Colour palette decoded — 12 REAPER track-colours mapped to 10 distinct SSL360 byte pairs. Confirmed FF 38/39 fires in PM Layer too. FF39's `b` byte always `0xF0` when lit. |
