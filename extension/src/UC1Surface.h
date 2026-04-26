@@ -102,6 +102,23 @@ private:
     // Push LED-cell state for a button after it toggles.
     void pushButtonLed_(uint8_t buttonId, bool on);
 
+    // Push a "<label>   <value>" readout to the section LCD after a
+    // button toggle, mirroring SSL 360°'s zone-0x03/0x05 transient
+    // text. The manual lists this as the "currently selected param
+    // name + value" field for both Channel Strip and Bus Comp Mode.
+    void pushButtonReadout_(uint8_t buttonId, std::string_view label,
+                            std::string_view value, uint8_t zone);
+
+    // The track whose Bus Comp section is shown in the BC carousel /
+    // BC slot. Independent of focusedTrack_: the CHANNEL encoder
+    // scrolls focusedTrack_ but never moves this; the BC encoder
+    // moves only this (REAPER's selection follows as a side-effect,
+    // which then updates focusedTrack_ via the SetSurfaceSelected
+    // callback). Returns the effective anchor — bcAnchorTrack_ if
+    // still in the project, else falls back to the first BC-bearing
+    // track in the project (lazy auto-anchor).
+    void* effectiveBcTrack_() const;
+
     // Push the LED ring around a rotary pot. `normalized` is the 0..1
     // VST3 param value. Cell layout per knob is stored in a static
     // table (cap37..cap41); knobs not yet mapped no-op silently.
@@ -117,6 +134,12 @@ private:
     // --- state ---
     UC1Device* device_ = nullptr;
     void*      focusedTrack_ = nullptr;  // MediaTrack*
+
+    // BC display anchor — null until the BC encoder is used (then it
+    // pins). Persists across CHANNEL-encoder scrolling so the BC
+    // section keeps showing the same plugin instance. See
+    // effectiveBcTrack_() for fallback semantics.
+    void*      bcAnchorTrack_ = nullptr;  // MediaTrack*
 
     std::mutex               queueMu_;
     std::deque<ButtonEvent>  buttonQueue_;

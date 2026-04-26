@@ -232,11 +232,12 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
     }
 
     // BC encoder — jump to the next/prev track (relative to the
-    // currently focused track) that has a plugin targeted by the
-    // Bus-Comp section. "Next" = first BC track whose project index
-    // is greater than the focused track's; "prev" = first BC track
-    // whose project index is smaller. Works whether or not the
-    // focused track itself has a BC plugin.
+    // current BC anchor) that has a plugin targeted by the Bus-Comp
+    // section. "Next" = first BC track whose project index is
+    // greater than the anchor's; "prev" = first BC track whose
+    // project index is smaller. Anchor seeds from the effective BC
+    // track so subsequent scrolls advance from where the display
+    // currently sits, not from the CS focus.
     if (ev.id == knob::kBcEncoder) {
         static int acc = 0;
         static std::chrono::steady_clock::time_point lastT{};
@@ -246,7 +247,10 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
         if (n <= 0) return;
 
         int curIdx = -1;
-        if (focusedTrack_) {
+        if (void* anchor = effectiveBcTrack_()) {
+            curIdx = static_cast<int>(GetMediaTrackInfo_Value(
+                static_cast<MediaTrack*>(anchor), "IP_TRACKNUMBER")) - 1;
+        } else if (focusedTrack_) {
             curIdx = static_cast<int>(GetMediaTrackInfo_Value(
                 static_cast<MediaTrack*>(focusedTrack_), "IP_TRACKNUMBER")) - 1;
         }
@@ -281,6 +285,10 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
 
         MediaTrack* tr = GetTrack(nullptr, found);
         if (tr) {
+            // Anchor BC display BEFORE updating REAPER's selection so
+            // the SetSurfaceSelected callback's setFocusedTrack chain
+            // sees the new anchor in place.
+            bcAnchorTrack_ = tr;
             SetOnlyTrackSelected(tr);
             reasixty_followSelectedInMixer(tr);
             setFocusedTrack(tr);
@@ -406,6 +414,8 @@ void UC1Surface::handleButton_(const ButtonEvent& ev)
             const bool next = !fineMode_.load(std::memory_order_relaxed);
             fineMode_.store(next, std::memory_order_relaxed);
             pushButtonLed_(ev.id, next);
+            pushButtonReadout_(ev.id, "Fine", next ? "On" : "Off",
+                               zone::kChannelStripReadout);
         }
         ++stats_.buttonEventsHandled;
         return;
@@ -432,6 +442,8 @@ void UC1Surface::handleButton_(const ButtonEvent& ev)
             const bool on = GetMediaTrackInfo_Value(tr, "I_SOLO") > 0.5;
             pushButtonLed_(button::kSolo, on);
             pushButtonLed_(button::kSoloClear, anySolo());
+            pushButtonReadout_(button::kSolo, "Solo", on ? "On" : "Off",
+                               zone::kChannelStripReadout);
             if (kDiagSoloCut > 0) {
                 --kDiagSoloCut;
                 char line[80];
@@ -449,6 +461,8 @@ void UC1Surface::handleButton_(const ButtonEvent& ev)
             CSurf_OnMuteChange(tr, -1);
             const bool on = GetMediaTrackInfo_Value(tr, "B_MUTE") > 0.5;
             pushButtonLed_(button::kCut, on);
+            pushButtonReadout_(button::kCut, "Cut", on ? "On" : "Off",
+                               zone::kChannelStripReadout);
             if (kDiagSoloCut > 0) {
                 --kDiagSoloCut;
                 char line[80];
@@ -465,6 +479,9 @@ void UC1Surface::handleButton_(const ButtonEvent& ev)
             // REAPER action 40340 = "Track: Unsolo all tracks".
             Main_OnCommand(40340, 0);
             pushButtonLed_(button::kSoloClear, anySolo());
+            pushButtonReadout_(button::kSoloClear, "Solo Clear",
+                               anySolo() ? "On" : "Off",
+                               zone::kChannelStripReadout);
             // Every strip's solo LED could have just been turned off,
             // but since we only light Solo for the focused track here,
             // a single refresh on the focused one is enough.
@@ -503,6 +520,8 @@ void UC1Surface::handleButton_(const ButtonEvent& ev)
         const bool cur = GetMediaTrackInfo_Value(tr, "B_PHASE") > 0.5;
         SetMediaTrackInfo_Value(tr, "B_PHASE", cur ? 0.0 : 1.0);
         pushButtonLed_(ev.id, !cur);
+        pushButtonReadout_(ev.id, "Polarity", !cur ? "In" : "Out",
+                           zone::kChannelStripReadout);
         ++stats_.buttonEventsHandled;
         return;
     }
@@ -513,6 +532,8 @@ void UC1Surface::handleButton_(const ButtonEvent& ev)
     //     the plugin's own IN button, not the global bypass.
     //   * No SSL plugin: fall back to bypassing the first track FX.
     if (ev.id == button::kChannelIn) {
+        bool newOn = false;
+        bool acted = false;
         if (bindings.channelMap) {
             const int p = channelInParam_(tr, bindings.channelFxIdx);
             if (p >= 0) {
@@ -521,22 +542,31 @@ void UC1Surface::handleButton_(const ButtonEvent& ev)
                 const double next = (cur > 0.5) ? 0.0 : 1.0;
                 TrackFX_SetParamNormalized(
                     tr, bindings.channelFxIdx, p, next);
-                pushButtonLed_(ev.id, next > 0.5);
+                newOn = next > 0.5;
+                acted = true;
             } else {
                 // Param-by-name lookup failed — degrade gracefully to
                 // plugin-bypass so the button still does *something*.
                 const bool wasEnabled = TrackFX_GetEnabled(
                     tr, bindings.channelFxIdx);
                 TrackFX_SetEnabled(tr, bindings.channelFxIdx, !wasEnabled);
-                pushButtonLed_(ev.id, !wasEnabled);
+                newOn = !wasEnabled;
+                acted = true;
             }
         } else {
             // No SSL plugin — bypass the first track FX if any.
             if (TrackFX_GetCount(tr) > 0) {
                 const bool wasEnabled = TrackFX_GetEnabled(tr, 0);
                 TrackFX_SetEnabled(tr, 0, !wasEnabled);
-                pushButtonLed_(ev.id, !wasEnabled);
+                newOn = !wasEnabled;
+                acted = true;
             }
+        }
+        if (acted) {
+            pushButtonLed_(ev.id, newOn);
+            pushButtonReadout_(ev.id, "Channel Strip",
+                               newOn ? "In" : "Out",
+                               zone::kChannelStripReadout);
         }
         ++stats_.buttonEventsHandled;
         return;
@@ -547,6 +577,9 @@ void UC1Surface::handleButton_(const ButtonEvent& ev)
         const bool wasEnabled = TrackFX_GetEnabled(tr, bindings.busCompFxIdx);
         TrackFX_SetEnabled(tr, bindings.busCompFxIdx, !wasEnabled);
         pushButtonLed_(ev.id, !wasEnabled);
+        pushButtonReadout_(ev.id, "Bus Comp",
+                           !wasEnabled ? "In" : "Out",
+                           zone::kBusCompReadout);
         ++stats_.buttonEventsHandled;
         return;
     }
@@ -561,6 +594,48 @@ void UC1Surface::handleButton_(const ButtonEvent& ev)
     const double next = (cur < 0.5) ? 1.0 : 0.0;
     TrackFX_SetParamNormalized(tr, bindings.channelFxIdx, vst3Param, next);
     pushButtonLed_(ev.id, next > 0.5);
+
+    // Push the post-toggle readout. Most CS buttons are binary
+    // In/Out toggles; EQ Type is the exception (cycles colours/bell
+    // shapes). Use the plugin's formatted string when it produces
+    // something more descriptive than "0"/"1", otherwise fall back
+    // to "In"/"Out".
+    auto labelFor = [](uint8_t id) -> const char* {
+        switch (id) {
+            case button::kHfBell:      return "HF Bell";
+            case button::kEqType:      return "EQ Type";
+            case button::kEqIn:        return "EQ";
+            case button::kLfBell:      return "LF Bell";
+            case button::kFastAttComp: return "Fast Attack";
+            case button::kPeak:        return "Peak";
+            case button::kDynIn:       return "DYN";
+            case button::kExpand:      return "Expander";
+            case button::kFastAttGate: return "Fast Attack";
+            case button::kScListen:    return "S/C Listen";
+        }
+        return "";
+    };
+    char fmtBuf[64] = {0};
+    std::string valueText;
+    if (TrackFX_FormatParamValueNormalized(tr, bindings.channelFxIdx,
+                                           vst3Param, next,
+                                           fmtBuf, sizeof(fmtBuf))
+        && fmtBuf[0])
+    {
+        valueText = fmtBuf;
+        // Plugins commonly format binary params as "0"/"1"; those
+        // read better as "Out"/"In" on the LCD.
+        if (valueText == "0") valueText = "Out";
+        else if (valueText == "1") valueText = "In";
+    } else {
+        valueText = (next > 0.5) ? "In" : "Out";
+    }
+    // S/C Listen is an "On/Off" toggle, not "In/Out".
+    if (ev.id == button::kScListen) {
+        valueText = (next > 0.5) ? "On" : "Off";
+    }
+    pushButtonReadout_(ev.id, labelFor(ev.id), valueText,
+                       zone::kChannelStripReadout);
     ++stats_.buttonEventsHandled;
 }
 
@@ -630,6 +705,34 @@ std::string padValueFixed(std::string_view s, size_t width = 7)
 }
 
 } // namespace
+
+void* UC1Surface::effectiveBcTrack_() const
+{
+    // Validate that bcAnchorTrack_ still references a live track.
+    // REAPER reuses MediaTrack* pointers across project edits, but a
+    // deleted track returns IP_TRACKNUMBER < 0; ValidatePtr2 is the
+    // canonical "is this still a track?" check.
+    if (bcAnchorTrack_ && ValidatePtr2(nullptr, bcAnchorTrack_, "MediaTrack*")) {
+        return bcAnchorTrack_;
+    }
+    // Lazy fallback: first BC-bearing track in the project. Means the
+    // BC carousel shows something useful even before the user touches
+    // the BC encoder.
+    const int n = CountTracks(nullptr);
+    for (int i = 0; i < n; ++i) {
+        MediaTrack* t = GetTrack(nullptr, i);
+        if (lookupBindingsOnTrack(t).busCompMap) return t;
+    }
+    return nullptr;
+}
+
+void UC1Surface::pushButtonReadout_(uint8_t /*buttonId*/, std::string_view label,
+                                    std::string_view value, uint8_t zone)
+{
+    if (!device_) return;
+    auto readout = formatReadout(label, value);
+    device_->send(buildDisplayText(zone, readout, readout.size()));
+}
 
 void UC1Surface::pushKnobReadout_(uint8_t knobId, void* trackRaw, int fxIdx,
                                   int vst3Param, uint8_t zone,
@@ -1048,10 +1151,26 @@ void UC1Surface::refresh()
     // CS slot always shows the focused track's name — Rea-Sixty uses
     // the Channel Strip display as the general "current track" view,
     // whether or not an SSL Channel Strip 2 plugin is on the track.
-    // BC slot stays plugin-specific since its knobs are only
-    // meaningful when Bus Comp 2 is actually present.
+    // BC slot uses the BC anchor (independent of CS focus, persists
+    // across CHANNEL-encoder scrolling). Falls back gracefully when
+    // no BC track exists in the project.
     std::string csName = resolveTrackName();
-    std::string bcName = bindings.busCompMap ? resolveTrackName() : std::string{};
+    void* bcAnchor = effectiveBcTrack_();
+    std::string bcName;
+    if (bcAnchor) {
+        MediaTrack* bcTr = static_cast<MediaTrack*>(bcAnchor);
+        char nameBuf[128] = {0};
+        if (GetSetMediaTrackInfo_String(bcTr, "P_NAME", nameBuf, false)
+            && nameBuf[0])
+        {
+            bcName = nameBuf;
+        } else {
+            int idx = static_cast<int>(GetMediaTrackInfo_Value(bcTr, "IP_TRACKNUMBER"));
+            char fallback[32];
+            std::snprintf(fallback, sizeof(fallback), "Track %d", idx);
+            bcName = fallback;
+        }
+    }
 
     // Diag — one-shot log of what we're pushing so the user can
     // correlate with what the UC1 actually displays.
@@ -1081,17 +1200,33 @@ void UC1Surface::refresh()
         std::snprintf(fallback, sizeof(fallback), "Trk %d", idx + 1);
         return fallback;
     };
-    // BC-name carousel: only populate slots for tracks that host a Bus
-    // Comp 2 (or another BC-mapped plugin). Tracks without BC get an
-    // empty slot so the bottom-right display doesn't duplicate the
-    // main/CS carousel.
-    auto bcNameOfIdx = [&nameOfIdx](int idx) -> std::string {
+    // BC carousel: 3-slot [prev, curr, next] across BC-bearing tracks
+    // ONLY (skips non-BC tracks). Mirrors the CS carousel's UX but
+    // anchored on the BC focus. Curr is the BC anchor; prev/next are
+    // the BC-bearing tracks immediately before/after it in project
+    // order. Slots are empty when no BC track exists in that
+    // direction.
+    std::vector<int> bcIndices;
+    {
         const int n = CountTracks(nullptr);
-        if (idx < 0 || idx >= n) return "";
-        MediaTrack* t = GetTrack(nullptr, idx);
-        const auto b = lookupBindingsOnTrack(t);
-        if (!b.busCompMap) return "";  // no BC on this track → empty slot
-        return nameOfIdx(idx);
+        bcIndices.reserve(n);
+        for (int i = 0; i < n; ++i) {
+            MediaTrack* t = GetTrack(nullptr, i);
+            if (lookupBindingsOnTrack(t).busCompMap) bcIndices.push_back(i);
+        }
+    }
+    int bcAnchorProjIdx = -1;
+    if (bcAnchor) {
+        bcAnchorProjIdx = static_cast<int>(GetMediaTrackInfo_Value(
+            static_cast<MediaTrack*>(bcAnchor), "IP_TRACKNUMBER")) - 1;
+    }
+    int bcRank = -1;
+    for (size_t i = 0; i < bcIndices.size(); ++i) {
+        if (bcIndices[i] == bcAnchorProjIdx) { bcRank = static_cast<int>(i); break; }
+    }
+    auto bcNameAtRank = [&](int rank) -> std::string {
+        if (rank < 0 || rank >= static_cast<int>(bcIndices.size())) return "";
+        return nameOfIdx(bcIndices[rank]);
     };
     int curIdx = -1;
     if (focusedTrack_) {
@@ -1103,9 +1238,9 @@ void UC1Surface::refresh()
     const std::string nextName = nameOfIdx(curIdx + 1);
     device_->send(buildTrackNameTripleSmall(prevName, currName, nextName));
     device_->send(buildTrackNameTripleLarge(
-        bcNameOfIdx(curIdx - 1),
-        bcNameOfIdx(curIdx),
-        bcNameOfIdx(curIdx + 1)));
+        bcNameAtRank(bcRank - 1),
+        bcNameAtRank(bcRank),
+        bcNameAtRank(bcRank + 1)));
 
     // 7-segment position indicator — show the REAPER track number
     // (1-based) on the central red display. Matches the MAIN/ROUTING
@@ -1264,6 +1399,13 @@ void UC1Surface::refresh()
             pushKnobRing_(knobId, visual);
         }
     }
+    // BC knob rings only fire when the focused track itself has a BC
+    // plugin. Pushing them off the BC anchor would dirty the central
+    // 7-segment display: BC Mix's ring cells (bank 0x01, 0x03..0x0C)
+    // and BC Release's (0xFA..0xFF + 0x00) overlap the 7-seg ones/
+    // tens/hundreds cells. The BC carousel + track-name slot persist
+    // across CHANNEL scrolling via bcAnchor; the rings re-sync the
+    // moment the user refocuses a BC track.
     if (tr && bindings.busCompMap) {
         for (uint8_t knobId = 0; knobId < 0x20; ++knobId) {
             const int vst3Param = bindings.busCompMap->knobParam[knobId];
