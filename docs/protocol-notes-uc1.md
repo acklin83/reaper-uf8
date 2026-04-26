@@ -409,44 +409,51 @@ Each UC1 pot has an LED ring around it. Two-bank encoding:
 
 Both banks use role byte `0x00` (not `0x01` which is the LED-mode used elsewhere). Same cell address is written to both banks on every pot tick.
 
-### Pot → cell clusters (from `dual_37..dual_41`)
+### Pot → cell clusters
 
-All UC1 pot sweeps produced FF 13 04 traffic on bank 01 + bank 02 simultaneously. Per-pot cell maps below derived by correlating EP 0x81 IN knob events (`FF 24 02 <id> <delta>`) with EP 0x02 OUT LED writes and bucketing each LED event into the knob whose event window contains it (midpoint-split between consecutive knob-id transitions). The "states" column lists the bank02 brightness values seen — 00/FF only = Position-encoded ring; gradient (0x19/0x33/0x4C/0xFF) = Bipolar (gain knobs) or Additive (threshold/mix/level).
+Per-pot cell maps derived by correlating EP 0x81 IN knob events (`FF 24 02 <id> <delta>`) with EP 0x02 OUT LED writes and bucketing each LED event into the knob whose event window contains it (midpoint-split between consecutive knob-id transitions). The primary source is `uc1_15_knob_channelstrip_sweep.pcapng` — a comprehensive single-session capture covering all 22 CS+Dyn pots with full sweeps. BC pots come from `dual_40_bc_pots.pcapng` plus `uc1_04..07` (per-section captures).
 
-| Knob ID | Knob | Cells (observed) | n | states (bank02) | Encoding | Source |
-|--------:|------|------------------|---|-----------------|----------|--------|
-| `0x00` | Low Pass | `0x95..0x9F` | 11 | 00,FF | Position | dual_37 (cell 0x96 inferred) |
-| `0x01` | High Pass | — | — | — | — | no clean capture |
-| `0x02` | HF Gain | — | — | — | — | no capture |
-| `0x03` | HF Freq | `0x77, 0x78` | 2 | 00,33 | Position (partial) | dual_38 (4 events, too sparse) |
-| `0x04` | HMF Gain | bank01: `0x6C, 0x6E` | 2 | 00,19,33,FF | Bipolar (partial) | dual_38 (sparse) |
-| `0x05` | HMF Freq | `0x61..0x63` | 3 | 00,FF | Position (partial) | dual_38 |
-| `0x06` | HMF Q | `0x55..0x57` | 3 | 00,FF | Position (partial) | dual_38 |
-| `0x07` | LMF Gain | bank01: `0x49` | 1 | 00,19,33,4C,FF | Bipolar (partial) | dual_38 (sparse) |
-| `0x08` | LMF Freq | `0x3D..0x41` | 5 | 00,FF | Position | dual_38 |
-| `0x09` | LMF Q | `0x32..0x35` | 4 | 00,FF | Position | dual_38 |
-| `0x0A` | LF Freq | `0x27..0x2A` | 4 | 00,33 | Position | dual_38 |
-| `0x0B` | LF Gain | bank01: `0x1B, 0x1C` | 2 | 00,19,33,4C,FF | Bipolar (partial) | dual_38 (sparse) |
-| `0x0E` | BC Ratio | `0xD6..0xDC` | 7 | 00,FF | Position | dual_40 |
-| `0x0F` | BC ScHpf | `0xCB..0xD5` | 11 | 00,FF | Position | dual_40 + dual_41 (consistent) |
-| `0x10` | BC Attack | `0xDD..0xE3` | 7 | 00,FF | Position | dual_40 |
-| `0x11` | BC Release | `0xFA..0xFF, 0x00` | 7 | 00,FF | Position (wraps byte boundary) | dual_40 |
-| `0x12` | BC Threshold | — | — | — | — | not captured |
-| `0x13` | BC Makeup | `0xEF..0xF3` | 5 | 0F,19,33,4C,FF | Bipolar (partial) | dual_40 |
-| `0x14` | BC Mix | `0x03..0x0C` | 10 | 19,4C,FF | Additive | dual_40 + dual_41 (consistent) |
-| `0x17` | Gate Release | `0x7C..0x86` | 11 | 00,FF | Position | dual_39 |
-| `0x18` | Gate Hold | `0x87..0x91` | 11 | 00,FF | Position | dual_39 |
-| `0x19` | Gate Threshold | `0x72..0x7B` | 10 | 00,19,4C,FF | Additive | dual_39 (cell 0x71 likely missing — not swept) |
-| `0x1A` | Gate Range | — | — | — | — | not captured |
-| `0x1B` | Comp Release | — | — | — | — | not captured |
-| `0x1C` | Comp Threshold | — | — | — | — | not captured |
-| `0x1D` | Comp Ratio | — | — | — | — | not captured |
-| `0x0C` | CS Input Trim | — | — | — | — | dual_41 misnamed (used 0x0F + 0x14) |
-| `0x16` | CS Fader Level | — | — | — | — | dual_41 misnamed (used 0x0F + 0x14) |
+Encoding inferred from bank02 brightness states + bank01 selection coverage:
+- **`00, FF` only** → Position (single dot, on/off).
+- **Gradient `00, 19, 33, 4C, FF` with bank01 missing one cell mid-range** → Bipolar (gain knob, center LED always lit, bank01 never written to it).
+- **Gradient with bank01 fully covering the range** → Additive (fill from one end).
 
-Implementation in `extension/src/UC1Surface.cpp` (`ringFor()` / `pushKnobRing_`) covers all rows with non-empty cells. The "(partial)" markers mean the user only swept a fraction of the ring during the capture — values in the unswept range will not light an LED. Filling these in needs a fresh capture with full clockwise + counter-clockwise sweeps for each pot.
+| Knob ID | Knob | Cells | n | Encoding | Center | Source |
+|--------:|------|-------|---|----------|--------|--------|
+| `0x00` | Low Pass        | `0x95..0x9F`              | 11 | Position | — | uc1_15 |
+| `0x01` | High Pass       | `0x8A..0x94`              | 11 | Position | — | uc1_15 |
+| `0x02` | HF Gain         | `0x7E..0x88`              | 11 | Bipolar  | `0x83` | uc1_15 |
+| `0x03` | HF Freq         | `0x73..0x7D`              | 11 | Position | — | uc1_15 |
+| `0x04` | HMF Gain        | `0x68..0x72`              | 11 | Bipolar  | `0x6D` | uc1_15 |
+| `0x05` | HMF Freq        | `0x5D..0x67`              | 11 | Position | — | uc1_15 |
+| `0x06` | HMF Q           | `0x52..0x5C`              | 11 | Position | — | uc1_15 |
+| `0x07` | LMF Gain        | `0x45..0x4F`              | 11 | Bipolar  | `0x4A` | uc1_15 |
+| `0x08` | LMF Freq        | `0x3A..0x44`              | 11 | Position | — | uc1_15 |
+| `0x09` | LMF Q           | `0x2F..0x39`              | 11 | Position | — | uc1_15 |
+| `0x0A` | LF Freq         | `0x24..0x2E`              | 11 | Position | — | uc1_15 |
+| `0x0B` | LF Gain         | `0x18..0x22`              | 11 | Bipolar  | `0x1D` | uc1_15 |
+| `0x0C` | CS Input Trim   | `0xC0..0xCA`              | 11 | Bipolar  | `0xC5` | uc1_15 |
+| `0x0E` | BC Ratio        | `0xD6..0xDC`              |  7 | Position | — | dual_40 |
+| `0x0F` | BC ScHpf        | `0xCB..0xD5`              | 11 | Position | — | dual_40 + uc1_07 |
+| `0x10` | BC Attack       | `0xDD..0xE3`              |  7 | Position | — | dual_40 |
+| `0x11` | BC Release      | `0xFA..0xFF, 0x00`        |  7 | Position | — | dual_40 + uc1_06 (wraps byte boundary) |
+| `0x12` | BC Threshold    | `0xE4..0xED`              | 10 | Additive | — | uc1_04 |
+| `0x13` | BC Makeup       | `0xEF..0xF3`              |  5 | Bipolar  | `0xF1` | dual_40 (partial — no full sweep) |
+| `0x14` | BC Mix          | `0x03..0x0C`              | 10 | Additive | — | dual_40 + uc1_07 |
+| `0x16` | CS Fader Level  | `0x0E..0x17`              | 10 | Additive | — | uc1_15 |
+| `0x17` | Gate Release    | `0x7C..0x86`              | 11 | Position | — | uc1_15 |
+| `0x18` | Gate Hold       | `0x87..0x91`              | 11 | Position | — | dual_39 |
+| `0x19` | Gate Threshold  | `0x72..0x7B`              | 10 | Additive | — | uc1_15 |
+| `0x1A` | Gate Range      | `0x62..0x70`              | 15 | Bipolar  | `0x66` | uc1_15 (unusual ring size) |
+| `0x1B` | Comp Release    | `0x50..0x5A`              | 11 | Position | — | uc1_15 |
+| `0x1C` | Comp Threshold  | `0x46..0x4F`              | 10 | Additive | — | uc1_15 |
+| `0x1D` | Comp Ratio      | `0x3B..0x44`              | 10 | Additive | — | uc1_15 |
 
-Tool: `analysis/decode_pot_clusters.py` does the time-bucketing; the per-knob attribution above came from a follow-up script that joined LED events to `FF 24` knob events by midpoint-split. Re-run on any new capture to refine.
+Implementation in `extension/src/UC1Surface.cpp` (`ringFor()` / `pushKnobRing_`). For Bipolar rings, `centerIdx` points at the always-lit center cell; `pushKnobRing_` writes bank02 to all cells but skips bank01 for the center to mirror SSL's wire format (the center LED is "always on" and not part of the arc-fill bitmap).
+
+The only partial entry is BC Makeup — no full sweep capture was made. The 5 cells observed in dual_40 give correct rendering for values near unity, but the ring's true extent (likely 7 cells matching the rest of the BC section) is unconfirmed.
+
+Tool: `analysis/decode_pot_clusters.py` does the basic time-bucketing; the per-knob attribution above used a follow-up script that joined LED events to `FF 24` knob events by midpoint-split.
 
 ### Session log (additions)
 
