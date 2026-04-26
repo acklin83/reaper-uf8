@@ -1746,37 +1746,21 @@ void commitDebouncedTouchReleases()
         const bool wasReported = g_touchReported[s].exchange(false);
         if (!wasReported) continue;
 
-        if (!g_dev) continue;
-        MediaTrack* tr = g_slotTrack[s];
-        if (!tr) continue;
-
-        // cap32 showed SSL360 sending nothing motor-related between touches
-        // — it relied on the next FF 1E position push to "implicitly
-        // re-engage" the motor. In our PM-mode setup that implicit
-        // re-engage doesn't actually move the fader: motor stays limp,
-        // FF 1E commands are accepted as a target update but the fader
-        // doesn't follow.
+        // No host action on release: SSL 360° sends NOTHING between
+        // touches (cap32, 2026-04-25). Sending FF 1E + FF 1D 02 strip 01
+        // here causes the firmware to briefly drive toward a stale
+        // internal target — visible as a "jump to the last REAPER
+        // value" before the motor settles. See memory file
+        // uf8-pm-mode-invariants.md.
         //
-        // Explicit re-engage works as long as we push the current REAPER
-        // position FIRST (so the firmware's target is up-to-date), THEN
-        // send FF 1D 02 strip 01. Without the position-first ordering the
-        // firmware briefly drives toward a stale internal target and the
-        // fader visibly jumps.
-        const uint16_t pb  = linearVolumeToPb(uiVolLinear(tr));
-        const uint8_t  lsb = static_cast<uint8_t>(pb & 0x7F);
-        const uint8_t  msb = static_cast<uint8_t>((pb >> 7) & 0x7F);
-        g_dev->send(uf8::buildFaderPosition(static_cast<uint8_t>(s), lsb, msb));
-        g_dev->send(uf8::buildMotorEnable(static_cast<uint8_t>(s), true));
-        g_lastFaderPb[s] = pb;
-
-        // No host action on release: SSL 360° sends nothing between
-        // touches (cap32, 2026-04-25) — motor stays limp until the next
-        // outbound FF 1E position command, which implicitly re-engages
-        // it. Our motor-echo path in pushZonesForVisibleSlots fires on
-        // the next timer tick if REAPER's volume differs from
-        // g_lastFaderPb[s] (which is stale because we skipped pushes
-        // during touch), so the fader's current position lands without
-        // a stale-target jump.
+        // Instead we let the motor-echo path in pushZonesForVisibleSlots
+        // re-engage on the next timer tick. The g_lastFaderPb[s]
+        // invalidation below guarantees that path fires even when the
+        // touch was a tap with no movement (REAPER's volume unchanged):
+        // dedup would otherwise see pb == g_lastFaderPb and skip the
+        // push, leaving the motor limp until external automation moves
+        // it.
+        g_lastFaderPb[s] = 0xFFFF;
     }
 }
 
