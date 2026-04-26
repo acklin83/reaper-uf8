@@ -173,6 +173,15 @@ LedColourFrames buildLedColourPair(uint8_t strip, LedClass cls, bool on,
 // Convenience overload — uses ledColourClassDefault(cls) for the colour.
 LedColourFrames buildLedColourPair(uint8_t strip, LedClass cls, bool on);
 
+// Selected-strip bitmask. cap33 shows SSL360 sending this on every
+// selection change in PM Layer + DAW Colour mode — it's what tells the
+// firmware which SEL LED is "the lit one", so the stored colour bytes
+// actually render as track colour. Without it the firmware falls back
+// to white for any newly-selected SEL.
+//   FF 66 03 06 <mask_lo> <mask_hi> CKSUM    (7 bytes)
+// 16-bit LE bitmask, bit `s` = strip s selected (0-indexed, leftmost = 0).
+std::vector<uint8_t> buildSelectedStripBitmask(uint16_t mask);
+
 // Channel Number Zone — the small numeric digit top-left of each scribble
 // strip's color bar (REAPER track index rendered as ASCII digits).
 //   FF 66 <len> 14 <strip> <N ASCII chars> CKSUM    (len = N + 2)

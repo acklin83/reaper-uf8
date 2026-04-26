@@ -614,6 +614,23 @@ void sendLedFrames(uf8::LedColourFrames frames)
     g_dev->send(std::move(frames.ff39));
 }
 
+// Push the selected-strip bitmask. cap33 shows this is the firmware
+// trigger for SEL DAW-Colour rendering: without it the LED falls back
+// to white-on-select. The mask is built from REAPER's I_SELECTED state
+// for each currently-visible strip.
+void pushSelectedStripBitmask()
+{
+    if (!g_dev) return;
+    uint16_t mask = 0;
+    for (int s = 0; s < 8; ++s) {
+        MediaTrack* t = g_slotTrack[s];
+        if (t && GetMediaTrackInfo_Value(t, "I_SELECTED") > 0.5) {
+            mask |= static_cast<uint16_t>(1u << s);
+        }
+    }
+    g_dev->send(uf8::buildSelectedStripBitmask(mask));
+}
+
 void sendLed(LedClass cls, MediaTrack* tr, bool on)
 {
     if (!g_dev) return;
@@ -623,6 +640,7 @@ void sendLed(LedClass cls, MediaTrack* tr, bool on)
         const uf8::LedClass devCls = toUf8LedClass(cls);
         const uf8::LedColour col = ledColourFor(cls, tr);
         sendLedFrames(uf8::buildLedColourPair(static_cast<uint8_t>(s), devCls, on, col));
+        if (cls == LedClass::Sel) pushSelectedStripBitmask();
         return;
     }
 }
@@ -1477,6 +1495,20 @@ void pushZonesForVisibleSlots()
                                                       ledColourFor(LedClass::Solo, t)));
                 (void)arm;
             }
+        }
+        // After bank shift, g_slotTrack hasn't been refreshed yet (that
+        // happens in the next loop), so compute the bitmask directly from
+        // the new bank's tracks instead of pushSelectedStripBitmask().
+        if (g_dev) {
+            uint16_t mask = 0;
+            for (int s = 0; s < 8; ++s) {
+                const int rs = s + bankOffset;
+                MediaTrack* t = (rs < trackCount) ? GetTrack(nullptr, rs) : nullptr;
+                if (t && GetMediaTrackInfo_Value(t, "I_SELECTED") > 0.5) {
+                    mask |= static_cast<uint16_t>(1u << s);
+                }
+            }
+            g_dev->send(uf8::buildSelectedStripBitmask(mask));
         }
     }
 

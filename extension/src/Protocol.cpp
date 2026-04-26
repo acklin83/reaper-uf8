@@ -276,6 +276,18 @@ LedColourFrames buildLedColourPair(uint8_t strip, LedClass cls, bool on)
     return buildLedColourPair(strip, cls, on, ledColourClassDefault(cls));
 }
 
+std::vector<uint8_t> buildSelectedStripBitmask(uint16_t mask)
+{
+    // FF 66 03 06 <lo> <hi> CKSUM
+    std::vector<uint8_t> frame{
+        0xFF, 0x66, 0x03, 0x06,
+        static_cast<uint8_t>(mask & 0xFF),
+        static_cast<uint8_t>((mask >> 8) & 0xFF)};
+    std::span<const uint8_t> payload{frame.data() + 1, frame.size() - 1};
+    frame.push_back(checksum(payload));
+    return frame;
+}
+
 std::vector<uint8_t> buildChannelNumber(uint8_t strip, std::string_view digits)
 {
     // FF 66 <len> 14 <strip> <N ASCII> CKSUM  where len = N + 2
