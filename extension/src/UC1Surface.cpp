@@ -894,12 +894,13 @@ constexpr uint8_t kFaderLevelCells[] = {0x0E,0x0F,0x10,0x11};
 constexpr uint8_t kGateReleaseCells[]   = {0x7C,0x7D,0x7E,0x7F,0x80,0x81,0x82,0x83,0x84,0x85,0x86};
 constexpr uint8_t kGateHoldCells[]      = {0x87,0x88,0x89,0x8A,0x8B,0x8C,0x8D,0x8E,0x8F,0x90,0x91};
 constexpr uint8_t kGateThresholdCells[] = {0x72,0x73,0x74,0x75,0x76,0x77,0x78,0x79,0x7A,0x7B};
-// 11-cell ring 0x61..0x6B. The 5 cells above (0x6C..0x70) are the
-// Gate GR meter, NOT part of this ring — the captures showed both
-// because they're adjacent on the bus and SSL360 fired both during
-// the sweep when audio happened to drive GR. (Per UC1 user manual:
-// each Dyn section has its own 5-LED GR strip above the Range pot.)
-constexpr uint8_t kGateRangeCells[]     = {0x61,0x62,0x63,0x64,0x65,0x66,0x67,0x68,0x69,0x6A,0x6B};
+// Gate Range = 11-cell ring 0x66..0x70. The 5 cells BELOW the ring
+// (0x61..0x65) are the **Gate GR meter** — the right-hand of the two
+// 5-LED GR strips on the Channel Strip Dynamics section (Comp GR is
+// the left strip at 0x5C..0x60). Earlier guess that the ring was
+// 0x61..0x6B was wrong — the dot bled into the Gate GR strip at
+// CCW positions because we were addressing GR cells as ring cells.
+constexpr uint8_t kGateRangeCells[]     = {0x66,0x67,0x68,0x69,0x6A,0x6B,0x6C,0x6D,0x6E,0x6F,0x70};
 constexpr uint8_t kCompReleaseCells[]   = {0x50,0x51,0x52,0x53,0x54,0x55,0x56,0x57,0x58,0x59,0x5A};
 constexpr uint8_t kCompThresholdCells[] = {0x46,0x47,0x48,0x49,0x4A,0x4B,0x4C,0x4D,0x4E,0x4F};
 constexpr uint8_t kCompRatioCells[]     = {0x3B,0x3C,0x3D,0x3E,0x3F,0x40,0x41,0x42,0x43,0x44};
@@ -1009,14 +1010,31 @@ void UC1Surface::pushKnobRing_(uint8_t knobId, double normalized)
         last.assign(def->nCells, 0xFE);  // "unset" sentinel
     }
 
-    // Single-dot Position rendering for ALL pots for now. Gradient
-    // brightness for the bipolar pots is reserved for a follow-up
-    // once the basic positions are visually verified.
-    std::vector<uint8_t> target(def->nCells, 0);
-    int idx = static_cast<int>(normalized * (def->nCells - 1) + 0.5);
+    // Position math: continuous f, rounded to dot index for bank 0x01.
+    const double f = normalized * (def->nCells - 1);
+    int idx = static_cast<int>(f + 0.5);
     if (idx < 0) idx = 0;
     if (idx >= def->nCells) idx = def->nCells - 1;
+    std::vector<uint8_t> target(def->nCells, 0);
     target[idx] = 1;
+
+    // Bank 0x02 brightness: Position pots get a single full-bright cell
+    // at the dot; Gradient pots fade with distance from the continuous
+    // value position {0xFF, 0x4C, 0x19, 0x00} matching SSL360's
+    // captured brightness states.
+    std::vector<uint8_t> brTarget(def->nCells, 0);
+    if (def->mode == RingMode::Gradient) {
+        for (int i = 0; i < def->nCells; ++i) {
+            const double d = std::abs(static_cast<double>(i) - f);
+            uint8_t v = 0x00;
+            if      (d <= 0.5) v = 0xFF;
+            else if (d <= 1.0) v = 0x4C;
+            else if (d <= 1.5) v = 0x19;
+            brTarget[i] = v;
+        }
+    } else {
+        brTarget[idx] = 0xFF;
+    }
 
     // Dual-bank encoding per cell. Bank 0x01 = selection 0/1, bank 0x02
     // = brightness 0/FF.
