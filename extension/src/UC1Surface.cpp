@@ -864,19 +864,25 @@ namespace {
 // bucketed by knob-id transitions.
 struct RingDef { const uint8_t* cells; int nCells; };
 
-// ---- EQ section (12 knobs, all Position) ----
+// ---- EQ section (12 knobs) ----
+// uc1_29 (2026-04-26) re-confirmed cell maps. Gain pots are bipolar:
+// the centre LED (0 dB indicator) is driven separately and OMITTED from
+// the ring-cell list — sweeping past the centre showed cell 0x83 (HF
+// Gain), 0x6D (HMF Gain), 0x4A (LMF Gain), 0x1D (LF Gain) never toggled
+// while the surrounding cells did. Skipping the centre keeps the static
+// 0-dB indicator alone undisturbed.
 constexpr uint8_t kLpfCells[]    = {0x95,0x96,0x97,0x98,0x99,0x9A,0x9B,0x9C,0x9D,0x9E,0x9F};
 constexpr uint8_t kHpfCells[]    = {0x8A,0x8B,0x8C,0x8D,0x8E,0x8F,0x90,0x91,0x92,0x93,0x94};
-constexpr uint8_t kHfGainCells[] = {0x7E,0x7F,0x80,0x81,0x82,0x83,0x84,0x85,0x86,0x87,0x88};
+constexpr uint8_t kHfGainCells[] = {0x7E,0x7F,0x80,0x81,0x82,     0x84,0x85,0x86,0x87,0x88};
 constexpr uint8_t kHfFreqCells[] = {0x73,0x74,0x75,0x76,0x77,0x78,0x79,0x7A,0x7B,0x7C,0x7D};
-constexpr uint8_t kHmfGainCells[]= {0x68,0x69,0x6A,0x6B,0x6C,0x6D,0x6E,0x6F,0x70,0x71,0x72};
+constexpr uint8_t kHmfGainCells[]= {0x68,0x69,0x6A,0x6B,0x6C,     0x6E,0x6F,0x70,0x71,0x72};
 constexpr uint8_t kHmfFreqCells[]= {0x5D,0x5E,0x5F,0x60,0x61,0x62,0x63,0x64,0x65,0x66,0x67};
 constexpr uint8_t kHmfQCells[]   = {0x52,0x53,0x54,0x55,0x56,0x57,0x58,0x59,0x5A,0x5B,0x5C};
-constexpr uint8_t kLmfGainCells[]= {0x45,0x46,0x47,0x48,0x49,0x4A,0x4B,0x4C,0x4D,0x4E,0x4F};
+constexpr uint8_t kLmfGainCells[]= {0x45,0x46,0x47,0x48,0x49,     0x4B,0x4C,0x4D,0x4E,0x4F};
 constexpr uint8_t kLmfFreqCells[]= {0x3A,0x3B,0x3C,0x3D,0x3E,0x3F,0x40,0x41,0x42,0x43,0x44};
 constexpr uint8_t kLmfQCells[]   = {0x2F,0x30,0x31,0x32,0x33,0x34,0x35,0x36,0x37,0x38,0x39};
 constexpr uint8_t kLfFreqCells[] = {0x24,0x25,0x26,0x27,0x28,0x29,0x2A,0x2B,0x2C,0x2D,0x2E};
-constexpr uint8_t kLfGainCells[] = {0x18,0x19,0x1A,0x1B,0x1C,0x1D,0x1E,0x1F,0x20,0x21,0x22};
+constexpr uint8_t kLfGainCells[] = {0x18,0x19,0x1A,0x1B,0x1C,     0x1E,0x1F,0x20,0x21,0x22};
 
 // ---- Channel Strip I/O (Input Trim + Fader Level) ----
 constexpr uint8_t kInputTrimCells[]  = {0xC0,0xC1,0xC2,0xC3,0xC4,0xC5,0xC6,0xC7,0xC8,0xC9,0xCA};
@@ -886,7 +892,10 @@ constexpr uint8_t kFaderLevelCells[] = {0x0E,0x0F,0x10,0x11,0x12,0x13,0x14,0x15,
 constexpr uint8_t kGateReleaseCells[]   = {0x7C,0x7D,0x7E,0x7F,0x80,0x81,0x82,0x83,0x84,0x85,0x86};
 constexpr uint8_t kGateHoldCells[]      = {0x87,0x88,0x89,0x8A,0x8B,0x8C,0x8D,0x8E,0x8F,0x90,0x91};
 constexpr uint8_t kGateThresholdCells[] = {0x72,0x73,0x74,0x75,0x76,0x77,0x78,0x79,0x7A,0x7B};
-constexpr uint8_t kGateRangeCells[]     = {0x62,0x63,0x64,0x65,0x66,0x67,0x68,0x69,0x6A,0x6B,0x6C,0x6D,0x6E,0x6F,0x70};
+// uc1_28 confirms 0x66 is NOT in the Gate Range ring — likely a meter
+// register at that address. The ring has 14 contiguous cells split
+// around 0x66.
+constexpr uint8_t kGateRangeCells[]     = {0x62,0x63,0x64,0x65,     0x67,0x68,0x69,0x6A,0x6B,0x6C,0x6D,0x6E,0x6F,0x70};
 constexpr uint8_t kCompReleaseCells[]   = {0x50,0x51,0x52,0x53,0x54,0x55,0x56,0x57,0x58,0x59,0x5A};
 constexpr uint8_t kCompThresholdCells[] = {0x46,0x47,0x48,0x49,0x4A,0x4B,0x4C,0x4D,0x4E,0x4F};
 constexpr uint8_t kCompRatioCells[]     = {0x3B,0x3C,0x3D,0x3E,0x3F,0x40,0x41,0x42,0x43,0x44};
@@ -907,22 +916,22 @@ const RingDef* ringFor(uint8_t knobId)
 {
     static const RingDef kLpf       {kLpfCells,        11};
     static const RingDef kHpf       {kHpfCells,        11};
-    static const RingDef kHfGain    {kHfGainCells,     11};
+    static const RingDef kHfGain    {kHfGainCells,     10};  // centre cell 0x83 omitted
     static const RingDef kHfFreq    {kHfFreqCells,     11};
-    static const RingDef kHmfGain   {kHmfGainCells,    11};
+    static const RingDef kHmfGain   {kHmfGainCells,    10};  // centre cell 0x6D omitted
     static const RingDef kHmfFreq   {kHmfFreqCells,    11};
     static const RingDef kHmfQ      {kHmfQCells,       11};
-    static const RingDef kLmfGain   {kLmfGainCells,    11};
+    static const RingDef kLmfGain   {kLmfGainCells,    10};  // centre cell 0x4A omitted
     static const RingDef kLmfFreq   {kLmfFreqCells,    11};
     static const RingDef kLmfQ      {kLmfQCells,       11};
     static const RingDef kLfFreq    {kLfFreqCells,     11};
-    static const RingDef kLfGain    {kLfGainCells,     11};
+    static const RingDef kLfGain    {kLfGainCells,     10};  // centre cell 0x1D omitted
     static const RingDef kInputTrim {kInputTrimCells,  11};
     static const RingDef kFaderLevel{kFaderLevelCells, 10};
     static const RingDef kGateRelease  {kGateReleaseCells,   11};
     static const RingDef kGateHold     {kGateHoldCells,      11};
     static const RingDef kGateThr      {kGateThresholdCells, 10};
-    static const RingDef kGateRange    {kGateRangeCells,     15};
+    static const RingDef kGateRange    {kGateRangeCells,     14};
     static const RingDef kCompRelease  {kCompReleaseCells,   11};
     static const RingDef kCompThr      {kCompThresholdCells, 10};
     static const RingDef kCompRatio    {kCompRatioCells,     10};
@@ -998,9 +1007,20 @@ void UC1Surface::pushKnobRing_(uint8_t knobId, double normalized)
     if (idx >= def->nCells) idx = def->nCells - 1;
     target[idx] = 1;
 
-    // Dual-bank encoding per cell. Bank 0x01 (role 0x00) = selection 0/1,
-    // bank 0x02 (role 0x00) = brightness 0/FF. Both banks always written.
-    auto make = [](uint8_t bank, uint8_t cell, uint8_t state) {
+    // Dual-bank encoding per cell. Bank 0x01 = selection 0/1, bank 0x02
+    // = brightness 0/FF.
+    //
+    // **byte5 (the "role" byte) is section-dependent**, decoded from
+    // SSL360 captures uc1_28 + uc1_29 + dual_40:
+    //   - EQ pots (knobs 0x00..0x0B) → byte5 = 0x00
+    //   - BC pots (knobs 0x0E..0x14) → byte5 = 0x00
+    //   - Dyn/Gate pots (knobs 0x17..0x1D) → byte5 = 0x01
+    //   - I/O V-Pots (0x0C, 0x16): TBD (default 0x00)
+    // The two byte5 values address distinct LED groups on bank 0x01/0x02
+    // — they are NOT the same physical LEDs, even when cell numbers
+    // overlap. Writing the wrong byte5 hits a non-displayed register.
+    const uint8_t b5 = (knobId >= 0x17 && knobId <= 0x1D) ? 0x01 : 0x00;
+    auto make = [b5](uint8_t bank, uint8_t cell, uint8_t state) {
         std::vector<uint8_t> f;
         f.reserve(8);
         f.push_back(0xFF);
@@ -1008,7 +1028,7 @@ void UC1Surface::pushKnobRing_(uint8_t knobId, double normalized)
         f.push_back(0x04);
         f.push_back(bank);
         f.push_back(cell);
-        f.push_back(0x00);     // role
+        f.push_back(b5);
         f.push_back(state);
         uint32_t sum = 0;
         for (size_t k = 1; k < f.size(); ++k) sum += f[k];
