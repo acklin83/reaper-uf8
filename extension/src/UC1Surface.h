@@ -48,6 +48,14 @@ public:
     // REAPER's SetTrackSelected callback or similar.
     void setFocusedTrack(void* track /*MediaTrack**/);
 
+    // Force a full re-push of every cached LED state on the next refresh.
+    // Used to recover from device init-flood overlap at startup: our
+    // initial refresh() can race with the firmware's own LED clear that
+    // fires shortly after open(), leaving rings in stale positions until
+    // the next focus change. Calling this drops the cache so the next
+    // refresh writes every cell from scratch.
+    void invalidateCache();
+
     // Accessor so REAPER callbacks (e.g. SetSurfaceMute) can gate their
     // UC1 refreshes on whether the event concerns the focused track.
     void* focusedTrack() const { return focusedTrack_; }

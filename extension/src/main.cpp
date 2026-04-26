@@ -1958,8 +1958,25 @@ void pushUf8GlobalLeds()
     g_globalLedsInit = true;
 }
 
+// Tick counter since extension load. Used to fire a "settle-time"
+// re-refresh on the UC1 a moment after open, so the LED rings start
+// in correct state even if the firmware's own init flood overwrote
+// our first refresh. REAPER's onTimer fires at ~30 Hz, so 60 ticks
+// ≈ 2 s.
+int g_uc1RefireAtTick = 60;
+int g_tickCounter = 0;
+
 void onTimer()
 {
+    ++g_tickCounter;
+    if (g_tickCounter == g_uc1RefireAtTick && g_uc1_surface) {
+        // Force a full LED re-push once the device + REAPER project
+        // are settled. Without this, the first refresh races with
+        // UC1's init-flood and leaves rings stuck until the next
+        // focus change.
+        g_uc1_surface->invalidateCache();
+        g_uc1_surface->refresh();
+    }
     drainInputQueue();
     commitDebouncedTouchReleases();
     if (g_sync) g_sync->refresh(reaperColorForVisibleSlot);

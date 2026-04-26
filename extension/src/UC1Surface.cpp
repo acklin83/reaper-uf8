@@ -147,6 +147,11 @@ void UC1Surface::setFocusedTrack(void* track)
     refresh();
 }
 
+void UC1Surface::invalidateCache()
+{
+    ringCellCache_.clear();
+}
+
 int UC1Surface::poll()
 {
     std::deque<KnobEvent>   knobs;
@@ -1069,14 +1074,18 @@ void UC1Surface::pushKnobRing_(uint8_t knobId, double normalized)
         f.push_back(static_cast<uint8_t>(sum & 0xFF));
         return f;
     };
+    // Position-mode pots dedup against the cached selection state;
+    // Gradient-mode pots re-emit every cell on each push because the
+    // brightness target depends on the continuous value position and
+    // the cache only stores selection (one byte per cell).
     for (int i = 0; i < def->nCells; ++i) {
-        if (last[i] == target[i]) continue;
+        const bool grad = (def->mode == RingMode::Gradient);
+        if (!grad && last[i] == target[i]) continue;
         last[i] = target[i];
         const uint8_t cell = def->cells[i];
         const uint8_t selState = target[i] ? 0x01 : 0x00;
-        const uint8_t brState  = target[i] ? 0xFF : 0x00;
         device_->send(make(0x01, cell, selState));
-        device_->send(make(0x02, cell, brState));
+        device_->send(make(0x02, cell, brTarget[i]));
     }
 }
 
