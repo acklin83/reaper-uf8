@@ -1009,34 +1009,14 @@ void UC1Surface::pushKnobRing_(uint8_t knobId, double normalized)
         last.assign(def->nCells, 0xFE);  // "unset" sentinel
     }
 
-    // Two render modes per RingDef:
-    //   Position — single bright dot at the LED nearest the value.
-    //   Gradient — dot on bank 0x01, smooth fade on bank 0x02 with
-    //              {0xFF, 0x4C, 0x19, 0x00} brightness based on
-    //              distance from the (continuous) target index.
-    // For both modes bank 0x01 carries a single 1 at the dot cell.
-    const double f = normalized * (def->nCells - 1);
-    int idx = static_cast<int>(f + 0.5);
+    // Single-dot Position rendering for ALL pots for now. Gradient
+    // brightness for the bipolar pots is reserved for a follow-up
+    // once the basic positions are visually verified.
+    std::vector<uint8_t> target(def->nCells, 0);
+    int idx = static_cast<int>(normalized * (def->nCells - 1) + 0.5);
     if (idx < 0) idx = 0;
     if (idx >= def->nCells) idx = def->nCells - 1;
-    std::vector<uint8_t> selTarget(def->nCells, 0);
-    selTarget[idx] = 1;
-
-    // Bank 0x02 brightness target depends on mode.
-    std::vector<uint8_t> brTarget(def->nCells, 0);
-    if (def->mode == RingMode::Gradient) {
-        // 3-step fade: bright at the dot, dim at adjacent cells.
-        for (int i = 0; i < def->nCells; ++i) {
-            const double d = std::abs(static_cast<double>(i) - f);
-            uint8_t v = 0x00;
-            if      (d <= 0.5) v = 0xFF;
-            else if (d <= 1.0) v = 0x4C;
-            else if (d <= 1.5) v = 0x19;
-            brTarget[i] = v;
-        }
-    } else {
-        brTarget[idx] = 0xFF;
-    }
+    target[idx] = 1;
 
     // Dual-bank encoding per cell. Bank 0x01 = selection 0/1, bank 0x02
     // = brightness 0/FF.
@@ -1071,22 +1051,14 @@ void UC1Surface::pushKnobRing_(uint8_t knobId, double normalized)
         f.push_back(static_cast<uint8_t>(sum & 0xFF));
         return f;
     };
-    // Cache key per cell encodes both selection and brightness so we
-    // dedup across mode switches: low nibble = sel (0/1), high byte =
-    // brightness state (0/0x19/0x4C/0xFF).
     for (int i = 0; i < def->nCells; ++i) {
-        const uint16_t want = static_cast<uint16_t>(selTarget[i])
-                            | (static_cast<uint16_t>(brTarget[i]) << 8);
-        // last is uint8_t — pack: low byte = sel, ...need to expand.
-        // Re-purpose: store (sel | (br high bit hash)) won't be unique.
-        // Instead: simply always re-emit for Gradient mode (low frame
-        // count anyway), and dedup Position mode like before.
-        if (def->mode == RingMode::Position && last[i] == selTarget[i]) continue;
-        last[i] = selTarget[i];
+        if (last[i] == target[i]) continue;
+        last[i] = target[i];
         const uint8_t cell = def->cells[i];
-        device_->send(make(0x01, cell, selTarget[i] ? 0x01 : 0x00));
-        device_->send(make(0x02, cell, brTarget[i]));
-        (void)want;
+        const uint8_t selState = target[i] ? 0x01 : 0x00;
+        const uint8_t brState  = target[i] ? 0xFF : 0x00;
+        device_->send(make(0x01, cell, selState));
+        device_->send(make(0x02, cell, brState));
     }
 }
 
