@@ -901,16 +901,20 @@ constexpr uint8_t kCompThresholdCells[] = {0x46,0x47,0x48,0x49,0x4A,0x4B,0x4C,0x
 constexpr uint8_t kCompRatioCells[]     = {0x3B,0x3C,0x3D,0x3E,0x3F,0x40,0x41,0x42,0x43,0x44};
 
 // ---- Bus Comp section (7 knobs) ----
+// Cell maps confirmed in uc1_31 (2026-04-26). All BC pots use byte5=0x00
+// EXCEPT BC Mix which uses byte5=0x01 (a quirk — Mix shares the address
+// space with Dyn/Gate rings rather than the rest of BC).
 constexpr uint8_t kBcRatioCells[]    = {0xD6,0xD7,0xD8,0xD9,0xDA,0xDB,0xDC};
 constexpr uint8_t kBcScHpfCells[]    = {0xCB,0xCC,0xCD,0xCE,0xCF,0xD0,0xD1,0xD2,0xD3,0xD4,0xD5};
 constexpr uint8_t kBcAttackCells[]   = {0xDD,0xDE,0xDF,0xE0,0xE1,0xE2,0xE3};
-// BC Release wraps the byte boundary (0xFA..0xFF then 0x00).
-constexpr uint8_t kBcReleaseCells[]  = {0xFA,0xFB,0xFC,0xFD,0xFE,0xFF,0x00};
+// BC Release: 6 cells, NO byte-boundary wrap to 0x00 — old guess was wrong.
+constexpr uint8_t kBcReleaseCells[]  = {0xFA,0xFB,0xFC,0xFD,0xFE,0xFF};
 constexpr uint8_t kBcThresholdCells[]= {0xE4,0xE5,0xE6,0xE7,0xE8,0xE9,0xEA,0xEB,0xEC,0xED};
-// BC Makeup — only 5 cells captured (no full sweep). Likely 7 cells
-// on the hardware. Re-capture to confirm.
-constexpr uint8_t kBcMakeupCells[]   = {0xEF,0xF0,0xF1,0xF2,0xF3};
-constexpr uint8_t kBcMixCells[]      = {0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0A,0x0B,0x0C};
+// BC Makeup — full 10-cell ring per uc1_31 (was 5 in old guess).
+constexpr uint8_t kBcMakeupCells[]   = {0xF0,0xF1,0xF2,0xF3,0xF4,0xF5,0xF6,0xF7,0xF8,0xF9};
+// BC Mix — byte5=0x01, 9 cells 0x03..0x0B (uc1_31b full sweep). Old
+// guess including 0x0C was wrong.
+constexpr uint8_t kBcMixCells[]      = {0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0A,0x0B};
 
 const RingDef* ringFor(uint8_t knobId)
 {
@@ -938,10 +942,10 @@ const RingDef* ringFor(uint8_t knobId)
     static const RingDef kBcRatio   {kBcRatioCells,     7};
     static const RingDef kBcScHpf   {kBcScHpfCells,    11};
     static const RingDef kBcAttack  {kBcAttackCells,    7};
-    static const RingDef kBcRelease {kBcReleaseCells,   7};
+    static const RingDef kBcRelease {kBcReleaseCells,   6};
     static const RingDef kBcThr     {kBcThresholdCells,10};
-    static const RingDef kBcMakeup  {kBcMakeupCells,    5};
-    static const RingDef kBcMix     {kBcMixCells,      10};
+    static const RingDef kBcMakeup  {kBcMakeupCells,   10};
+    static const RingDef kBcMix     {kBcMixCells,       9};
 
     switch (knobId) {
         // EQ
@@ -1013,13 +1017,16 @@ void UC1Surface::pushKnobRing_(uint8_t knobId, double normalized)
     // **byte5 (the "role" byte) is section-dependent**, decoded from
     // SSL360 captures uc1_28 + uc1_29 + dual_40:
     //   - EQ pots (knobs 0x00..0x0B) → byte5 = 0x00
-    //   - BC pots (knobs 0x0E..0x14) → byte5 = 0x00
+    //   - BC pots (knobs 0x0E..0x13) → byte5 = 0x00
+    //   - BC Mix (knob 0x14) → byte5 = 0x01 (quirk — Mix is in the
+    //     same address space as Dyn/Gate, not the rest of BC)
     //   - Dyn/Gate pots (knobs 0x17..0x1D) → byte5 = 0x01
     //   - I/O V-Pots (0x0C, 0x16): TBD (default 0x00)
     // The two byte5 values address distinct LED groups on bank 0x01/0x02
     // — they are NOT the same physical LEDs, even when cell numbers
     // overlap. Writing the wrong byte5 hits a non-displayed register.
-    const uint8_t b5 = (knobId >= 0x17 && knobId <= 0x1D) ? 0x01 : 0x00;
+    const uint8_t b5 = (knobId == knob::kBCMix
+                        || (knobId >= 0x17 && knobId <= 0x1D)) ? 0x01 : 0x00;
     auto make = [b5](uint8_t bank, uint8_t cell, uint8_t state) {
         std::vector<uint8_t> f;
         f.reserve(8);
