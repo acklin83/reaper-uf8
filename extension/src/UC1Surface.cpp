@@ -394,22 +394,10 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
     const double visual = map->inverted[ev.id] ? (1.0 - next) : next;
     pushKnobRing_(ev.id, visual);
 
-    // Fader Level (0x0E..0x17), BC Mix (0x03..0x0C) and BC Release
-    // (0xFA..0xFF + 0x00) ring cells overlap the central 7-segment
-    // display on bank 0x01. Moving those knobs corrupts the digit
-    // segments — repaint the 7-seg with the focused track number so
-    // the position indicator stays legible.
-    if (ev.id == knob::kCSFaderLevel
-        || ev.id == knob::kBCMix
-        || ev.id == knob::kBCRelease)
-    {
-        const int idx = static_cast<int>(GetMediaTrackInfo_Value(
-            tr, "IP_TRACKNUMBER"));
-        const unsigned int v = idx < 0 ? 0u : static_cast<unsigned int>(idx);
-        for (const auto& frame : buildSevenSeg(v)) {
-            device_->send(frame);
-        }
-    }
+    // (Old defensive 7-seg repaint after FaderLevel/BCMix/BCRelease ring
+    // moves removed — uc1_31/32 confirmed those rings actually live on
+    // byte5=0x01 while the 7-seg writes on byte5=0x00, so the cell
+    // numbers collide but the LEDs do not.)
 
     if (logThis) {
         char pname[64] = {0};
@@ -884,9 +872,15 @@ constexpr uint8_t kLmfQCells[]   = {0x2F,0x30,0x31,0x32,0x33,0x34,0x35,0x36,0x37
 constexpr uint8_t kLfFreqCells[] = {0x24,0x25,0x26,0x27,0x28,0x29,0x2A,0x2B,0x2C,0x2D,0x2E};
 constexpr uint8_t kLfGainCells[] = {0x18,0x19,0x1A,0x1B,0x1C,     0x1E,0x1F,0x20,0x21,0x22};
 
-// ---- Channel Strip I/O (Input Trim + Fader Level) ----
-constexpr uint8_t kInputTrimCells[]  = {0xC0,0xC1,0xC2,0xC3,0xC4,0xC5,0xC6,0xC7,0xC8,0xC9,0xCA};
-constexpr uint8_t kFaderLevelCells[] = {0x0E,0x0F,0x10,0x11,0x12,0x13,0x14,0x15,0x16,0x17};
+// ---- Channel Strip I/O (Input Trim + Fader Level / Output Gain) ----
+// uc1_32: Input Trim is bipolar (centre-LED 0xC5 omitted, like EQ Gains),
+// 3-step brightness, byte5=0x00.
+constexpr uint8_t kInputTrimCells[]  = {0xC0,0xC1,0xC2,0xC3,0xC4,     0xC6,0xC7,0xC8,0xC9,0xCA};
+// Fader Level / Output Gain — knob 0x16, byte5=0x01. Confirmed in
+// uc1_32c full sweep: only 4 ring LEDs (cells 0x0E..0x11), each with
+// 3-step brightness {0x19, 0x4C, 0xFF} on bank 0x02. Old guess of 10
+// cells (0x0E..0x17) was wrong.
+constexpr uint8_t kFaderLevelCells[] = {0x0E,0x0F,0x10,0x11};
 
 // ---- Dyn / Gate section (7 knobs) ----
 constexpr uint8_t kGateReleaseCells[]   = {0x7C,0x7D,0x7E,0x7F,0x80,0x81,0x82,0x83,0x84,0x85,0x86};
@@ -930,8 +924,8 @@ const RingDef* ringFor(uint8_t knobId)
     static const RingDef kLmfQ      {kLmfQCells,       11};
     static const RingDef kLfFreq    {kLfFreqCells,     11};
     static const RingDef kLfGain    {kLfGainCells,     10};  // centre cell 0x1D omitted
-    static const RingDef kInputTrim {kInputTrimCells,  11};
-    static const RingDef kFaderLevel{kFaderLevelCells, 10};
+    static const RingDef kInputTrim {kInputTrimCells,  10};  // centre 0xC5 omitted
+    static const RingDef kFaderLevel{kFaderLevelCells,  4};
     static const RingDef kGateRelease  {kGateReleaseCells,   11};
     static const RingDef kGateHold     {kGateHoldCells,      11};
     static const RingDef kGateThr      {kGateThresholdCells, 10};
@@ -1017,15 +1011,17 @@ void UC1Surface::pushKnobRing_(uint8_t knobId, double normalized)
     // **byte5 (the "role" byte) is section-dependent**, decoded from
     // SSL360 captures uc1_28 + uc1_29 + dual_40:
     //   - EQ pots (knobs 0x00..0x0B) → byte5 = 0x00
+    //   - Input Trim (0x0C) → byte5 = 0x00
     //   - BC pots (knobs 0x0E..0x13) → byte5 = 0x00
     //   - BC Mix (knob 0x14) → byte5 = 0x01 (quirk — Mix is in the
     //     same address space as Dyn/Gate, not the rest of BC)
+    //   - Fader Level / Output Gain (knob 0x16) → byte5 = 0x01
     //   - Dyn/Gate pots (knobs 0x17..0x1D) → byte5 = 0x01
-    //   - I/O V-Pots (0x0C, 0x16): TBD (default 0x00)
     // The two byte5 values address distinct LED groups on bank 0x01/0x02
     // — they are NOT the same physical LEDs, even when cell numbers
     // overlap. Writing the wrong byte5 hits a non-displayed register.
     const uint8_t b5 = (knobId == knob::kBCMix
+                        || knobId == knob::kCSFaderLevel
                         || (knobId >= 0x17 && knobId <= 0x1D)) ? 0x01 : 0x00;
     auto make = [b5](uint8_t bank, uint8_t cell, uint8_t state) {
         std::vector<uint8_t> f;
@@ -1372,22 +1368,12 @@ void UC1Surface::refresh()
     // the user to actually move a knob. Reads the normalized VST3
     // value for each knob that has a ring mapping defined.
     //
-    // Skip knobs whose ring cells overlap the central 7-segment display
-    // (bank 0x01 cells 0x00, 0x03..0x05, 0x08..0x0E, 0x10..0x16): Fader
-    // Level (0x0E..0x17), BC Mix (0x03..0x0C), BC Release (0xFA..0xFF +
-    // 0x00). Whether the underlying captures (uc1_15, dual_40) really
-    // mapped those cells to ring LEDs or accidentally captured 7-seg
-    // writes is unresolved; either way the 7-seg track number is more
-    // load-bearing than a stale ring on focus-change. The rings still
-    // re-sync the moment the user actually moves the knob.
-    auto overlapsSevenSeg = [](uint8_t knobId) {
-        return knobId == knob::kCSFaderLevel
-            || knobId == knob::kBCMix
-            || knobId == knob::kBCRelease;
-    };
+    // No more knob exclusions: byte5 routing in pushKnobRing_ now
+    // separates EQ/BC (byte5=0x00) from Dyn/Gate + BC Mix + Fader Level
+    // (byte5=0x01), so cell numbers can collide with the 7-seg cells
+    // without sharing physical LEDs.
     if (tr && bindings.channelMap) {
         for (uint8_t knobId = 0; knobId < 0x20; ++knobId) {
-            if (overlapsSevenSeg(knobId)) continue;
             const int vst3Param = bindings.channelMap->knobParam[knobId];
             if (vst3Param == kParamNone) continue;
             const double v = TrackFX_GetParamNormalized(
@@ -1401,7 +1387,6 @@ void UC1Surface::refresh()
     // plugin (so we never dirty the carousel-anchor's section).
     if (tr && bindings.busCompMap) {
         for (uint8_t knobId = 0; knobId < 0x20; ++knobId) {
-            if (overlapsSevenSeg(knobId)) continue;
             const int vst3Param = bindings.busCompMap->knobParam[knobId];
             if (vst3Param == kParamNone) continue;
             const double v = TrackFX_GetParamNormalized(
@@ -1413,11 +1398,9 @@ void UC1Surface::refresh()
     }
 
     // 7-segment position indicator — show the REAPER track number
-    // (1-based) on the central red display. Pushed LAST so the ring
-    // loops above can't overwrite the digit segments. The per-knob
-    // ring caches in pushKnobRing_ never re-fire these cells unless
-    // the user actually moves an overlapping knob — at which point
-    // 7-seg corruption is expected and self-corrects on next focus.
+    // (1-based) on the central red display. Push order doesn't matter
+    // any more for safety (rings on byte5=0x01 won't touch this
+    // address space), but kept here at the end for clarity.
     if (focusedTrack_) {
         int idx = static_cast<int>(GetMediaTrackInfo_Value(
             static_cast<MediaTrack*>(focusedTrack_), "IP_TRACKNUMBER"));
