@@ -162,12 +162,12 @@ private:
     // when on, knob clicks move the param by 1/4 the normal amount.
     std::atomic<bool> fineMode_{false};
 
-    // Per-knob LED-ring cell state cache. pushKnobRing_ writes only
-    // cells whose target state differs from the cache; setFocusedTrack
-    // clears it so the next refresh re-writes every cell, preventing
-    // device/cache desync (init-flood lit cells we never told the
-    // firmware to clear, etc.).
-    std::unordered_map<uint8_t, std::vector<uint8_t>> ringCellCache_;
+    // Per-knob LED-ring cell state cache. Each entry packs the last-
+    // sent (selection_state | brightness_state << 8) so dedup catches
+    // brightness changes too, not just selection. pushKnobRing_ skips
+    // cells whose packed target matches the cache; setFocusedTrack /
+    // invalidateCache clears so the next refresh re-writes everything.
+    std::unordered_map<uint8_t, std::vector<uint16_t>> ringCellCache_;
 };
 
 } // namespace uc1

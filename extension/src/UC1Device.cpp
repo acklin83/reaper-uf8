@@ -231,16 +231,22 @@ void UC1Device::workerLoop_()
     auto    lastGr           = std::chrono::steady_clock::now();
 
     while (!shuttingDown_) {
-        // Drain any pending sends; wake for keepalive / GR on timeout.
-        // Short sleep so we don't drift past the 20 ms GR cadence.
-        std::vector<uint8_t> frame;
+        // Drain ALL pending sends in one pass — bursts (knob-ring
+        // refreshes can spawn 20+ frames per tick) used to stall a
+        // full second when the loop only handled one frame per
+        // iteration with a 1 ms libusb pump in between. We now grab
+        // the entire queue under the lock, then send each frame
+        // back-to-back without yielding to libusb until the burst is
+        // done.
+        std::vector<std::vector<uint8_t>> burst;
         {
             std::unique_lock<std::mutex> lk(pending_->mu);
             pending_->cv.wait_for(lk, std::chrono::milliseconds(10),
                 [&] { return !pending_->q.empty() || shuttingDown_; });
             if (shuttingDown_) break;
-            if (!pending_->q.empty()) {
-                frame = std::move(pending_->q.front());
+            burst.reserve(pending_->q.size());
+            while (!pending_->q.empty()) {
+                burst.push_back(std::move(pending_->q.front()));
                 pending_->q.pop();
             }
         }
@@ -272,7 +278,8 @@ void UC1Device::workerLoop_()
             lastKeepalive    = now;
         }
 
-        if (!frame.empty()) {
+        for (auto& frame : burst) {
+            if (frame.empty()) continue;
             int transferred = 0;
             const int rc = libusb_bulk_transfer(handle_, kEpOut,
                                                 frame.data(),

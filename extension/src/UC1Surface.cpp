@@ -1006,13 +1006,13 @@ void UC1Surface::pushKnobRing_(uint8_t knobId, double normalized)
     if (normalized < 0.0) normalized = 0.0;
     if (normalized > 1.0) normalized = 1.0;
 
-    // Per-knob state cache so we only push cells that changed state.
-    // Cleared in setFocusedTrack so a focus change re-writes every
-    // cell — the sentinel mismatch in the loop below treats every
-    // cell as "needs update" on the next push.
+    // Per-knob state cache so we only push cells that changed.
+    // Each entry packs sel | (brightness << 8) so we dedup BOTH
+    // banks together. 0xFFFF = sentinel "unset", forces a write
+    // since neither sel=0/1 nor any real brightness can match.
     auto& last = ringCellCache_[knobId];
     if (static_cast<int>(last.size()) != def->nCells) {
-        last.assign(def->nCells, 0xFE);  // "unset" sentinel
+        last.assign(def->nCells, 0xFFFF);
     }
 
     // Position math: continuous f, rounded to dot index for bank 0x01.
@@ -1074,16 +1074,17 @@ void UC1Surface::pushKnobRing_(uint8_t knobId, double normalized)
         f.push_back(static_cast<uint8_t>(sum & 0xFF));
         return f;
     };
-    // Position-mode pots dedup against the cached selection state;
-    // Gradient-mode pots re-emit every cell on each push because the
-    // brightness target depends on the continuous value position and
-    // the cache only stores selection (one byte per cell).
+    // Dedup both selection AND brightness via the packed cache key.
+    // Cells unchanged across both banks skip both writes — a 22-frame
+    // Gradient-mode push collapses to ~2-4 frames per knob tick once
+    // the dot has moved one cell.
     for (int i = 0; i < def->nCells; ++i) {
-        const bool grad = (def->mode == RingMode::Gradient);
-        if (!grad && last[i] == target[i]) continue;
-        last[i] = target[i];
-        const uint8_t cell = def->cells[i];
         const uint8_t selState = target[i] ? 0x01 : 0x00;
+        const uint16_t want = static_cast<uint16_t>(selState)
+                            | (static_cast<uint16_t>(brTarget[i]) << 8);
+        if (last[i] == want) continue;
+        last[i] = want;
+        const uint8_t cell = def->cells[i];
         device_->send(make(0x01, cell, selState));
         device_->send(make(0x02, cell, brTarget[i]));
     }
