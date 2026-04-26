@@ -614,10 +614,21 @@ void sendLedFrames(uf8::LedColourFrames frames)
     g_dev->send(std::move(frames.ff39));
 }
 
-// Push the selected-strip bitmask. cap33 shows this is the firmware
-// trigger for SEL DAW-Colour rendering: without it the LED falls back
-// to white-on-select. The mask is built from REAPER's I_SELECTED state
-// for each currently-visible strip.
+// Cell 0x24 sits outside the per-strip LED range. cap33 shows SSL360
+// firing a fixed off→on toggle on this cell at every selection event,
+// always before the selected-strip bitmask. Replicate the exact 4-frame
+// sequence — values are constant (no track-colour involved).
+void sendSelRenderTrigger()
+{
+    if (!g_dev) return;
+    g_dev->send({0xFF, 0x38, 0x04, 0x24, 0x00, 0x12, 0xF0, 0x62});
+    g_dev->send({0xFF, 0x39, 0x04, 0x24, 0x00, 0x12, 0xF0, 0x63});
+    g_dev->send({0xFF, 0x38, 0x04, 0x24, 0x00, 0x3F, 0xF0, 0x8F});
+    g_dev->send({0xFF, 0x39, 0x04, 0x24, 0x00, 0x00, 0xF0, 0x51});
+}
+
+// Push the selected-strip bitmask. cap33: SSL360 sends this after the
+// cell 0x24 toggle, on every selection change.
 void pushSelectedStripBitmask()
 {
     if (!g_dev) return;
@@ -640,7 +651,10 @@ void sendLed(LedClass cls, MediaTrack* tr, bool on)
         const uf8::LedClass devCls = toUf8LedClass(cls);
         const uf8::LedColour col = ledColourFor(cls, tr);
         sendLedFrames(uf8::buildLedColourPair(static_cast<uint8_t>(s), devCls, on, col));
-        if (cls == LedClass::Sel) pushSelectedStripBitmask();
+        if (cls == LedClass::Sel) {
+            sendSelRenderTrigger();
+            pushSelectedStripBitmask();
+        }
         return;
     }
 }
