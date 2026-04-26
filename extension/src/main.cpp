@@ -586,6 +586,12 @@ enum class LedClass : uint8_t { Sel = 0, Mute = 1, Solo = 2, Arm = 3 };
 uf8::LedColour ledColourFor(LedClass cls, MediaTrack* tr)
 {
     if (cls == LedClass::Sel && tr) {
+        // Rec-armed override: SSL UF8 paints the SEL LED red when the
+        // track is armed (no separate Rec-Arm LED — same physical LED).
+        // Confirmed by user against SSL 360°'s rendering (2026-04-26).
+        if (GetMediaTrackInfo_Value(tr, "I_RECARM") > 0.5) {
+            return uf8::ledColourRed();
+        }
         const uint32_t rgb = static_cast<uint32_t>(GetTrackColor(tr)) & 0x00FFFFFFu;
         return uf8::ledColourForTrackRgb(rgb);
     }
@@ -697,7 +703,12 @@ void ReaSixtySurface::SetSurfaceSelected(MediaTrack* tr, bool sel)
 }
 void ReaSixtySurface::SetSurfaceRecArm(MediaTrack* tr, bool arm)
 {
-    sendLed(LedClass::Arm, tr, arm);   // currently a no-op (gated)
+    // Rec-arm doesn't have its own dedicated LED on the UF8 — SSL360
+    // repaints the SEL LED in red when the track is armed and back to
+    // track-colour/white when disarmed. Push a SEL refresh so the
+    // colour switches even if I_SELECTED didn't change.
+    sendLed(LedClass::Sel, tr, GetMediaTrackInfo_Value(tr, "I_SELECTED") > 0.5);
+    (void)arm;
 }
 
 // Device lifecycle: the surface instance owns the UF8 connection and the
@@ -1875,12 +1886,85 @@ void pushSelColourBar()
     }
 }
 
+// UF8 global-button LED state. We only drive the LEDs that map cleanly
+// to REAPER state we can read on every tick: the Automation mode of the
+// selected track (Read/Write/Trim/Latch/Touch — radio group), and the
+// global Rec/ALL indicator (lit when any track is rec-armed).
+//
+// The other ~25 global LEDs (Layer/Soft/Modifier/Zoom rows) are not
+// wired up yet — they need surface-internal mode tracking which the
+// extension doesn't currently model. Cell map for those is in
+// docs/uf8-global-led-map.md and Protocol::buildUf8GlobalLed when we
+// get to it.
+int g_lastAutoMode = -2;          // -1 = no track, 0..5 = REAPER auto modes
+bool g_lastAnyArmed = false;
+bool g_globalLedsInit = false;
+void pushUf8GlobalLeds()
+{
+    if (!g_dev || !g_dev->isOpen()) return;
+
+    // Automation mode of the focused/selected track. REAPER values:
+    //   0 = Trim/Read, 1 = Read, 2 = Touch, 3 = Write, 4 = Latch,
+    //   5 = Latch Preview.
+    int autoMode = -1;
+    MediaTrack* sel = GetSelectedTrack(nullptr, 0);
+    if (sel) autoMode = GetTrackAutomationMode(sel);
+
+    // Any armed track in the project — drives the global Rec LED.
+    bool anyArmed = false;
+    const int n = CountTracks(nullptr);
+    for (int i = 0; i < n; ++i) {
+        if (GetMediaTrackInfo_Value(GetTrack(nullptr, i), "I_RECARM") > 0.5) {
+            anyArmed = true; break;
+        }
+    }
+
+    if (g_globalLedsInit && autoMode == g_lastAutoMode && anyArmed == g_lastAnyArmed) {
+        return;
+    }
+
+    if (autoMode != g_lastAutoMode || !g_globalLedsInit) {
+        // Map REAPER auto-mode to a single Auto* LED. Off (-1, no
+        // selection) clears all five.
+        const auto modeFor = [](int m) -> int {
+            // Returns enum index into kAutoLeds, or -1 for none.
+            switch (m) {
+                case 0: case 1: return 0;  // Read
+                case 2:         return 4;  // Touch
+                case 3:         return 1;  // Write
+                case 4: case 5: return 3;  // Latch (incl. Preview)
+                default:        return -1;
+            }
+        };
+        constexpr uf8::Uf8GlobalLed kAutoLeds[5] = {
+            uf8::Uf8GlobalLed::AutoRead,
+            uf8::Uf8GlobalLed::AutoWrite,
+            uf8::Uf8GlobalLed::AutoTrim,
+            uf8::Uf8GlobalLed::AutoLatch,
+            uf8::Uf8GlobalLed::AutoTouch,
+        };
+        const int active = modeFor(autoMode);
+        for (int i = 0; i < 5; ++i) {
+            sendLedFrames(uf8::buildUf8GlobalLed(kAutoLeds[i], i == active));
+        }
+        g_lastAutoMode = autoMode;
+    }
+
+    if (anyArmed != g_lastAnyArmed || !g_globalLedsInit) {
+        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Rec, anyArmed));
+        g_lastAnyArmed = anyArmed;
+    }
+
+    g_globalLedsInit = true;
+}
+
 void onTimer()
 {
     drainInputQueue();
     commitDebouncedTouchReleases();
     if (g_sync) g_sync->refresh(reaperColorForVisibleSlot);
     pushZonesForVisibleSlots();
+    pushUf8GlobalLeds();
     // pushSelColourBar() removed: it was a per-tick fallback that wrote
     // SEL LEDs in white-only mode (buildSelWhite). With track-colour SEL
     // now driven through sendLed() + the bank-shift refresh, this fallback

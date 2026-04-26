@@ -509,6 +509,78 @@ std::array<std::vector<uint8_t>, 2> buildSelColour(uint8_t strip, uint8_t byteA,
             buildSelFrame(0x39, cell, byteA, byteB)};
 }
 
+// Cell + colour table for global UF8 buttons. Decoded in cap35 + cap36.
+// Buttons that are plain white use only 'on' colour with off=`11 F1` dim.
+// Buttons with a custom colour use that colour for ON and the same dim
+// off pattern (firmware appears to ignore colour when both bytes are
+// the dim sentinel, so we don't need per-button OFF colours).
+namespace {
+struct Uf8GlobalLedDef {
+    uint8_t cell;
+    uint8_t aBright;
+    uint8_t bBright;
+};
+constexpr Uf8GlobalLedDef kUf8GlobalLedTable[] = {
+    /* Layer1       */ {0x39, 0xFF, 0xFF},
+    /* Layer2       */ {0x3A, 0xFF, 0xFF},
+    /* SendPlugin1  */ {0x37, 0xFF, 0xFF},
+    /* SendPlugin2  */ {0x36, 0xFF, 0xFF},
+    /* SendPlugin3  */ {0x35, 0xFF, 0xFF},
+    /* SendPlugin4  */ {0x34, 0xFF, 0xFF},
+    /* SendPlugin5  */ {0x33, 0xFF, 0xFF},
+    /* SendPlugin6  */ {0x32, 0xFF, 0xFF},
+    /* SendPlugin7  */ {0x31, 0xFF, 0xFF},
+    /* SendPlugin8  */ {0x30, 0xFF, 0xFF},
+    /* Plugin       */ {0x2F, 0xFF, 0xFF},
+    /* PageLeft     */ {0x5D, 0xFF, 0xFF},
+    /* PageRight    */ {0x5C, 0xFF, 0xFF},
+    /* Flip         */ {0x2B, 0xFF, 0xFF},
+    /* AutoRead     */ {0x26, 0xF0, 0xF0},  // green
+    /* AutoWrite    */ {0x25, 0x0F, 0xF0},  // red
+    /* AutoTrim     */ {0x24, 0x3F, 0xF0},  // orange
+    /* AutoLatch    */ {0x23, 0x0F, 0xF0},  // red
+    /* AutoTouch    */ {0x22, 0xEF, 0xF0},  // yellow
+    /* VPotBank     */ {0x5F, 0xFF, 0xFF},
+    /* Soft1        */ {0x5E, 0xFF, 0xFF},
+    /* Soft2        */ {0x5D, 0xFF, 0xFF},
+    /* Soft3        */ {0x5C, 0xFF, 0xFF},
+    /* Soft4        */ {0x5B, 0xFF, 0xFF},
+    /* Soft5        */ {0x5A, 0xFF, 0xFF},
+    /* Pan          */ {0x59, 0xFF, 0xFF},
+    /* Fine         */ {0x58, 0xFF, 0xFF},
+    /* Norm         */ {0x57, 0xFF, 0xFF},
+    /* Rec          */ {0x56, 0x0F, 0xF0},  // red
+    /* Auto         */ {0x55, 0xFF, 0xFF},
+    /* Nav          */ {0x54, 0xFF, 0xFF},
+    /* Nudge        */ {0x53, 0xFF, 0xFF},
+    /* Focus        */ {0x52, 0xFF, 0xFF},
+    /* BankLeft     */ {0x4F, 0xFF, 0xFF},
+    /* BankRight    */ {0x4E, 0xFF, 0xFF},
+    /* ZoomUp       */ {0x4D, 0xF0, 0xF0},  // green
+    /* ZoomLeft     */ {0x4C, 0xFF, 0xFF},
+    /* ZoomCenter   */ {0x4B, 0x0F, 0xF0},  // red
+    /* ZoomRight    */ {0x4A, 0xFF, 0xFF},
+    /* ZoomDown     */ {0x49, 0xEF, 0xF0},  // yellow
+};
+} // namespace
+
+LedColourFrames buildUf8GlobalLed(Uf8GlobalLed btn, bool on)
+{
+    const auto& def = kUf8GlobalLedTable[static_cast<size_t>(btn)];
+    LedColourFrames out;
+    if (on) {
+        // Bright: FF 38 = colour, FF 39 = base 00 F0 (matches per-strip
+        // ON pattern from cap31).
+        out.ff38 = buildSelFrame(0x38, def.cell, def.aBright, def.bBright);
+        out.ff39 = buildSelFrame(0x39, def.cell, 0x00, 0xF0);
+    } else {
+        // Dim: FF 38 == FF 39 = 11 F1 (white-off, same as SEL off).
+        out.ff38 = buildSelFrame(0x38, def.cell, 0x11, 0xF1);
+        out.ff39 = buildSelFrame(0x39, def.cell, 0x11, 0xF1);
+    }
+    return out;
+}
+
 std::array<std::vector<uint8_t>, 2> buildSelWhite(uint8_t strip, bool bright)
 {
     // From cap30: white-dim = 00 11 F1 (both FF38 and FF39 symmetric).

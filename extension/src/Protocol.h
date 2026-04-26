@@ -173,6 +173,27 @@ LedColourFrames buildLedColourPair(uint8_t strip, LedClass cls, bool on,
 // Convenience overload — uses ledColourClassDefault(cls) for the colour.
 LedColourFrames buildLedColourPair(uint8_t strip, LedClass cls, bool on);
 
+// Global button LEDs (cap35/36, 2026-04-26). Same FF 38/39 04 pair-write
+// frame family, but the cell ranges 0x18..0x60 are the 30+ LEDs around
+// the buttons in the upper section of the UF8 (Layer/Send/Plugin row,
+// Soft Keys, modifiers, Zoom, etc.). Off-state = `11 F1` (dim white)
+// for plain-white buttons; coloured ones reuse their bright pair as the
+// dim value with both FF38/FF39 set to a "dim variant".
+enum class Uf8GlobalLed : uint8_t {
+    Layer1, Layer2,
+    SendPlugin1, SendPlugin2, SendPlugin3, SendPlugin4,
+    SendPlugin5, SendPlugin6, SendPlugin7, SendPlugin8,
+    Plugin,
+    PageLeft, PageRight, Flip,
+    AutoRead, AutoWrite, AutoTrim, AutoLatch, AutoTouch,
+    VPotBank, Soft1, Soft2, Soft3, Soft4, Soft5,
+    Pan, Fine, Norm, Rec, Auto, Nav, Nudge, Focus,
+    BankLeft, BankRight,
+    ZoomUp, ZoomLeft, ZoomCenter, ZoomRight, ZoomDown,
+};
+
+LedColourFrames buildUf8GlobalLed(Uf8GlobalLed btn, bool on);
+
 // Selected-strip bitmask. cap33 shows SSL360 sending this on every
 // selection change in PM Layer + DAW Colour mode — it's what tells the
 // firmware which SEL LED is "the lit one", so the stored colour bytes
