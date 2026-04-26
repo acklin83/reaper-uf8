@@ -1869,7 +1869,10 @@ void onTimer()
     commitDebouncedTouchReleases();
     if (g_sync) g_sync->refresh(reaperColorForVisibleSlot);
     pushZonesForVisibleSlots();
-    pushSelColourBar();
+    // pushSelColourBar() removed: it was a per-tick fallback that wrote
+    // SEL LEDs in white-only mode (buildSelWhite). With track-colour SEL
+    // now driven through sendLed() + the bank-shift refresh, this fallback
+    // was overwriting the coloured frames with plain white on every tick.
     pushVuMeter();
     // UC1 VU — same peak data, mapped to the focused track's L/R
     // channels. Single meter-pair on UC1 (not per-strip).
