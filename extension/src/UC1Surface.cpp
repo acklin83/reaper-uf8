@@ -387,6 +387,23 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
     const double visual = map->inverted[ev.id] ? (1.0 - next) : next;
     pushKnobRing_(ev.id, visual);
 
+    // Fader Level (0x0E..0x17), BC Mix (0x03..0x0C) and BC Release
+    // (0xFA..0xFF + 0x00) ring cells overlap the central 7-segment
+    // display on bank 0x01. Moving those knobs corrupts the digit
+    // segments — repaint the 7-seg with the focused track number so
+    // the position indicator stays legible.
+    if (ev.id == knob::kCSFaderLevel
+        || ev.id == knob::kBCMix
+        || ev.id == knob::kBCRelease)
+    {
+        const int idx = static_cast<int>(GetMediaTrackInfo_Value(
+            tr, "IP_TRACKNUMBER"));
+        const unsigned int v = idx < 0 ? 0u : static_cast<unsigned int>(idx);
+        for (const auto& frame : buildSevenSeg(v)) {
+            device_->send(frame);
+        }
+    }
+
     if (logThis) {
         char pname[64] = {0};
         TrackFX_GetParamName(tr, fxIdx, vst3Param, pname, sizeof(pname));
@@ -1177,17 +1194,12 @@ void UC1Surface::refresh()
         bcNameAtRank(bcRank),
         bcNameAtRank(bcRank + 1)));
 
-    // 7-segment position indicator — show the REAPER track number
-    // (1-based) on the central red display. Matches the MAIN/ROUTING
-    // page of the Central Control Panel.
-    if (focusedTrack_) {
-        int idx = static_cast<int>(GetMediaTrackInfo_Value(
-            static_cast<MediaTrack*>(focusedTrack_), "IP_TRACKNUMBER"));
-        if (idx < 0) idx = 0;
-        for (const auto& frame : buildSevenSeg(static_cast<unsigned int>(idx))) {
-            device_->send(frame);
-        }
-    }
+    // 7-segment push moved to the end of refresh() — see below. Several
+    // knob ring cell maps (FaderLevel, BC Mix, BC Release) overlap the
+    // 7-seg ones/tens/hundreds cells on bank 0x01, so the 7-seg has to
+    // be the LAST writer in this function for focus-change to land
+    // legibly. Pushing it here would just be overwritten by the eager
+    // ring loops.
 
     // Central label — 4-char plugin-type tag shown in the UC1 central
     // LCD. "MAIN" when no SSL plugin is focused, otherwise the plugin's
@@ -1323,8 +1335,23 @@ void UC1Surface::refresh()
     // the rings reflect the current plugin state without waiting for
     // the user to actually move a knob. Reads the normalized VST3
     // value for each knob that has a ring mapping defined.
+    //
+    // Skip knobs whose ring cells overlap the central 7-segment display
+    // (bank 0x01 cells 0x00, 0x03..0x05, 0x08..0x0E, 0x10..0x16): Fader
+    // Level (0x0E..0x17), BC Mix (0x03..0x0C), BC Release (0xFA..0xFF +
+    // 0x00). Whether the underlying captures (uc1_15, dual_40) really
+    // mapped those cells to ring LEDs or accidentally captured 7-seg
+    // writes is unresolved; either way the 7-seg track number is more
+    // load-bearing than a stale ring on focus-change. The rings still
+    // re-sync the moment the user actually moves the knob.
+    auto overlapsSevenSeg = [](uint8_t knobId) {
+        return knobId == knob::kCSFaderLevel
+            || knobId == knob::kBCMix
+            || knobId == knob::kBCRelease;
+    };
     if (tr && bindings.channelMap) {
         for (uint8_t knobId = 0; knobId < 0x20; ++knobId) {
+            if (overlapsSevenSeg(knobId)) continue;
             const int vst3Param = bindings.channelMap->knobParam[knobId];
             if (vst3Param == kParamNone) continue;
             const double v = TrackFX_GetParamNormalized(
@@ -1335,14 +1362,10 @@ void UC1Surface::refresh()
         }
     }
     // BC knob rings only fire when the focused track itself has a BC
-    // plugin. Pushing them off the BC anchor would dirty the central
-    // 7-segment display: BC Mix's ring cells (bank 0x01, 0x03..0x0C)
-    // and BC Release's (0xFA..0xFF + 0x00) overlap the 7-seg ones/
-    // tens/hundreds cells. The BC carousel + track-name slot persist
-    // across CHANNEL scrolling via bcAnchor; the rings re-sync the
-    // moment the user refocuses a BC track.
+    // plugin (so we never dirty the carousel-anchor's section).
     if (tr && bindings.busCompMap) {
         for (uint8_t knobId = 0; knobId < 0x20; ++knobId) {
+            if (overlapsSevenSeg(knobId)) continue;
             const int vst3Param = bindings.busCompMap->knobParam[knobId];
             if (vst3Param == kParamNone) continue;
             const double v = TrackFX_GetParamNormalized(
@@ -1350,6 +1373,21 @@ void UC1Surface::refresh()
             const double visual =
                 bindings.busCompMap->inverted[knobId] ? (1.0 - v) : v;
             pushKnobRing_(knobId, visual);
+        }
+    }
+
+    // 7-segment position indicator — show the REAPER track number
+    // (1-based) on the central red display. Pushed LAST so the ring
+    // loops above can't overwrite the digit segments. The per-knob
+    // ring caches in pushKnobRing_ never re-fire these cells unless
+    // the user actually moves an overlapping knob — at which point
+    // 7-seg corruption is expected and self-corrects on next focus.
+    if (focusedTrack_) {
+        int idx = static_cast<int>(GetMediaTrackInfo_Value(
+            static_cast<MediaTrack*>(focusedTrack_), "IP_TRACKNUMBER"));
+        if (idx < 0) idx = 0;
+        for (const auto& frame : buildSevenSeg(static_cast<unsigned int>(idx))) {
+            device_->send(frame);
         }
     }
 }
