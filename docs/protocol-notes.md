@@ -182,7 +182,8 @@ page 153). Commands decoded 2026-04-20 from cap14a–cap18:
 | O/PdB Fader Readout | `FF 66 0A 0C <strip> <4 ASCII> 00 00 "dB" CKSUM` | 14 B | Fader dB — `64 42` = "dB" fixed |
 | V-Pot Readout Bar | `FF 66 11 0F <16 bytes> CKSUM` | 20 B | Broadcast: 2 bytes LE per strip; byte[0] = position 0..255, byte[1] usually 0 |
 | Channel Number Zone | `FF 66 <len> 14 <strip> <N ASCII> CKSUM` | 5+N B | `len = N+2`; 1..9 single digit, 10..99 two digits |
-| Per-strip LED (SEL/MUTE/SOLO) | `FF 3B 03 <id> 00 <state> CKSUM` | 7 B | state 0x01=on, 0x00=off. `id = strip * 3 + type` with type 0=SEL, 1=MUTE, 2=SOLO → IDs 0x00..0x17. REC ARM: probably `0x18+strip` but not captured in cap23 (UF8 REC selection mode was not active); disabled in code until verified. |
+| Per-strip LED on/off (mono) | `FF 3B 03 <id> 00 <state> CKSUM` | 7 B | state 0x01=on, 0x00=off. `id = strip * 3 + type` with type 0=SEL, 1=MUTE, 2=SOLO → IDs 0x00..0x17. **Lights LEDs white/uncoloured** — use FF 38/39 path below for proper SOLO yellow / MUTE orange / SEL white. REC ARM: probably `0x18+strip` but not captured in cap23. |
+| Per-strip LED colour (DAW Layer) | `FF 38 04 <cell> 00 <a> <b> CKSUM` + `FF 39 04 <cell> 00 <a> <b> CKSUM` | 8 B × 2 | Pair-write per LED. `cell = 0x17 - 3*(strip-1) - led_offset` (SOLO=0, MUTE=1, SEL=2). ON: FF38 = bright colour, FF39 = base `00 F0`. OFF: FF38 == FF39 = dim value. SOLO yellow on=`EF F0`/`00 F0`, off=`11 F0`. MUTE orange on=`3F F0`/`00 F0`, off=`12 F0`. SEL white on=`FF FF`/`00 F0`, off=`11 F1`. cap31. |
 | TrkNam (big) | `FF 66 <N+2> 0B <strip> <N ASCII> CKSUM` | 5+N B | Driven via MCU scribble-strip sysex pass-through |
 | Fader motor | `FF 1E 03 <strip> <LSB> <MSB> CKSUM` | 7 B | Bidirectional (host→UF8 = set position, UF8→host = user touch) |
 | Motor limp | `FF 1D 02 <strip> <01\|00> CKSUM` | 6 B | 01 = motor active, 00 = user controls |
@@ -245,27 +246,48 @@ SSL 360° exposes a single **brightness slider** (5 steps: dark / dim / half / b
 
 Same `FF 4F 02` encoding used on UC1 → confirmed cross-device LCD-backlight format.
 
-### SEL LED per-strip colour (`FF 38/39 04 <cell>`)
+### Per-strip LED colour — unified (`FF 38/39 04 <cell>`)
 
-SSL 360° has an option "SEL Button Colour: White / DAW Colour". In **DAW Colour** mode each strip's SEL LED reflects its track colour; selected = bright, unselected = dim.
+cap31 (2026-04-26) confirmed FF 38/39 is the **single** colour-write path for
+all 24 per-strip LEDs (8 SOLO + 8 MUTE + 8 SEL) in DAW Layer. Replaces
+cap30's SEL-only mapping (which was off-by-one).
 
-Per-strip SEL LED cells (8-strip array, decreasing by 3):
-- strip 1 → `0x12`
-- strip 2 → `0x0F`
-- strip 3 → `0x0C`
-- strip 4 → `0x09`
-- strip 5 → `0x06`
-- strip 6 → `0x03`
-- strip 7 → `0x00`
-- strip 8 → `0x15` (wraps above strip 1 — verified in `cap30_sel_colour_toggle`)
+**Cell formula** (24-LED contiguous descending):
+```
+cell = 0x17 - 3*(strip-1) - led_offset
+  led_offset: SOLO=0, MUTE=1, SEL=2
 
-Frame pair per cell: `FF 38 04 <cell> 00 <a> <b> <chk>` + `FF 39 04 <cell> 00 <a> <b> <chk>`.
+Strip 1: SOLO=0x17, MUTE=0x16, SEL=0x15
+Strip 2: SOLO=0x14, MUTE=0x13, SEL=0x12
+…
+Strip 8: SOLO=0x02, MUTE=0x01, SEL=0x00
+```
 
-**White mode** (SEL always-white, bright=selected):
-- Unselected: both frames `00 11 F1`
-- Selected: `FF 38` only with `00 FF FF`
+**Frame pair per toggle:**
+```
+FF 38 04 <cell> 00 <a> <b> <chk>
+FF 39 04 <cell> 00 <a> <b> <chk>
+```
 
-**DAW Colour mode:** FF38 + FF39 encode the track colour as 2-byte pair per frame. Exact RGB decode still TBD — bytes vary per colour but not a simple palette-index or RGB555/444 mapping. Saved for future offline work.
+**Colour bytes** (a, b):
+
+| LED class   | state | FF38 a,b | FF39 a,b |
+|-------------|-------|----------|----------|
+| SOLO yellow | on    | `EF F0`  | `00 F0`  |
+| SOLO yellow | off   | `11 F0`  | `11 F0`  |
+| MUTE orange | on    | `3F F0`  | `00 F0`  |
+| MUTE orange | off   | `12 F0`  | `12 F0`  |
+| SEL white   | on    | `FF FF`  | `00 F0`  |
+| SEL white   | off   | `11 F1`  | `11 F1`  |
+
+**Pattern:** OFF state writes identical `<a> <b>` to both frames (the dim
+value). ON state writes the bright colour to FF38 and a base value (`00 F0`
+for SOLO/MUTE; `00 F0` for SEL) to FF39.
+
+**SEL DAW-Colour mode** is the per-track-colour variant of the SEL row —
+same frame pair, same cell, but `<a> <b>` carries the track's colour
+(byte-pair encoding still empirical, no RGB decode yet — replay captured
+values per palette index when implementing).
 
 ### Selected-strip bitmask (`FF 66 03 06 <mask_lo> <mask_hi>`)
 
@@ -311,3 +333,4 @@ During `dual_36_cs_vu_ramp` the user ramped input signal through a 16-level test
 | 2026-04-24 | `uc1/dual_34_colour_change.pcapng` | REAPER track-colour changes — `FF 66 09 18` palette-broadcast fires per change. |
 | 2026-04-24 | `uc1/dual_35_cs_gr_ramp.pcapng` | CS compressor GR ramp — UF8 GR byte `FF 66 11 0F` range `0x22..0x64`. |
 | 2026-04-24 | `uc1/dual_36_cs_vu_ramp.pcapng` | CS VU ramp — `FF 66 21 09` bytes 6/7 carry Input/Output VU `0x00..0x1F`. |
+| 2026-04-26 | `cap31_solo_cut_led_colours.pcapng` | SOLO/MUTE/SEL LED colour decoded — unified `FF 38/39 04 <cell>` pair, cell range 0x00..0x17 covers all 24 per-strip LEDs (replaces FF 3B mono path). Yellow/orange/white byte tables captured. |

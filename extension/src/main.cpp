@@ -566,38 +566,33 @@ bool ReaSixtySurface::GetTouchState(MediaTrack* tr, int isPan)
     return false;
 }
 
-// Button LEDs: decoded via cap22 (command) + cap23 (ID map). Format is
-//   FF 3B 03 <id> 00 <state> CKSUM
-// `id = (7 - strip) * 3 + type` where type 0=SEL, 1=MUTE, 2=SOLO. That
-// covers the 24 LEDs in IDs 0x00..0x17 — note the REVERSED strip order:
-// leftmost UF8 strip (our index 0) uses IDs 0x15..0x17, rightmost strip
-// (index 7) uses 0x00..0x02. Confirmed empirically when track 1 (left)
-// was initially lighting channel 8 (right).
+// Button LEDs — coloured path (cap31, 2026-04-26).
+//   FF 38 04 <cell> 00 <a> <b> CKSUM   +
+//   FF 39 04 <cell> 00 <a> <b> CKSUM
+// Cell formula: cell = 0x17 - 3*strip - led_offset, with led_offset 0=SOLO,
+// 1=CUT, 2=SEL. Strip 0 (leftmost UF8 strip) → cells 0x15..0x17, strip 7 →
+// 0x00..0x02. Matches the FF 3B id map — the legacy mono-on/off path lives
+// in the same id space — but unlike FF 3B this pair sets the LED to its
+// proper colour: SOLO yellow, CUT orange, SEL white.
 //
-// REC ARM isn't in cap23 (its UF8-only selection mode wasn't active
-// during that capture); best guess is id = 0x18 + (7 - strip), disabled
-// until verified.
+// REC ARM has no colour-pair mapping yet; left on the FF 3B path and gated
+// off until a cap23b verifies its id range.
 enum class LedClass : uint8_t { Sel = 0, Mute = 1, Solo = 2, Arm = 3 };
-
-uint8_t ledIdFor(LedClass cls, int strip)
-{
-    const int reversed = 7 - strip;
-    switch (cls) {
-        case LedClass::Sel:  return static_cast<uint8_t>(reversed * 3 + 0);
-        case LedClass::Mute: return static_cast<uint8_t>(reversed * 3 + 1);
-        case LedClass::Solo: return static_cast<uint8_t>(reversed * 3 + 2);
-        case LedClass::Arm:  return static_cast<uint8_t>(0x18 + reversed);  // unverified
-    }
-    return 0;
-}
 
 void sendLed(LedClass cls, MediaTrack* tr, bool on)
 {
     if (!g_dev) return;
-    if (cls == LedClass::Arm) return;   // gate ARM until cap23b verifies its ID range
+    if (cls == LedClass::Arm) return;   // gate ARM until its colour-pair is captured
     for (int s = 0; s < 8; ++s) {
         if (g_slotTrack[s] != tr) continue;
-        g_dev->send(uf8::buildLedCommand(ledIdFor(cls, s), on));
+        uf8::LedClass devCls;
+        switch (cls) {
+            case LedClass::Solo: devCls = uf8::LedClass::Solo; break;
+            case LedClass::Mute: devCls = uf8::LedClass::Cut;  break;
+            case LedClass::Sel:  devCls = uf8::LedClass::Sel;  break;
+            default: return;
+        }
+        g_dev->send(uf8::buildLedColourPair(static_cast<uint8_t>(s), devCls, on));
         return;
     }
 }
@@ -683,11 +678,13 @@ ReaSixtySurface::ReaSixtySurface()
         g_dev->setRawInputHandler(onUf8Input);
 
         // UF8 firmware powers up with every SEL/MUTE/SOLO LED lit; we want
-        // them all dark until REAPER state says otherwise. Blast an OFF for
-        // every id 0x00..0x17 at open time so the initial display matches
-        // an idle REAPER session.
-        for (uint8_t id = 0x00; id <= 0x17; ++id) {
-            g_dev->send(uf8::buildLedCommand(id, false));
+        // them all dark until REAPER state says otherwise. Push the OFF
+        // colour-pair for every per-strip LED at open time so the initial
+        // display matches an idle REAPER session.
+        for (uint8_t s = 0; s < 8; ++s) {
+            g_dev->send(uf8::buildLedColourPair(s, uf8::LedClass::Solo, false));
+            g_dev->send(uf8::buildLedColourPair(s, uf8::LedClass::Cut,  false));
+            g_dev->send(uf8::buildLedColourPair(s, uf8::LedClass::Sel,  false));
         }
 
         // Force the bank-change re-sync block to fire on the very first
@@ -1441,9 +1438,10 @@ void pushZonesForVisibleSlots()
             // track. ARM LED ID mapping still unverified (cap23b needed)
             // so it's gated inside sendLed itself.
             if (g_dev) {
-                g_dev->send(uf8::buildLedCommand(ledIdFor(LedClass::Sel,  s), sel));
-                g_dev->send(uf8::buildLedCommand(ledIdFor(LedClass::Mute, s), mute));
-                g_dev->send(uf8::buildLedCommand(ledIdFor(LedClass::Solo, s), solo));
+                const auto strip = static_cast<uint8_t>(s);
+                g_dev->send(uf8::buildLedColourPair(strip, uf8::LedClass::Sel,  sel));
+                g_dev->send(uf8::buildLedColourPair(strip, uf8::LedClass::Cut,  mute));
+                g_dev->send(uf8::buildLedColourPair(strip, uf8::LedClass::Solo, solo));
                 (void)arm;
             }
         }

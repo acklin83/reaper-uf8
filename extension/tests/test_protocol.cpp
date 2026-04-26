@@ -131,6 +131,44 @@ int main()
         EXPECT(q == 0x07 || q == 0x0A);
     }
 
+    // --- LED colour pair (cap31). Lock the bytes captured from SSL 360°
+    //     so a regression in the formula or colour-table is caught.
+    //
+    // SOLO Strip 1 (cell 0x17), ON:
+    //   ff 38 04 17 00 ef f0 32  +  ff 39 04 17 00 00 f0 44
+    {
+        auto f = buildLedColourPair(0, LedClass::Solo, true);
+        EXPECT(hex(f) == "ff38041700eff032ff3904170000f044");
+    }
+    // SOLO Strip 1, OFF:  ff 38 04 17 00 11 f0 54 (FF38=FF39)
+    {
+        auto f = buildLedColourPair(0, LedClass::Solo, false);
+        EXPECT(hex(f) == "ff38041700"  "11f0" "54"
+                         "ff39041700"  "11f0" "55");
+    }
+    // CUT Strip 1 (cell 0x16), ON: ff 38 04 16 00 3f f0 81 + ff 39 04 16 00 00 f0 43
+    {
+        auto f = buildLedColourPair(0, LedClass::Cut, true);
+        EXPECT(hex(f) == "ff380416003ff081ff3904160000f043");
+    }
+    // SEL Strip 1 (cell 0x15), ON: ff 38 04 15 00 ff ff 4f + ff 39 04 15 00 00 f0 42
+    {
+        auto f = buildLedColourPair(0, LedClass::Sel, true);
+        EXPECT(hex(f) == "ff38041500ffff4fff3904150000f042");
+    }
+    // SOLO Strip 2 (cell 0x14), ON: ff 38 04 14 00 ef f0 2f + ff 39 04 14 00 00 f0 41
+    {
+        auto f = buildLedColourPair(1, LedClass::Solo, true);
+        EXPECT(hex(f) == "ff38041400eff02fff3904140000f041");
+    }
+    // SOLO Strip 8 (cell 0x02), ON
+    {
+        auto f = buildLedColourPair(7, LedClass::Solo, true);
+        EXPECT(f.size() == 16);
+        EXPECT(f[3] == 0x02);                  // FF38 cell
+        EXPECT(f[3 + 8] == 0x02);              // FF39 cell
+    }
+
     std::printf("OK — all checks passed\n");
     return 0;
 }

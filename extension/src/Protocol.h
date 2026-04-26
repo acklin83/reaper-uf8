@@ -106,18 +106,36 @@ std::vector<uint8_t> buildPluginSlotName(uint8_t strip, std::string_view text);
 //   FF 66 06 17 <strip> <4 ASCII chars> CKSUM       (9 bytes)
 std::vector<uint8_t> buildChannelStripType(uint8_t strip, std::string_view fourChars);
 
-// Per-strip button LEDs (SOLO / CUT / SEL / REC ARM).
+// Per-strip button LEDs — monochrome on/off path (legacy, unused for
+// SOLO/CUT/SEL because it lights LEDs uncoloured/white).
 //   FF 3B 03 <led_id> 00 <state> CKSUM    (7 bytes)
-// `state`: 0x01 = on, 0x00 = off. `led_id` follows MCU-note convention
-// best-guess mapping until more captures narrow it down:
-//   0x00..0x07 = REC ARM strip 0..7
-//   0x08..0x0F = SOLO    strip 0..7
-//   0x10..0x17 = MUTE    strip 0..7
-//   0x18..0x1F = SELECT  strip 0..7
-// Format decoded from cap22_leds (2026-04-21) by triggering REAPER
-// mixer state changes while UF8 in DAW Layer. ID map not yet
-// cross-verified against every button — refine with systematic cap23.
+// Kept around for any LED class that doesn't have a colour-pair mapping.
 std::vector<uint8_t> buildLedCommand(uint8_t ledId, bool on);
+
+// Per-strip button LEDs — full-colour path (cap31, 2026-04-26).
+// SSL 360° drives SOLO yellow / CUT orange / SEL white via this pair-write
+// for every state change in DAW Layer. Replaces buildLedCommand for
+// SOLO/CUT/SEL.
+//
+//   FF 38 04 <cell> 00 <a> <b> CKSUM   (8 bytes)
+//   FF 39 04 <cell> 00 <a> <b> CKSUM   (8 bytes)
+//
+// Cell formula (24 LEDs, contiguous descending in id space):
+//   cell = 0x17 - 3*strip - led_offset
+//     strip:       0..7
+//     led_offset:  SOLO=0, MUTE/CUT=1, SEL=2
+//
+// ON state:  FF38 = bright colour bytes, FF39 = base colour bytes.
+// OFF state: FF38 == FF39 = dim colour bytes.
+enum class LedClass : uint8_t {
+    Solo = 0,    // yellow
+    Cut  = 1,    // orange
+    Sel  = 2,    // white
+};
+
+// Build the FF 38 + FF 39 frame pair. Returns 16 bytes (two 8-byte frames
+// concatenated). Caller sends both as a single OUT.
+std::vector<uint8_t> buildLedColourPair(uint8_t strip, LedClass cls, bool on);
 
 // Channel Number Zone — the small numeric digit top-left of each scribble
 // strip's color bar (REAPER track index rendered as ASCII digits).

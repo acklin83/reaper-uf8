@@ -184,6 +184,59 @@ std::vector<uint8_t> buildLedCommand(uint8_t ledId, bool on)
     return frame;
 }
 
+std::vector<uint8_t> buildLedColourPair(uint8_t strip, LedClass cls, bool on)
+{
+    // cap31 colour-byte tables. Each entry: {ff38_a, ff38_b, ff39_a, ff39_b}
+    struct Bytes { uint8_t a38, b38, a39, b39; };
+    constexpr Bytes kSoloOn  = {0xEF, 0xF0, 0x00, 0xF0};
+    constexpr Bytes kSoloOff = {0x11, 0xF0, 0x11, 0xF0};
+    constexpr Bytes kCutOn   = {0x3F, 0xF0, 0x00, 0xF0};
+    constexpr Bytes kCutOff  = {0x12, 0xF0, 0x12, 0xF0};
+    constexpr Bytes kSelOn   = {0xFF, 0xFF, 0x00, 0xF0};
+    constexpr Bytes kSelOff  = {0x11, 0xF1, 0x11, 0xF1};
+
+    Bytes c;
+    switch (cls) {
+        case LedClass::Solo: c = on ? kSoloOn : kSoloOff; break;
+        case LedClass::Cut:  c = on ? kCutOn  : kCutOff;  break;
+        case LedClass::Sel:  c = on ? kSelOn  : kSelOff;  break;
+    }
+
+    const uint8_t cell = static_cast<uint8_t>(0x17 - 3 * strip - static_cast<uint8_t>(cls));
+
+    std::vector<uint8_t> frame;
+    frame.reserve(16);
+
+    // FF 38 04 <cell> 00 <a> <b> CKSUM
+    frame.push_back(0xFF);
+    frame.push_back(0x38);
+    frame.push_back(0x04);
+    frame.push_back(cell);
+    frame.push_back(0x00);
+    frame.push_back(c.a38);
+    frame.push_back(c.b38);
+    {
+        std::span<const uint8_t> payload{frame.data() + 1, frame.size() - 1};
+        frame.push_back(checksum(payload));
+    }
+
+    // FF 39 04 <cell> 00 <a> <b> CKSUM
+    const size_t f2 = frame.size();
+    frame.push_back(0xFF);
+    frame.push_back(0x39);
+    frame.push_back(0x04);
+    frame.push_back(cell);
+    frame.push_back(0x00);
+    frame.push_back(c.a39);
+    frame.push_back(c.b39);
+    {
+        std::span<const uint8_t> payload{frame.data() + f2 + 1, 6};
+        frame.push_back(checksum(payload));
+    }
+
+    return frame;
+}
+
 std::vector<uint8_t> buildChannelNumber(uint8_t strip, std::string_view digits)
 {
     // FF 66 <len> 14 <strip> <N ASCII> CKSUM  where len = N + 2
