@@ -179,7 +179,7 @@ page 153). Commands decoded 2026-04-20 from cap14a–cap18:
 | Channel Strip Type | `FF 66 06 17 <strip> <4 ASCII> CKSUM` | 9 B | "CS 2", "4K B", "4K E" |
 | Currently Selected Parameter | `FF 66 <N+2> 04 <strip> <N ASCII> CKSUM` | 5+N B | "BYPASS", "LF FREQ", "COMP RATIO" |
 | Value Line | `FF 66 15 0E <strip> <19 ASCII> CKSUM` | 24 B | Combined label+value: "In Trim       0.0dB" |
-| O/PdB Fader Readout | `FF 66 0A 0C <strip> <4 ASCII> 00 00 "dB" CKSUM` | 14 B | Fader dB — `64 42` = "dB" fixed |
+| O/PdB Fader Readout | `FF 66 0A 0C <strip> <6 ASCII> "dB" CKSUM` | 14 B | Fader dB — `64 42` = "dB" fixed. SSL 360° only fills first 4 bytes (NUL-pads the rest); we use the full 6 so values like `-12.5` fit below -10 dB. |
 | V-Pot Readout Bar | `FF 66 11 0F <16 bytes> CKSUM` | 20 B | Broadcast: 2 bytes LE per strip; byte[0] = position 0..255, byte[1] usually 0 |
 | Channel Number Zone | `FF 66 <len> 14 <strip> <N ASCII> CKSUM` | 5+N B | `len = N+2`; 1..9 single digit, 10..99 two digits |
 | Per-strip LED on/off (mono) | `FF 3B 03 <id> 00 <state> CKSUM` | 7 B | state 0x01=on, 0x00=off. `id = strip * 3 + type` with type 0=SEL, 1=MUTE, 2=SOLO → IDs 0x00..0x17. **Lights LEDs white/uncoloured** — use FF 38/39 path below for proper SOLO yellow / MUTE orange / SEL white. REC ARM: probably `0x18+strip` but not captured in cap23. |

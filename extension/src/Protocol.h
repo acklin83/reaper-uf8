@@ -210,11 +210,12 @@ std::vector<uint8_t> buildValueLine(uint8_t strip, std::string_view nineteenChar
 std::vector<uint8_t> buildVPotReadoutBar(const std::array<uint16_t, kStripCount>& positions);
 
 // O/PdB Fader Readout — the big fader-dB number.
-// Format places a 4-char value field (e.g. "-0.1", "0.0", "12.0") followed
-// by two NUL bytes and the literal "dB" suffix. Caller passes the value
-// as a string (shorter strings right-padded with NUL inside the frame).
-//   FF 66 0A 0C <strip> <4 bytes> 00 00 "dB" CKSUM  (14 bytes)
-std::vector<uint8_t> buildFaderDbReadout(uint8_t strip, std::string_view fourChars);
+// Format reserves 6 ASCII bytes for the value followed by the literal "dB"
+// suffix. SSL 360° captures (cap16) only fill the first 4 bytes and leave
+// the trailing two as NUL — the LCD renders whatever ASCII is present, so
+// we use the full 6 bytes when needed (e.g. "-12.5") and NUL-pad otherwise.
+//   FF 66 0A 0C <strip> <6 bytes> "dB" CKSUM  (14 bytes)
+std::vector<uint8_t> buildFaderDbReadout(uint8_t strip, std::string_view value);
 
 // ---- Decoded 2026-04-24 ----
 

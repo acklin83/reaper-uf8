@@ -1348,24 +1348,26 @@ std::string slotLabelForVisibleSlot(int slot)
     return fallback;
 }
 
-// Convert REAPER linear-amplitude volume (0..~4) to a dB string that
-// fits the O/PdB zone's 4-char value slot: "-inf", "-6.0", "0.0", "12.0".
+// Convert REAPER linear-amplitude volume (0..~4) to a dB string for the
+// O/PdB zone's 6-char value slot: "-inf", "-6.0", "0.0", "12.0", "-12.5",
+// "-100".
 //
 // REAPER stores fader position as a linear multiplier — 1.0 = 0 dB.
 // Below ~10^-5 we call it "-inf" to match what the SSL LCD shows at
-// the fader bottom.
+// the fader bottom. Always one decimal where it fits in 6 chars; values
+// past -100 dB drop the decimal to keep the leading minus visible.
 std::string formatDbReadout(double linearAmp)
 {
     if (linearAmp < 1e-5) return "-inf";
     const double dB = 20.0 * std::log10(linearAmp);
-    char buf[8];
-    if (std::abs(dB) < 10.0) {
-        std::snprintf(buf, sizeof(buf), "%.1f", dB);
-    } else {
-        std::snprintf(buf, sizeof(buf), "%.0f", dB);
-    }
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%.1f", dB);
     std::string s(buf);
-    if (s.size() > 4) s.resize(4);
+    if (s.size() > 6) {
+        std::snprintf(buf, sizeof(buf), "%.0f", dB);
+        s.assign(buf);
+        if (s.size() > 6) s.resize(6);
+    }
     return s;
 }
 
@@ -1737,9 +1739,35 @@ void commitDebouncedTouchReleases()
     const auto now = std::chrono::steady_clock::now();
     for (uint8_t s = 0; s < 8; ++s) {
         if (!g_touchReleasePending[s].load()) continue;
-        if (now - g_touchLastPress[s] < kTouchDebounceQuiet) continue;
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - g_touchLastPress[s]).count();
+        if (elapsed < kTouchDebounceQuiet.count()) continue;
         g_touchReleasePending[s].store(false);
-        if (!g_touchReported[s].exchange(false)) continue;
+        const bool wasReported = g_touchReported[s].exchange(false);
+        if (!wasReported) continue;
+
+        if (!g_dev) continue;
+        MediaTrack* tr = g_slotTrack[s];
+        if (!tr) continue;
+
+        // cap32 showed SSL360 sending nothing motor-related between touches
+        // — it relied on the next FF 1E position push to "implicitly
+        // re-engage" the motor. In our PM-mode setup that implicit
+        // re-engage doesn't actually move the fader: motor stays limp,
+        // FF 1E commands are accepted as a target update but the fader
+        // doesn't follow.
+        //
+        // Explicit re-engage works as long as we push the current REAPER
+        // position FIRST (so the firmware's target is up-to-date), THEN
+        // send FF 1D 02 strip 01. Without the position-first ordering the
+        // firmware briefly drives toward a stale internal target and the
+        // fader visibly jumps.
+        const uint16_t pb  = linearVolumeToPb(uiVolLinear(tr));
+        const uint8_t  lsb = static_cast<uint8_t>(pb & 0x7F);
+        const uint8_t  msb = static_cast<uint8_t>((pb >> 7) & 0x7F);
+        g_dev->send(uf8::buildFaderPosition(static_cast<uint8_t>(s), lsb, msb));
+        g_dev->send(uf8::buildMotorEnable(static_cast<uint8_t>(s), true));
+        g_lastFaderPb[s] = pb;
 
         // No host action on release: SSL 360° sends nothing between
         // touches (cap32, 2026-04-25) — motor stays limp until the next
@@ -1869,7 +1897,10 @@ void onTimer()
     commitDebouncedTouchReleases();
     if (g_sync) g_sync->refresh(reaperColorForVisibleSlot);
     pushZonesForVisibleSlots();
-    pushSelColourBar();
+    // pushSelColourBar() removed: it was a per-tick fallback that wrote
+    // SEL LEDs in white-only mode (buildSelWhite). With track-colour SEL
+    // now driven through sendLed() + the bank-shift refresh, this fallback
+    // was overwriting the coloured frames with plain white on every tick.
     pushVuMeter();
     // UC1 VU — same peak data, mapped to the focused track's L/R
     // channels. Single meter-pair on UC1 (not per-strip).
