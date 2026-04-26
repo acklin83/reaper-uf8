@@ -25,32 +25,36 @@ range).
 | Send/Plugin 7 | `0x4E` | `0x31` | white |
 | Send/Plugin 8 | `0x4F` | `0x30` | white |
 | Plugin | `0x50` | `0x2F` | white |
-| Channel | `0x51` | TBD | (inactive) |
-| Page ← | `0x52` | `0x5D`/`0x5E` (TBD which) | white |
+| Channel | `0x51` | TBD | no LED changes captured (modal/inactive in test) |
+| Page ← | `0x52` | `0x5D` (toggles with `0x5E`) | white |
 | Page → | `0x53` | `0x5C` | white |
-| Flip | `0x54` | TBD | white (BLINKS when active) |
-| Automation Off | `0x58` | TBD | white-OFF (radio) |
+| Flip | `0x54` | `0x2B` | white (BLINKS when active) |
+| Automation Off | `0x58` | TBD | (not pressed in capture) |
 | Read | `0x59` | `0x26` | **green** (`F0 F0`) |
 | Write | `0x5A` | `0x25` | **red** (`0F F0`) |
 | Trim | `0x5B` | `0x24` | **orange** (`3F F0`) |
 | Latch | `0x5C` | `0x23` | **red** (`0F F0`) |
 | Touch | `0x5D` | `0x22` | **yellow** (`EF F0`) |
-| V-Pot Bank | `0x68` | TBD | TBD |
-| Soft 1..5 | `0x69..0x6D` | TBD | TBD |
-| PAN | `0x6E` | TBD | TBD |
+| V-Pot Bank | `0x68` | `0x5F` | white |
+| Soft 1 | `0x69` | `0x5E` | white |
+| Soft 2 | `0x6A` | `0x5D` | white |
+| Soft 3 | `0x6B` | `0x5C` | white |
+| Soft 4 | `0x6C` | `0x5B` | white |
+| Soft 5 | `0x6D` | `0x5A` | white |
+| PAN | `0x6E` | `0x59` | white |
 | Fine / Shift | `0x6F` | `0x58` | white |
-| Norm / Clear | `0x70` | TBD | TBD |
-| Rec / ALL | `0x71` | TBD | (inactive) |
+| Norm / Clear | `0x70` | `0x57` | white |
+| Rec / ALL | `0x71` | `0x56` | **red** (`0F F0`) |
 | Auto / Zero | `0x72` | `0x55` | white |
 | Nav | `0x73` | `0x54` | white |
-| Nudge | `0x74` | TBD | TBD |
+| Nudge | `0x74` | `0x53` | white |
 | Focus | `0x75` | `0x52` | white |
 | Bank ← | `0x78` | `0x4F` | white |
 | Bank → | `0x79` | `0x4E` | white |
 | Zoom ↑ | `0x7A` | `0x4D` | **green** |
-| Zoom ← | `0x7B` | TBD | TBD |
+| Zoom ← | `0x7B` | `0x4C` | white |
 | Zoom centre ⊙ | `0x7C` | `0x4B` | **red** |
-| Zoom → | `0x7D` | TBD | TBD |
+| Zoom → | `0x7D` | `0x4A` | white |
 | Zoom ↓ | `0x7E` | `0x49` | **yellow** |
 
 ## Off-state
