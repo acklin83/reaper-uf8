@@ -1348,24 +1348,26 @@ std::string slotLabelForVisibleSlot(int slot)
     return fallback;
 }
 
-// Convert REAPER linear-amplitude volume (0..~4) to a dB string that
-// fits the O/PdB zone's 4-char value slot: "-inf", "-6.0", "0.0", "12.0".
+// Convert REAPER linear-amplitude volume (0..~4) to a dB string for the
+// O/PdB zone's 6-char value slot: "-inf", "-6.0", "0.0", "12.0", "-12.5",
+// "-100".
 //
 // REAPER stores fader position as a linear multiplier — 1.0 = 0 dB.
 // Below ~10^-5 we call it "-inf" to match what the SSL LCD shows at
-// the fader bottom.
+// the fader bottom. Always one decimal where it fits in 6 chars; values
+// past -100 dB drop the decimal to keep the leading minus visible.
 std::string formatDbReadout(double linearAmp)
 {
     if (linearAmp < 1e-5) return "-inf";
     const double dB = 20.0 * std::log10(linearAmp);
-    char buf[8];
-    if (std::abs(dB) < 10.0) {
-        std::snprintf(buf, sizeof(buf), "%.1f", dB);
-    } else {
-        std::snprintf(buf, sizeof(buf), "%.0f", dB);
-    }
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%.1f", dB);
     std::string s(buf);
-    if (s.size() > 4) s.resize(4);
+    if (s.size() > 6) {
+        std::snprintf(buf, sizeof(buf), "%.0f", dB);
+        s.assign(buf);
+        if (s.size() > 6) s.resize(6);
+    }
     return s;
 }
 
@@ -1737,9 +1739,22 @@ void commitDebouncedTouchReleases()
     const auto now = std::chrono::steady_clock::now();
     for (uint8_t s = 0; s < 8; ++s) {
         if (!g_touchReleasePending[s].load()) continue;
-        if (now - g_touchLastPress[s] < kTouchDebounceQuiet) continue;
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - g_touchLastPress[s]).count();
+        if (elapsed < kTouchDebounceQuiet.count()) continue;
         g_touchReleasePending[s].store(false);
-        if (!g_touchReported[s].exchange(false)) continue;
+        const bool wasReported = g_touchReported[s].exchange(false);
+        if (!wasReported) continue;
+
+        // Force the motor-echo path to fire a fresh FF 1E position push
+        // on the next timer tick — even if REAPER's volume didn't change
+        // during the touch (a tap with no movement). Without this, dedup
+        // sees pb == g_lastFaderPb and skips the push, leaving the motor
+        // stuck in limp mode (which the touch-press handler put it in).
+        // The implicit motor re-engage rides on the FF 1E command, so
+        // skipping the push means the fader never reacts to subsequent
+        // REAPER volume changes.
+        g_lastFaderPb[s] = 0xFFFF;
 
         // No host action on release: SSL 360° sends nothing between
         // touches (cap32, 2026-04-25) — motor stays limp until the next

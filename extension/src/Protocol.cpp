@@ -323,16 +323,16 @@ std::vector<uint8_t> buildVPotReadoutBar(const std::array<uint16_t, kStripCount>
     return frame;
 }
 
-std::vector<uint8_t> buildFaderDbReadout(uint8_t strip, std::string_view fourChars)
+std::vector<uint8_t> buildFaderDbReadout(uint8_t strip, std::string_view value)
 {
-    // FF 66 0A 0C <strip> <4 bytes, NUL-padded> 00 00 "dB" CKSUM    (14 bytes)
-    // The 4-byte value slot is NUL-padded (not space-padded) to match SSL 360°.
+    // FF 66 0A 0C <strip> <6 bytes, NUL-padded> "dB" CKSUM    (14 bytes)
+    // SSL 360° only fills the first 4 bytes; the remaining 2 are NUL there.
+    // We treat the full 6 bytes as a value slot so values like "-12.5" fit
+    // (NUL-padded, matching SSL's convention for short values).
     std::vector<uint8_t> frame{0xFF, 0x66, 0x0A, 0x0C, strip};
-    for (size_t i = 0; i < 4; ++i) {
-        frame.push_back(i < fourChars.size() ? static_cast<uint8_t>(fourChars[i]) : 0x00);
+    for (size_t i = 0; i < 6; ++i) {
+        frame.push_back(i < value.size() ? static_cast<uint8_t>(value[i]) : 0x00);
     }
-    frame.push_back(0x00);
-    frame.push_back(0x00);
     frame.push_back('d');
     frame.push_back('B');
     std::span<const uint8_t> payload{frame.data() + 1, frame.size() - 1};
