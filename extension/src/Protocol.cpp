@@ -242,8 +242,8 @@ LedColour ledColourForTrackRgb(uint32_t rgb)
     return best;
 }
 
-std::vector<uint8_t> buildLedColourPair(uint8_t strip, LedClass cls, bool on,
-                                        LedColour colour)
+LedColourFrames buildLedColourPair(uint8_t strip, LedClass cls, bool on,
+                                   LedColour colour)
 {
     const uint8_t a38 = on ? colour.aBright : colour.aDim;
     const uint8_t b38 = on ? colour.bBright : colour.bDim;
@@ -257,40 +257,21 @@ std::vector<uint8_t> buildLedColourPair(uint8_t strip, LedClass cls, bool on,
     const uint8_t cell = static_cast<uint8_t>(
         0x17 - 3 * strip - static_cast<uint8_t>(cls));
 
-    std::vector<uint8_t> frame;
-    frame.reserve(16);
-
-    // FF 38 04 <cell> 00 <a> <b> CKSUM
-    frame.push_back(0xFF);
-    frame.push_back(0x38);
-    frame.push_back(0x04);
-    frame.push_back(cell);
-    frame.push_back(0x00);
-    frame.push_back(a38);
-    frame.push_back(b38);
+    LedColourFrames out;
+    out.ff38 = {0xFF, 0x38, 0x04, cell, 0x00, a38, b38};
     {
-        std::span<const uint8_t> payload{frame.data() + 1, frame.size() - 1};
-        frame.push_back(checksum(payload));
+        std::span<const uint8_t> payload{out.ff38.data() + 1, out.ff38.size() - 1};
+        out.ff38.push_back(checksum(payload));
     }
-
-    // FF 39 04 <cell> 00 <a> <b> CKSUM
-    const size_t f2 = frame.size();
-    frame.push_back(0xFF);
-    frame.push_back(0x39);
-    frame.push_back(0x04);
-    frame.push_back(cell);
-    frame.push_back(0x00);
-    frame.push_back(a39);
-    frame.push_back(b39);
+    out.ff39 = {0xFF, 0x39, 0x04, cell, 0x00, a39, b39};
     {
-        std::span<const uint8_t> payload{frame.data() + f2 + 1, 6};
-        frame.push_back(checksum(payload));
+        std::span<const uint8_t> payload{out.ff39.data() + 1, out.ff39.size() - 1};
+        out.ff39.push_back(checksum(payload));
     }
-
-    return frame;
+    return out;
 }
 
-std::vector<uint8_t> buildLedColourPair(uint8_t strip, LedClass cls, bool on)
+LedColourFrames buildLedColourPair(uint8_t strip, LedClass cls, bool on)
 {
     return buildLedColourPair(strip, cls, on, ledColourClassDefault(cls));
 }

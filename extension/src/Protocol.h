@@ -157,13 +157,21 @@ LedColour ledColourForTrackRgb(uint32_t rgb);
 // Default colour for a class when no track-colour override is requested.
 LedColour ledColourClassDefault(LedClass cls);
 
-// Build the FF 38 + FF 39 frame pair. Returns 16 bytes (two 8-byte frames
-// concatenated). Caller sends both as a single OUT.
-std::vector<uint8_t> buildLedColourPair(uint8_t strip, LedClass cls, bool on,
-                                        LedColour colour);
+// Build the FF 38 + FF 39 frame pair as TWO separate 8-byte frames.
+// SSL360's captures show these always traverse the bus as independent USB
+// transfers — combining them into one transfer makes the UF8 firmware
+// treat the second frame as garbage and stall subsequent commands (e.g.
+// fader-motor writes go silent).
+struct LedColourFrames {
+    std::vector<uint8_t> ff38;
+    std::vector<uint8_t> ff39;
+};
+
+LedColourFrames buildLedColourPair(uint8_t strip, LedClass cls, bool on,
+                                   LedColour colour);
 
 // Convenience overload — uses ledColourClassDefault(cls) for the colour.
-std::vector<uint8_t> buildLedColourPair(uint8_t strip, LedClass cls, bool on);
+LedColourFrames buildLedColourPair(uint8_t strip, LedClass cls, bool on);
 
 // Channel Number Zone — the small numeric digit top-left of each scribble
 // strip's color bar (REAPER track index rendered as ASCII digits).

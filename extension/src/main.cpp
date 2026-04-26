@@ -607,6 +607,13 @@ uf8::LedClass toUf8LedClass(LedClass cls)
     }
 }
 
+void sendLedFrames(uf8::LedColourFrames frames)
+{
+    if (!g_dev) return;
+    g_dev->send(std::move(frames.ff38));
+    g_dev->send(std::move(frames.ff39));
+}
+
 void sendLed(LedClass cls, MediaTrack* tr, bool on)
 {
     if (!g_dev) return;
@@ -615,7 +622,7 @@ void sendLed(LedClass cls, MediaTrack* tr, bool on)
         if (g_slotTrack[s] != tr) continue;
         const uf8::LedClass devCls = toUf8LedClass(cls);
         const uf8::LedColour col = ledColourFor(cls, tr);
-        g_dev->send(uf8::buildLedColourPair(static_cast<uint8_t>(s), devCls, on, col));
+        sendLedFrames(uf8::buildLedColourPair(static_cast<uint8_t>(s), devCls, on, col));
         return;
     }
 }
@@ -705,9 +712,9 @@ ReaSixtySurface::ReaSixtySurface()
         // colour-pair for every per-strip LED at open time so the initial
         // display matches an idle REAPER session.
         for (uint8_t s = 0; s < 8; ++s) {
-            g_dev->send(uf8::buildLedColourPair(s, uf8::LedClass::Solo, false));
-            g_dev->send(uf8::buildLedColourPair(s, uf8::LedClass::Cut,  false));
-            g_dev->send(uf8::buildLedColourPair(s, uf8::LedClass::Sel,  false));
+            sendLedFrames(uf8::buildLedColourPair(s, uf8::LedClass::Solo, false));
+            sendLedFrames(uf8::buildLedColourPair(s, uf8::LedClass::Cut,  false));
+            sendLedFrames(uf8::buildLedColourPair(s, uf8::LedClass::Sel,  false));
         }
 
         // Force the bank-change re-sync block to fire on the very first
@@ -1462,12 +1469,12 @@ void pushZonesForVisibleSlots()
             // so it's gated inside sendLed itself.
             if (g_dev) {
                 const auto strip = static_cast<uint8_t>(s);
-                g_dev->send(uf8::buildLedColourPair(strip, uf8::LedClass::Sel,  sel,
-                                                    ledColourFor(LedClass::Sel,  t)));
-                g_dev->send(uf8::buildLedColourPair(strip, uf8::LedClass::Cut,  mute,
-                                                    ledColourFor(LedClass::Mute, t)));
-                g_dev->send(uf8::buildLedColourPair(strip, uf8::LedClass::Solo, solo,
-                                                    ledColourFor(LedClass::Solo, t)));
+                sendLedFrames(uf8::buildLedColourPair(strip, uf8::LedClass::Sel,  sel,
+                                                      ledColourFor(LedClass::Sel,  t)));
+                sendLedFrames(uf8::buildLedColourPair(strip, uf8::LedClass::Cut,  mute,
+                                                      ledColourFor(LedClass::Mute, t)));
+                sendLedFrames(uf8::buildLedColourPair(strip, uf8::LedClass::Solo, solo,
+                                                      ledColourFor(LedClass::Solo, t)));
                 (void)arm;
             }
         }
