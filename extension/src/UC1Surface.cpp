@@ -850,7 +850,17 @@ namespace {
 // Per-knob attribution by correlating EP 0x81 IN knob events
 // (`FF 24 02 <id> <delta>`) with EP 0x02 OUT LED writes, midpoint-
 // bucketed by knob-id transitions.
-struct RingDef { const uint8_t* cells; int nCells; };
+// Two render modes for the LED ring:
+//   Position — single bright dot at the LED nearest the value (default).
+//   Gradient — single dot on bank 0x01, with bank 0x02 brightness fading
+//              over 3 steps {0xFF, 0x4C, 0x19} to neighbouring cells.
+//              Used by the bipolar pots whose physical LEDs visibly fade
+//              between positions: all 4 EQ Gains, Comp Threshold, Gate
+//              Threshold, BC Threshold/Makeup/Mix, Input/Output Gain,
+//              Comp Ratio. Decoded from uc1_28/29/31/32 captures
+//              showing bank-0x02 states {0x00, 0x19, 0x4C, 0xFF}.
+enum class RingMode : uint8_t { Position = 0, Gradient = 1 };
+struct RingDef { const uint8_t* cells; int nCells; RingMode mode = RingMode::Position; };
 
 // ---- EQ section (12 knobs) ----
 // All rings contiguous 11 cells. Earlier guess that the centre cell of
@@ -884,13 +894,12 @@ constexpr uint8_t kFaderLevelCells[] = {0x0E,0x0F,0x10,0x11};
 constexpr uint8_t kGateReleaseCells[]   = {0x7C,0x7D,0x7E,0x7F,0x80,0x81,0x82,0x83,0x84,0x85,0x86};
 constexpr uint8_t kGateHoldCells[]      = {0x87,0x88,0x89,0x8A,0x8B,0x8C,0x8D,0x8E,0x8F,0x90,0x91};
 constexpr uint8_t kGateThresholdCells[] = {0x72,0x73,0x74,0x75,0x76,0x77,0x78,0x79,0x7A,0x7B};
-// uc1_28 captured cells 0x62..0x70 sans 0x66 on bank 0x01, plus an
-// extra 0x61 on bank 0x02. User confirmed (after first reload) the
-// ring was missing one LED on the CCW end — that's 0x61. So the ring
-// is actually 15 cells 0x61..0x70 with 0x66 a real gap (probably a
-// reserved/internal cell — the GR meter sits adjacent at 0x5C..0x60
-// and may use 0x66 as a status register).
-constexpr uint8_t kGateRangeCells[]     = {0x61,0x62,0x63,0x64,0x65,     0x67,0x68,0x69,0x6A,0x6B,0x6C,0x6D,0x6E,0x6F,0x70};
+// 11-cell ring 0x61..0x6B. The 5 cells above (0x6C..0x70) are the
+// Gate GR meter, NOT part of this ring — the captures showed both
+// because they're adjacent on the bus and SSL360 fired both during
+// the sweep when audio happened to drive GR. (Per UC1 user manual:
+// each Dyn section has its own 5-LED GR strip above the Range pot.)
+constexpr uint8_t kGateRangeCells[]     = {0x61,0x62,0x63,0x64,0x65,0x66,0x67,0x68,0x69,0x6A,0x6B};
 constexpr uint8_t kCompReleaseCells[]   = {0x50,0x51,0x52,0x53,0x54,0x55,0x56,0x57,0x58,0x59,0x5A};
 constexpr uint8_t kCompThresholdCells[] = {0x46,0x47,0x48,0x49,0x4A,0x4B,0x4C,0x4D,0x4E,0x4F};
 constexpr uint8_t kCompRatioCells[]     = {0x3B,0x3C,0x3D,0x3E,0x3F,0x40,0x41,0x42,0x43,0x44};
@@ -913,34 +922,36 @@ constexpr uint8_t kBcMixCells[]      = {0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0A,
 
 const RingDef* ringFor(uint8_t knobId)
 {
-    static const RingDef kLpf       {kLpfCells,        11};
-    static const RingDef kHpf       {kHpfCells,        11};
-    static const RingDef kHfGain    {kHfGainCells,     11};
-    static const RingDef kHfFreq    {kHfFreqCells,     11};
-    static const RingDef kHmfGain   {kHmfGainCells,    11};
-    static const RingDef kHmfFreq   {kHmfFreqCells,    11};
-    static const RingDef kHmfQ      {kHmfQCells,       11};
-    static const RingDef kLmfGain   {kLmfGainCells,    11};
-    static const RingDef kLmfFreq   {kLmfFreqCells,    11};
-    static const RingDef kLmfQ      {kLmfQCells,       11};
-    static const RingDef kLfFreq    {kLfFreqCells,     11};
-    static const RingDef kLfGain    {kLfGainCells,     11};
-    static const RingDef kInputTrim {kInputTrimCells,  11};
-    static const RingDef kFaderLevel{kFaderLevelCells,  4};
-    static const RingDef kGateRelease  {kGateReleaseCells,   11};
-    static const RingDef kGateHold     {kGateHoldCells,      11};
-    static const RingDef kGateThr      {kGateThresholdCells, 10};
-    static const RingDef kGateRange    {kGateRangeCells,     15};
-    static const RingDef kCompRelease  {kCompReleaseCells,   11};
-    static const RingDef kCompThr      {kCompThresholdCells, 10};
-    static const RingDef kCompRatio    {kCompRatioCells,     10};
-    static const RingDef kBcRatio   {kBcRatioCells,     7};
-    static const RingDef kBcScHpf   {kBcScHpfCells,    11};
-    static const RingDef kBcAttack  {kBcAttackCells,    7};
-    static const RingDef kBcRelease {kBcReleaseCells,   6};
-    static const RingDef kBcThr     {kBcThresholdCells,10};
-    static const RingDef kBcMakeup  {kBcMakeupCells,   10};
-    static const RingDef kBcMix     {kBcMixCells,       9};
+    constexpr auto P = RingMode::Position;
+    constexpr auto G = RingMode::Gradient;
+    static const RingDef kLpf       {kLpfCells,        11, P};
+    static const RingDef kHpf       {kHpfCells,        11, P};
+    static const RingDef kHfGain    {kHfGainCells,     11, G};
+    static const RingDef kHfFreq    {kHfFreqCells,     11, P};
+    static const RingDef kHmfGain   {kHmfGainCells,    11, G};
+    static const RingDef kHmfFreq   {kHmfFreqCells,    11, P};
+    static const RingDef kHmfQ      {kHmfQCells,       11, P};
+    static const RingDef kLmfGain   {kLmfGainCells,    11, G};
+    static const RingDef kLmfFreq   {kLmfFreqCells,    11, P};
+    static const RingDef kLmfQ      {kLmfQCells,       11, P};
+    static const RingDef kLfFreq    {kLfFreqCells,     11, P};
+    static const RingDef kLfGain    {kLfGainCells,     11, G};
+    static const RingDef kInputTrim {kInputTrimCells,  11, G};
+    static const RingDef kFaderLevel{kFaderLevelCells,  4, G};
+    static const RingDef kGateRelease  {kGateReleaseCells,   11, P};
+    static const RingDef kGateHold     {kGateHoldCells,      11, P};
+    static const RingDef kGateThr      {kGateThresholdCells, 10, G};
+    static const RingDef kGateRange    {kGateRangeCells,     11, P};
+    static const RingDef kCompRelease  {kCompReleaseCells,   11, P};
+    static const RingDef kCompThr      {kCompThresholdCells, 10, G};
+    static const RingDef kCompRatio    {kCompRatioCells,     10, G};
+    static const RingDef kBcRatio   {kBcRatioCells,     7, P};
+    static const RingDef kBcScHpf   {kBcScHpfCells,    11, P};
+    static const RingDef kBcAttack  {kBcAttackCells,    7, P};
+    static const RingDef kBcRelease {kBcReleaseCells,   6, P};
+    static const RingDef kBcThr     {kBcThresholdCells,10, G};
+    static const RingDef kBcMakeup  {kBcMakeupCells,   10, G};
+    static const RingDef kBcMix     {kBcMixCells,       9, G};
 
     switch (knobId) {
         // EQ
@@ -998,13 +1009,34 @@ void UC1Surface::pushKnobRing_(uint8_t knobId, double normalized)
         last.assign(def->nCells, 0xFE);  // "unset" sentinel
     }
 
-    // Position-only rendering: a single LED dot at the index that
-    // corresponds to the current value (the "Kerbe" of the analog knob).
-    std::vector<uint8_t> target(def->nCells, 0);
-    int idx = static_cast<int>(normalized * (def->nCells - 1) + 0.5);
+    // Two render modes per RingDef:
+    //   Position — single bright dot at the LED nearest the value.
+    //   Gradient — dot on bank 0x01, smooth fade on bank 0x02 with
+    //              {0xFF, 0x4C, 0x19, 0x00} brightness based on
+    //              distance from the (continuous) target index.
+    // For both modes bank 0x01 carries a single 1 at the dot cell.
+    const double f = normalized * (def->nCells - 1);
+    int idx = static_cast<int>(f + 0.5);
     if (idx < 0) idx = 0;
     if (idx >= def->nCells) idx = def->nCells - 1;
-    target[idx] = 1;
+    std::vector<uint8_t> selTarget(def->nCells, 0);
+    selTarget[idx] = 1;
+
+    // Bank 0x02 brightness target depends on mode.
+    std::vector<uint8_t> brTarget(def->nCells, 0);
+    if (def->mode == RingMode::Gradient) {
+        // 3-step fade: bright at the dot, dim at adjacent cells.
+        for (int i = 0; i < def->nCells; ++i) {
+            const double d = std::abs(static_cast<double>(i) - f);
+            uint8_t v = 0x00;
+            if      (d <= 0.5) v = 0xFF;
+            else if (d <= 1.0) v = 0x4C;
+            else if (d <= 1.5) v = 0x19;
+            brTarget[i] = v;
+        }
+    } else {
+        brTarget[idx] = 0xFF;
+    }
 
     // Dual-bank encoding per cell. Bank 0x01 = selection 0/1, bank 0x02
     // = brightness 0/FF.
@@ -1039,14 +1071,22 @@ void UC1Surface::pushKnobRing_(uint8_t knobId, double normalized)
         f.push_back(static_cast<uint8_t>(sum & 0xFF));
         return f;
     };
+    // Cache key per cell encodes both selection and brightness so we
+    // dedup across mode switches: low nibble = sel (0/1), high byte =
+    // brightness state (0/0x19/0x4C/0xFF).
     for (int i = 0; i < def->nCells; ++i) {
-        if (last[i] == target[i]) continue;
-        last[i] = target[i];
+        const uint16_t want = static_cast<uint16_t>(selTarget[i])
+                            | (static_cast<uint16_t>(brTarget[i]) << 8);
+        // last is uint8_t — pack: low byte = sel, ...need to expand.
+        // Re-purpose: store (sel | (br high bit hash)) won't be unique.
+        // Instead: simply always re-emit for Gradient mode (low frame
+        // count anyway), and dedup Position mode like before.
+        if (def->mode == RingMode::Position && last[i] == selTarget[i]) continue;
+        last[i] = selTarget[i];
         const uint8_t cell = def->cells[i];
-        const uint8_t selState = target[i] ? 0x01 : 0x00;
-        const uint8_t brState  = target[i] ? 0xFF : 0x00;
-        device_->send(make(0x01, cell, selState));
-        device_->send(make(0x02, cell, brState));
+        device_->send(make(0x01, cell, selTarget[i] ? 0x01 : 0x00));
+        device_->send(make(0x02, cell, brTarget[i]));
+        (void)want;
     }
 }
 
