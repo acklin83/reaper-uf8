@@ -16,6 +16,8 @@
 #include <functional>
 #include <mutex>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 #include "UC1Device.h"
 #include "UC1PluginMap.h"
@@ -151,6 +153,13 @@ private:
     // Per-knob "fine" toggle. UC1's Fine button acts as a modifier:
     // when on, knob clicks move the param by 1/4 the normal amount.
     std::atomic<bool> fineMode_{false};
+
+    // Per-knob LED-ring cell state cache. pushKnobRing_ writes only
+    // cells whose target state differs from the cache; setFocusedTrack
+    // clears it so the next refresh re-writes every cell, preventing
+    // device/cache desync (init-flood lit cells we never told the
+    // firmware to clear, etc.).
+    std::unordered_map<uint8_t, std::vector<uint8_t>> ringCellCache_;
 };
 
 } // namespace uc1

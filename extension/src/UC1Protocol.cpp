@@ -181,25 +181,39 @@ std::vector<std::vector<uint8_t>> buildSevenSeg(unsigned int value)
     appendDigit(frames, 0x10, false, ones);
     appendDigit(frames, 0x08, false, tens);
 
-    // Hundreds: partial decode. uc1_27 saw 0x00/0x03/0x04/0x05 toggle
-    // during 99→100 (those are the "1"-shape segments). Init flood
-    // also lights 0x06 — that's almost certainly segment g (the
-    // horizontal middle bar) which renders as "-" when unmatched.
-    // Clear the full gap range 0x00..0x07 for blank-hundreds to wipe
-    // any stale init-state; light only the 4 known cells for "1".
+    // Hundreds: partial decode. uc1_27 only captured the 99→100
+    // transition, which lit cells 0x00, 0x03, 0x04, 0x05 — that is the
+    // observed "1"-shape pattern (4 cells, not the 2 you'd expect from
+    // alphabetical b,c). Cell 0x06 lights during init flood and is
+    // almost certainly segment g (middle bar). Cells 0x01, 0x02, 0x07
+    // never appeared in any captured transition, so their semantics
+    // are unknown.
+    //
+    // For digit "0" (and any non-1 digit until we capture more
+    // transitions), we GUESS that the 6 outer-perimeter segments are
+    // the cells 0x00..0x05 (a..f in some order, with the existing "1"
+    // pattern as a known subset), 0x06 is the middle bar (off for "0"),
+    // and 0x07 is unused. So "0" lights {0x00..0x05}, all others
+    // 0..7 cleared except the known "1" subset for hundreds≥1. This
+    // is best-effort until uc1_28+ captures a 0..9 hundreds sweep.
     {
-        // Cells 0x00..0x07 cover the hundreds-digit segments (at least
-        // the ones we can reach). Cells marked true are the known "1"
-        // pattern seen in uc1_27 — light those when hundreds != 0.
-        // The rest always get cleared so init-flood residue (e.g. the
-        // mysterious "-" at 0x06) goes away.
-        static constexpr struct { uint8_t cell; bool lightForNonZero; } kHundredsCells[] = {
-            {0x00, true},  {0x01, false}, {0x02, false}, {0x03, true},
-            {0x04, true},  {0x05, true},  {0x06, false}, {0x07, false},
-        };
-        for (const auto& hc : kHundredsCells) {
-            uint8_t st = (hundreds != 0 && hc.lightForNonZero) ? 0x01 : 0x00;
-            auto f = buildLedWrite(0x01, hc.cell, st);
+        // Known/guessed cell sets per digit. nullopt entries fall back
+        // to the "1" pattern as a placeholder for unmapped digits.
+        static constexpr uint8_t kZero[]     = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05};
+        static constexpr uint8_t kOne[]      = {0x00, 0x03, 0x04, 0x05};
+
+        std::vector<uint8_t> lit;
+        if (hundreds == 0) {
+            lit.assign(std::begin(kZero), std::end(kZero));
+        } else {
+            // 1..9 — only "1" is captured; reuse it for 2..9 as a
+            // placeholder until a real sweep lands.
+            lit.assign(std::begin(kOne), std::end(kOne));
+        }
+
+        for (uint8_t cell = 0x00; cell <= 0x07; ++cell) {
+            const bool on = std::find(lit.begin(), lit.end(), cell) != lit.end();
+            auto f = buildLedWrite(0x01, cell, on ? 0x01 : 0x00);
             f[5] = 0x00;
             uint32_t sum = 0;
             for (size_t i = 1; i < f.size() - 1; ++i) sum += f[i];

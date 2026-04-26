@@ -137,6 +137,13 @@ void UC1Surface::setFocusedTrack(void* track)
 {
     if (focusedTrack_ == track) return;
     focusedTrack_ = track;
+    // Invalidate the ring-cell cache so refresh()'s eager ring loops
+    // re-write every cell on the new focus, not just the ones whose
+    // target state differs from our last-known state. Without this, a
+    // cell that the firmware lit (init flood, previous session, etc.)
+    // but our cache thinks is OFF stays stuck until the user rotates
+    // the dot through it — manifests as a "hanging" LED in EQ rings.
+    ringCellCache_.clear();
     refresh();
 }
 
@@ -975,8 +982,10 @@ void UC1Surface::pushKnobRing_(uint8_t knobId, double normalized)
     if (normalized > 1.0) normalized = 1.0;
 
     // Per-knob state cache so we only push cells that changed state.
-    static std::unordered_map<uint8_t, std::vector<uint8_t>> lastStates;
-    auto& last = lastStates[knobId];
+    // Cleared in setFocusedTrack so a focus change re-writes every
+    // cell — the sentinel mismatch in the loop below treats every
+    // cell as "needs update" on the next push.
+    auto& last = ringCellCache_[knobId];
     if (static_cast<int>(last.size()) != def->nCells) {
         last.assign(def->nCells, 0xFE);  // "unset" sentinel
     }
