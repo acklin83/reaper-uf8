@@ -411,28 +411,42 @@ Both banks use role byte `0x00` (not `0x01` which is the LED-mode used elsewhere
 
 ### Pot → cell clusters (from `dual_37..dual_41`)
 
-All UC1 pot sweeps produced FF 13 04 traffic on bank 01 + bank 02 simultaneously. Rough per-pot cell ranges (exact pot-to-cluster attribution requires re-listening to the capture order):
+All UC1 pot sweeps produced FF 13 04 traffic on bank 01 + bank 02 simultaneously. Per-pot cell maps below derived by correlating EP 0x81 IN knob events (`FF 24 02 <id> <delta>`) with EP 0x02 OUT LED writes and bucketing each LED event into the knob whose event window contains it (midpoint-split between consecutive knob-id transitions). The "states" column lists the bank02 brightness values seen — 00/FF only = Position-encoded ring; gradient (0x19/0x33/0x4C/0xFF) = Bipolar (gain knobs) or Additive (threshold/mix/level).
 
-| Pot (approx) | Cell range observed |
-|--------------|---------------------|
-| Low Pass | `0x95, 0x97, 0x98..0x9F` (10 cells) |
-| High Pass | `0x57, 0x63, 0x6C..0x6E` (5) |
-| HF Gain | `0x61..0x63` (3) |
-| HF Freq | `0x55..0x57` (3) |
-| HMF Gain | `0x34, 0x3F, 0x49, 0x4A` (4) |
-| HMF Freq | `0x3D..0x41` (5) |
-| HMF Q | `0x32..0x35` (4) |
-| LMF Gain | `0x27..0x2A` (4) |
-| LMF Freq | `0x1B..0x2A` (partial) |
-| Comp Ratio, Comp Thr, Comp Release | `0x72..0x91` range |
-| Gate Range, Gate Thr, Gate Release, Gate Hold | (nested in Dyn range) |
-| BC Threshold/Makeup/Ratio/Attack/Release/Mix/S-C HPF | `0xCB..0xF3` range |
-| Input Gain / Output Gain | `0xCB..0xD5`, `0x03..0x0C` (additive ring, not bi-polar) |
+| Knob ID | Knob | Cells (observed) | n | states (bank02) | Encoding | Source |
+|--------:|------|------------------|---|-----------------|----------|--------|
+| `0x00` | Low Pass | `0x95..0x9F` | 11 | 00,FF | Position | dual_37 (cell 0x96 inferred) |
+| `0x01` | High Pass | — | — | — | — | no clean capture |
+| `0x02` | HF Gain | — | — | — | — | no capture |
+| `0x03` | HF Freq | `0x77, 0x78` | 2 | 00,33 | Position (partial) | dual_38 (4 events, too sparse) |
+| `0x04` | HMF Gain | bank01: `0x6C, 0x6E` | 2 | 00,19,33,FF | Bipolar (partial) | dual_38 (sparse) |
+| `0x05` | HMF Freq | `0x61..0x63` | 3 | 00,FF | Position (partial) | dual_38 |
+| `0x06` | HMF Q | `0x55..0x57` | 3 | 00,FF | Position (partial) | dual_38 |
+| `0x07` | LMF Gain | bank01: `0x49` | 1 | 00,19,33,4C,FF | Bipolar (partial) | dual_38 (sparse) |
+| `0x08` | LMF Freq | `0x3D..0x41` | 5 | 00,FF | Position | dual_38 |
+| `0x09` | LMF Q | `0x32..0x35` | 4 | 00,FF | Position | dual_38 |
+| `0x0A` | LF Freq | `0x27..0x2A` | 4 | 00,33 | Position | dual_38 |
+| `0x0B` | LF Gain | bank01: `0x1B, 0x1C` | 2 | 00,19,33,4C,FF | Bipolar (partial) | dual_38 (sparse) |
+| `0x0E` | BC Ratio | `0xD6..0xDC` | 7 | 00,FF | Position | dual_40 |
+| `0x0F` | BC ScHpf | `0xCB..0xD5` | 11 | 00,FF | Position | dual_40 + dual_41 (consistent) |
+| `0x10` | BC Attack | `0xDD..0xE3` | 7 | 00,FF | Position | dual_40 |
+| `0x11` | BC Release | `0xFA..0xFF, 0x00` | 7 | 00,FF | Position (wraps byte boundary) | dual_40 |
+| `0x12` | BC Threshold | — | — | — | — | not captured |
+| `0x13` | BC Makeup | `0xEF..0xF3` | 5 | 0F,19,33,4C,FF | Bipolar (partial) | dual_40 |
+| `0x14` | BC Mix | `0x03..0x0C` | 10 | 19,4C,FF | Additive | dual_40 + dual_41 (consistent) |
+| `0x17` | Gate Release | `0x7C..0x86` | 11 | 00,FF | Position | dual_39 |
+| `0x18` | Gate Hold | `0x87..0x91` | 11 | 00,FF | Position | dual_39 |
+| `0x19` | Gate Threshold | `0x72..0x7B` | 10 | 00,19,4C,FF | Additive | dual_39 (cell 0x71 likely missing — not swept) |
+| `0x1A` | Gate Range | — | — | — | — | not captured |
+| `0x1B` | Comp Release | — | — | — | — | not captured |
+| `0x1C` | Comp Threshold | — | — | — | — | not captured |
+| `0x1D` | Comp Ratio | — | — | — | — | not captured |
+| `0x0C` | CS Input Trim | — | — | — | — | dual_41 misnamed (used 0x0F + 0x14) |
+| `0x16` | CS Fader Level | — | — | — | — | dual_41 misnamed (used 0x0F + 0x14) |
 
-Narrower clusters (3-4 cells) = 7-LED rings for BC attack/release/ratio.
-Wider clusters (10 cells) = 11-LED rings for EQ gain/freq.
+Implementation in `extension/src/UC1Surface.cpp` (`ringFor()` / `pushKnobRing_`) covers all rows with non-empty cells. The "(partial)" markers mean the user only swept a fraction of the ring during the capture — values in the unswept range will not light an LED. Filling these in needs a fresh capture with full clockwise + counter-clockwise sweeps for each pot.
 
-Precise pot → cell map will be tightened in a follow-up pass by correlating the capture's click timing with the user's hand-recorded pot order.
+Tool: `analysis/decode_pot_clusters.py` does the time-bucketing; the per-knob attribution above came from a follow-up script that joined LED events to `FF 24` knob events by midpoint-split. Re-run on any new capture to refine.
 
 ### Session log (additions)
 

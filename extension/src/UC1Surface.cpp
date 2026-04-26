@@ -735,6 +735,13 @@ enum RingEncoding { Position, Bipolar, Additive };
 
 struct RingDef { const uint8_t* cells; int nCells; RingEncoding kind; };
 
+// Cell maps below were extracted by correlating EP 0x81 IN knob events
+// (`FF 24 02 <id> <delta>`) with EP 0x02 OUT LED writes per capture and
+// bucketing by midpoint between knob-id transitions. See
+// docs/protocol-notes-uc1.md "Pot → cell clusters" table.
+
+// ---- EQ section (dual_38_eq_pots) ----
+
 // Low Pass — 11 LEDs (standard SSL EQ-ring count). 10 cells visible
 // in dual_37 (0x95, 0x97..0x9F); cell 0x96 didn't fire in that
 // capture because the user started the sweep at position 0x97 (3rd
@@ -744,12 +751,135 @@ constexpr uint8_t kLpfCells[] = {
     0x95, 0x96, 0x97, 0x98, 0x99, 0x9A, 0x9B, 0x9C, 0x9D, 0x9E, 0x9F,
 };
 
+// HMF Freq — partial sweep observed (3 of presumably 11 cells). Bank01
+// states 00/01 only → Position-encoded. Cells outside the observed
+// range will not light until a fuller sweep is captured.
+constexpr uint8_t kHmfFreqCells[] = {
+    0x61, 0x62, 0x63,
+};
+
+// HMF Q — partial sweep (3 cells). Position-encoded.
+constexpr uint8_t kHmfQCells[] = {
+    0x55, 0x56, 0x57,
+};
+
+// LMF Freq — partial sweep (5 cells). Position-encoded.
+constexpr uint8_t kLmfFreqCells[] = {
+    0x3D, 0x3E, 0x3F, 0x40, 0x41,
+};
+
+// LMF Q — partial sweep (4 cells). Position-encoded.
+constexpr uint8_t kLmfQCells[] = {
+    0x32, 0x33, 0x34, 0x35,
+};
+
+// LF Freq — partial sweep (4 cells). Position-encoded.
+constexpr uint8_t kLfFreqCells[] = {
+    0x27, 0x28, 0x29, 0x2A,
+};
+
+// ---- Dyn / Gate section (dual_39_dyn_pots) ----
+
+// Gate Release — 11 cells, contiguous, Position-encoded.
+constexpr uint8_t kGateReleaseCells[] = {
+    0x7C, 0x7D, 0x7E, 0x7F, 0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86,
+};
+
+// Gate Hold — 11 cells, contiguous, Position-encoded.
+constexpr uint8_t kGateHoldCells[] = {
+    0x87, 0x88, 0x89, 0x8A, 0x8B, 0x8C, 0x8D, 0x8E, 0x8F, 0x90, 0x91,
+};
+
+// Gate Threshold — 10 cells observed (0x72..0x7B). Bank02 states show
+// gradient brightness 0x19/0x4C/0xFF → Additive fill (threshold rises
+// with value). The contiguous range continues into Gate Release at
+// 0x7C; assuming SSL's 11-cell standard, cell 0x71 likely belongs to
+// the Threshold ring as well, but is not observed in dual_39 because
+// the user didn't sweep all the way to the low end.
+constexpr uint8_t kGateThresholdCells[] = {
+    0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7A, 0x7B,
+};
+
+// ---- Bus Comp section (dual_40_bc_pots) ----
+
+// BC Ratio — 7 cells (BC standard ring size), Position-encoded.
+constexpr uint8_t kBcRatioCells[] = {
+    0xD6, 0xD7, 0xD8, 0xD9, 0xDA, 0xDB, 0xDC,
+};
+
+// BC Side-Chain HPF — 11 cells, Position-encoded (frequency knob).
+constexpr uint8_t kBcScHpfCells[] = {
+    0xCB, 0xCC, 0xCD, 0xCE, 0xCF, 0xD0, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5,
+};
+
+// BC Attack — 7 cells, Position-encoded.
+constexpr uint8_t kBcAttackCells[] = {
+    0xDD, 0xDE, 0xDF, 0xE0, 0xE1, 0xE2, 0xE3,
+};
+
+// BC Release — 7 cells, Position-encoded. Wraps the byte boundary
+// (0xFA..0xFF then 0x00).
+constexpr uint8_t kBcReleaseCells[] = {
+    0xFA, 0xFB, 0xFC, 0xFD, 0xFE, 0xFF, 0x00,
+};
+
+// BC Makeup — partial sweep (5 cells). Bank02 states 0x0F/0x19/0x33/
+// 0x4C/0xFF show gradient brightness → Bipolar fill (makeup gain
+// centered at unity). Full ring is likely 7 cells matching other BC
+// pots; observed 0xEF..0xF3 are the visible portion.
+constexpr uint8_t kBcMakeupCells[] = {
+    0xEF, 0xF0, 0xF1, 0xF2, 0xF3,
+};
+
+// BC Mix — 10 cells, bank02 with gradient brightness → Additive fill
+// (wet/dry from 0% to 100%).
+constexpr uint8_t kBcMixCells[] = {
+    0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C,
+};
+
 const RingDef* ringFor(uint8_t knobId)
 {
-    static const RingDef kLpf{kLpfCells, 11, Position};
+    static const RingDef kLpf          {kLpfCells,           11, Position};
+    static const RingDef kHmfFreq      {kHmfFreqCells,        3, Position};
+    static const RingDef kHmfQ         {kHmfQCells,           3, Position};
+    static const RingDef kLmfFreq      {kLmfFreqCells,        5, Position};
+    static const RingDef kLmfQ         {kLmfQCells,           4, Position};
+    static const RingDef kLfFreq       {kLfFreqCells,         4, Position};
+    static const RingDef kGateRelease  {kGateReleaseCells,   11, Position};
+    static const RingDef kGateHold     {kGateHoldCells,      11, Position};
+    static const RingDef kGateThr      {kGateThresholdCells, 10, Additive};
+    static const RingDef kBcRatio      {kBcRatioCells,        7, Position};
+    static const RingDef kBcScHpf      {kBcScHpfCells,       11, Position};
+    static const RingDef kBcAttack     {kBcAttackCells,       7, Position};
+    static const RingDef kBcRelease    {kBcReleaseCells,      7, Position};
+    static const RingDef kBcMakeup     {kBcMakeupCells,       5, Bipolar};
+    static const RingDef kBcMix        {kBcMixCells,         10, Additive};
+
     switch (knobId) {
-        case knob::kCSLowPass: return &kLpf;
-        // TODO: other pots need per-cap cluster analysis to pin cells.
+        // EQ section
+        case knob::kCSLowPass:    return &kLpf;
+        case knob::kCSHmfFreq:    return &kHmfFreq;
+        case knob::kCSHmfQ:       return &kHmfQ;
+        case knob::kCSLmfFreq:    return &kLmfFreq;
+        case knob::kCSLmfQ:       return &kLmfQ;
+        case knob::kCSLfFreq:     return &kLfFreq;
+        // Dyn / Gate section
+        case knob::kCSGateRelease:   return &kGateRelease;
+        case knob::kCSGateHold:      return &kGateHold;
+        case knob::kCSGateThreshold: return &kGateThr;
+        // Bus Comp section
+        case knob::kBCRatio:      return &kBcRatio;
+        case knob::kBCScHpf:      return &kBcScHpf;
+        case knob::kBCAttack:     return &kBcAttack;
+        case knob::kBCRelease:    return &kBcRelease;
+        case knob::kBCMakeup:     return &kBcMakeup;
+        case knob::kBCMix:        return &kBcMix;
+        // Unmapped (no capture data yet):
+        //   kCSHighPass, kCSHfGain, kCSHfFreq, kCSHmfGain, kCSLmfGain,
+        //   kCSLfGain, kCSGateRange, kCSCompRelease, kCSCompThreshold,
+        //   kCSCompRatio, kBCThreshold, kCSInputTrim, kCSFaderLevel.
+        // Partial-sweep data exists for HF Freq, HMF Gain, LMF Gain,
+        // LF Gain (≤2 cells in dual_38) — not enough to extrapolate.
     }
     return nullptr;
 }
