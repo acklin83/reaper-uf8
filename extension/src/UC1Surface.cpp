@@ -1015,29 +1015,37 @@ void UC1Surface::pushKnobRing_(uint8_t knobId, double normalized)
         last.assign(def->nCells, 0xFFFF);
     }
 
-    // Position math: continuous f, rounded to dot index for bank 0x01.
-    const double f = normalized * (def->nCells - 1);
-    int idx = static_cast<int>(f + 0.5);
-    if (idx < 0) idx = 0;
-    if (idx >= def->nCells) idx = def->nCells - 1;
+    int idx = 0;
     std::vector<uint8_t> target(def->nCells, 0);
-    target[idx] = 1;
-
-    // Bank 0x02 brightness: Position pots get a single full-bright cell
-    // at the dot; Gradient pots fade with distance from the continuous
-    // value position {0xFF, 0x4C, 0x19, 0x00} matching SSL360's
-    // captured brightness states.
     std::vector<uint8_t> brTarget(def->nCells, 0);
+
     if (def->mode == RingMode::Gradient) {
-        for (int i = 0; i < def->nCells; ++i) {
-            const double d = std::abs(static_cast<double>(i) - f);
-            uint8_t v = 0x00;
-            if      (d <= 0.5) v = 0xFF;
-            else if (d <= 1.0) v = 0x4C;
-            else if (d <= 1.5) v = 0x19;
-            brTarget[i] = v;
+        // x3 resolution: each LED-to-LED transition has 3 visual
+        // sub-steps. The current LED stays FULL while the next LED
+        // (in the direction of rotation) fades up through 0x19 →
+        // 0x4C → 0xFF, then the dot snaps to that LED and the cycle
+        // repeats. 11 LEDs × 3 sub-steps = 31 distinct visual
+        // positions.
+        const int subMax = (def->nCells - 1) * 3;
+        int k = static_cast<int>(normalized * subMax + 0.5);
+        if (k < 0) k = 0;
+        if (k > subMax) k = subMax;
+        const int mainCell = k / 3;
+        const int frac     = k % 3;
+        idx = mainCell;
+        target[mainCell] = 1;
+        brTarget[mainCell] = 0xFF;
+        if (frac > 0 && mainCell + 1 < def->nCells) {
+            // 1 → 0x19, 2 → 0x4C
+            brTarget[mainCell + 1] = (frac == 1) ? 0x19 : 0x4C;
         }
     } else {
+        // Position-only: continuous f rounded to nearest LED.
+        const double f = normalized * (def->nCells - 1);
+        idx = static_cast<int>(f + 0.5);
+        if (idx < 0) idx = 0;
+        if (idx >= def->nCells) idx = def->nCells - 1;
+        target[idx] = 1;
         brTarget[idx] = 0xFF;
     }
 
