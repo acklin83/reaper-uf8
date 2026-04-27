@@ -33,6 +33,7 @@
 #endif
 
 #include "ColorSync.h"
+#include "FocusedParam.h"
 #include "HidDevice.h"
 #include "MidiBridge.h"
 #include "PluginMap.h"
@@ -98,12 +99,13 @@ std::atomic<int> g_bankOffset{0};
 // by the timer.
 std::atomic<bool> g_bankDirty{false};
 
-// Currently-visible parameter page for SSL plug-in mirroring. Each
-// plugin's PluginMap holds an ordered slots[] list; g_pageIdx indexes
-// into that list per-strip-per-plugin (clamped to each plugin's size).
-// Stage-1 is hard-coded to page 0; Stage 3 wires the UF8 Page ←/→
-// buttons to increment/decrement this value.
-std::atomic<int>  g_pageIdx{0};
+// Re-render trigger for the timer when the focused-param slot changes.
+// The actual focused-param state lives in FocusedParam.h
+// (uf8::g_focusedParam, uf8::g_focusedDirty). This flag is the existing
+// UF8-side "the labels/values need a forced re-push next tick" signal and
+// is set in tandem with g_focusedDirty by anything that mutates the
+// focused param. Kept as a separate flag because pushZonesForVisibleSlots
+// also fires it on bank shifts, which don't touch g_focusedParam.
 std::atomic<bool> g_pageDirty{false};
 
 // When the user hits the PAN button, we globally override every strip's
@@ -432,15 +434,18 @@ void drainInputQueue()
                 break;
             case PendingInput::PanDelta: {
                 // V-pot rotation: if the strip's track hosts an SSL plug-in
-                // map AND we're not in global Pan mode, drive its paged
-                // parameter. Otherwise fall back to track pan.
-                const int pgIdx = g_pageIdx.load();
+                // map AND we're not in global Pan mode, drive the focused
+                // parameter on that strip's track. Otherwise fall back to
+                // track pan.
+                const auto focused = uf8::getFocusedParam();
                 auto mm = uf8::lookupPluginOnTrack(tr);
                 const bool forcePan = g_forcePan.load();
-                if (!forcePan && mm.map
-                    && static_cast<size_t>(pgIdx) < mm.map->slots.size())
+                if (!forcePan
+                    && focused.domain != uf8::FocusedParam::None
+                    && mm.map
+                    && static_cast<size_t>(focused.slotIdx) < mm.map->slots.size())
                 {
-                    const uf8::LinkSlot& sl = mm.map->slots[pgIdx];
+                    const uf8::LinkSlot& sl = mm.map->slots[focused.slotIdx];
                     const double cur = TrackFX_GetParamNormalized(tr, mm.fxIndex,
                                                                   sl.vst3Param);
                     // e.value is pan-scaled (≈1/128 per event). Plug-in param
@@ -465,16 +470,18 @@ void drainInputQueue()
             }
             case PendingInput::PanCenter: {
                 // V-pot push: with an SSL plug-in present (and not in
-                // global Pan mode), reset the paged param to its midpoint.
-                // Otherwise, re-center pan.
+                // global Pan mode), reset the focused param to its
+                // midpoint. Otherwise, re-center pan.
                 auto mm = uf8::lookupPluginOnTrack(tr);
-                const int pgIdx = g_pageIdx.load();
+                const auto focused = uf8::getFocusedParam();
                 const bool forcePan = g_forcePan.load();
-                if (!forcePan && mm.map
-                    && static_cast<size_t>(pgIdx) < mm.map->slots.size())
+                if (!forcePan
+                    && focused.domain != uf8::FocusedParam::None
+                    && mm.map
+                    && static_cast<size_t>(focused.slotIdx) < mm.map->slots.size())
                 {
                     TrackFX_SetParamNormalized(tr, mm.fxIndex,
-                        mm.map->slots[pgIdx].vst3Param, 0.5);
+                        mm.map->slots[focused.slotIdx].vst3Param, 0.5);
                 } else {
                     SetMediaTrackInfo_Value(tr, "D_PAN", 0.0);
                 }
@@ -1043,17 +1050,29 @@ void onUf8Input(const uint8_t* data, size_t len)
                 }
                 handledNatively = true;
             } else if (id == 0x52 || id == 0x53) {
-                // Page ← (0x52) / Page → (0x53). Shifts the plugin-param
-                // page index that `pushZonesForVisibleSlots` reads. Clamped
-                // at 0..31 — the longest PluginMap slot list (CS2) has 32
-                // entries; plugins with fewer slots just show blank on
-                // pages past their end.
+                // Page ← (0x52) / Page → (0x53). Walks the focused-param
+                // slot index that `pushZonesForVisibleSlots` reads.
+                // Clamped at 0..31 — the longest CS-family PluginMap (CS2)
+                // has 32 entries; plugins with fewer slots blank out for
+                // strips past their end. Stage 5 will refine this to
+                // page-stride (±8) via dedicated page-selector keys; for
+                // now we keep slot-stride (±1) as the only available
+                // navigator. If the focus was None, walking implicitly
+                // enters ChannelStrip mode (matches user intent: pressing
+                // a Page key activates the broadcast model).
                 if (pressed) {
                     const int delta = (id == 0x53) ? 1 : -1;
-                    int next = g_pageIdx.load() + delta;
+                    auto fp = uf8::g_focusedParam.load();
+                    int next = fp.slotIdx + delta;
                     if (next < 0) next = 0;
                     if (next > 31) next = 31;
-                    if (next != g_pageIdx.exchange(next)) {
+                    const auto newDomain = (fp.domain == uf8::FocusedParam::None)
+                        ? uf8::FocusedParam::ChannelStrip
+                        : fp.domain;
+                    const uf8::FocusedParam updated{newDomain, next};
+                    if (!(updated == fp)) {
+                        uf8::g_focusedParam.store(updated);
+                        uf8::g_focusedDirty.store(true);
                         g_pageDirty.store(true);
                     }
                 }
@@ -1415,22 +1434,32 @@ bool                       g_vpotBarInit{false};
 // Returns nullptr when:
 //   - no track
 //   - PAN mode is forced globally (treat every strip as if it had no plug-in)
+//   - the focused-param domain is None (no plugin selected at all)
 //   - the track's plug-in isn't in our PluginMap registry
-//   - the current page index is past the plug-in's slot count (e.g. BC2
-//     has 7 slots, paging further reveals pan fallback)
+//   - the focused slot index is past the plug-in's slot count (e.g. BC2
+//     has 7 slots, walking further reveals pan fallback)
 // Must be called on the main thread — touches REAPER API.
-const uf8::LinkSlot* slotForStrip(MediaTrack* tr, int pageIdx,
+//
+// Stage 1 note: domain is read but not yet used to differentiate plugin
+// families — lookupPluginOnTrack is still first-hit-wins. Stage 3 will
+// add a domain-aware lookup so a track with both CS2 + BC2 routes the
+// focused-param render to the correct family.
+const uf8::LinkSlot* slotForStrip(MediaTrack* tr,
+                                  const uf8::FocusedParam& focused,
                                   int* outFxIdx)
 {
     if (!tr) return nullptr;
     if (g_forcePan.load()) return nullptr;
+    if (focused.domain == uf8::FocusedParam::None) return nullptr;
     auto match = uf8::lookupPluginOnTrack(tr);
     if (!match.map) return nullptr;
-    if (pageIdx < 0 || static_cast<size_t>(pageIdx) >= match.map->slots.size()) {
+    if (focused.slotIdx < 0
+        || static_cast<size_t>(focused.slotIdx) >= match.map->slots.size())
+    {
         return nullptr;
     }
     if (outFxIdx) *outFxIdx = match.fxIndex;
-    return &match.map->slots[pageIdx];
+    return &match.map->slots[focused.slotIdx];
 }
 
 // Map a normalised 0..1 to a V-Pot readout-bar 16-bit value. SSL 360°
@@ -1471,7 +1500,7 @@ void pushZonesForVisibleSlots()
 
     const int trackCount = CountTracks(nullptr);
     const int bankOffset = g_bankOffset.load();
-    const int pageIdx    = g_pageIdx.load();
+    const auto focused   = uf8::getFocusedParam();
 
     std::array<uint16_t, 8> vpotBar{};
 
@@ -1485,8 +1514,14 @@ void pushZonesForVisibleSlots()
     // Same story for page changes: every strip's Parameter Label and
     // Value Line now refer to a different plugin slot, so dedup must
     // re-fire the pushes.
-    const bool bankChanged = g_bankDirty.exchange(false);
-    const bool pageChanged = g_pageDirty.exchange(false);
+    const bool bankChanged    = g_bankDirty.exchange(false);
+    // g_focusedDirty is the canonical "focused param changed" signal,
+    // set by anyone who mutates uf8::g_focusedParam (Stage 2+ adds
+    // cross-device writers). g_pageDirty is the older UF8-local flag —
+    // currently set in tandem from main.cpp; both are drained here so
+    // either path forces a full label/value re-push next tick.
+    const bool focusChanged   = uf8::g_focusedDirty.exchange(false);
+    const bool pageChanged    = g_pageDirty.exchange(false) || focusChanged;
     if (pageChanged) {
         g_lastSlotLabel.fill({});
         g_lastValueLine.fill({});
@@ -1597,7 +1632,7 @@ void pushZonesForVisibleSlots()
         // cases we fall back to the REAPER-native display (track name +
         // volume).
         int fxIdx = -1;
-        const uf8::LinkSlot* slot = slotForStrip(tr, pageIdx, &fxIdx);
+        const uf8::LinkSlot* slot = slotForStrip(tr, focused, &fxIdx);
         const uf8::PluginMap* map = nullptr;
         if (slot) {
             auto mm = uf8::lookupPluginOnTrack(tr);
