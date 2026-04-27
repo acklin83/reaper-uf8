@@ -217,9 +217,10 @@ double uiVolLinear(MediaTrack* tr)
 // runs on libusb's transfer-callback thread, so per-strip input events
 // (buttons / fader / v-pot) are pushed into this queue and drained in
 // onTimer(), which REAPER invokes on the main thread at ~30 Hz.
-// Forward decl — full definition lives near the LCD helpers below;
-// PanDelta/PanCenter handlers consume it earlier in the file.
+// Forward decls — full definitions live near the LCD helpers below;
+// PanDelta/PanCenter handlers consume them earlier in the file.
 bool isBinarySlot(const uf8::LinkSlot& s);
+bool isBipolarSlot(const uf8::LinkSlot& s);
 
 struct PendingInput {
     enum Kind : uint8_t {
@@ -1472,9 +1473,22 @@ bool isBinarySlot(const uf8::LinkSlot& s)
         || id == "LowEqBell"       || id == "CompFastAttack"
         || id == "CompPeak"        || id == "GateExpander"
         || id == "GateAttack"      || id == "EqType";
-    // EqType is binary on CS 2 (in/out) and 3-state on 4K E/G (Brown/
-    // Orange/Black) — treat as binary here so the bar renders cleanly;
-    // the 3-state cycle is driven by the UC1 button-press handler.
+}
+
+// Is this slot a bipolar param with a meaningful centre detent (0 dB
+// Gain, centred Trim/Fader)? Bipolar slots render as fill from centre
+// outward with a centre marker (cap37 HF Gain). Unipolar slots
+// (frequencies, Q, thresholds — anything with a min..max linear sweep
+// and no neutral position) render as a single line moving across the
+// bar (cap38 HF Freq).
+bool isBipolarSlot(const uf8::LinkSlot& s)
+{
+    if (!s.id) return false;
+    std::string_view id{s.id};
+    return id == "InputTrim"          || id == "OutputTrim"
+        || id == "LinkableFaderLevel" || id == "HighEqGain"
+        || id == "HighMidEqGain"      || id == "LowMidEqGain"
+        || id == "LowEqGain";
 }
 
 // Format a -1..+1 pan value as SSL-convention "L100" / "C" / "R50".
@@ -1552,36 +1566,52 @@ const uf8::LinkSlot* slotForStrip(MediaTrack* tr,
     return slot;
 }
 
-// Map a normalised 0..1 to a V-Pot readout-bar 16-bit LE value. The
-// bar frame is `FF 66 11 0F <16 bytes: 8 × 2-byte LE per strip>`.
-// byte[0] = position 0x00..0xFF, byte[1] = centre-marker flag (0x80
-// only when byte[0] == 0x00 — matches cap20 sweep behaviour). The
-// rendering animation seen with non-zero byte[1] is suppressed by
-// keeping byte[1] = 0 except at the "value is zero" anchor.
-uint16_t vpotPosFromNormalized(double v)
+// V-Pot bar 16-bit LE encoding decoded from cap37 (HF Gain ±20 dB
+// sweep on 4K E) and cap38 (HF Freq sweep):
+//
+//   Bipolar (Gain, Pan, Trim, Fader):
+//     byte[0] = signed 8-bit, two's complement around centre
+//       0x00       = centre (with byte[1] = 0x80 marker)
+//       0x01..0x7F = positive (right of centre, increasing)
+//       0x80..0xFF = negative (0x80 max-neg, 0xFF just-below-centre)
+//     byte[1] = 0x80 only when byte[0]==0x00, else 0x00.
+//     cap37 max sweep observed: byte0 +0x64 / -0x9c (≈ ±100).
+//
+//   Unipolar (Freq, Q, Threshold):
+//     byte[0] = 0x01..0x62 linear (cap38 observed range), byte[1] = 0x00.
+//     SSL maps the slider's full sweep to that ~98-step range.
+//
+// Mode register `FF 66 09 0D` is init-only (set to 0x02 active /
+// 0x03 empty on first push), never updated again — re-asserting it
+// per tick triggers the firmware's transition animation.
+
+// Mode 0x02 (cap15 PM cycle) + unsigned byte0 with 0x80 = centre:
+//   0x00 = far left, 0x80 = LCD centre, 0xFF = far right.
+//   byte[1] = 0x00 always. SSL360's mode 0x08 + signed bytes from
+//   cap37 was a different render mode that doesn't match what we want.
+uint16_t vpotPosFromBipolar(double v)
+{
+    if (v < -1.0) v = -1.0;
+    if (v >  1.0) v =  1.0;
+    int byte0 = 128 + static_cast<int>(std::round(v * 127.0));
+    if (byte0 < 0)   byte0 = 0;
+    if (byte0 > 255) byte0 = 255;
+    return static_cast<uint16_t>(byte0);
+}
+
+uint16_t vpotPosFromUnipolar(double v)
 {
     if (v < 0.0) v = 0.0;
     if (v > 1.0) v = 1.0;
-    int byte0 = static_cast<int>(v * 255.0 + 0.5);
+    int byte0 = static_cast<int>(std::round(v * 255.0));
     if (byte0 < 0)   byte0 = 0;
     if (byte0 > 255) byte0 = 255;
-    const uint16_t b1 = (byte0 == 0) ? uint16_t{0x80} : uint16_t{0x00};
-    return static_cast<uint16_t>(byte0) | (b1 << 8);
+    return static_cast<uint16_t>(byte0);
 }
 
-// Pan in [-1, +1] → V-Pot bar 0x00..0xFF, centre = 0x80. Same byte[1]
-// rule as vpotPosFromNormalized.
-uint16_t vpotPosFromPan(double pan)
-{
-    if (pan < -1.0) pan = -1.0;
-    if (pan >  1.0) pan =  1.0;
-    const double mapped = (pan + 1.0) * 0.5;
-    int byte0 = static_cast<int>(mapped * 255.0 + 0.5);
-    if (byte0 < 0)   byte0 = 0;
-    if (byte0 > 255) byte0 = 255;
-    const uint16_t b1 = (byte0 == 0) ? uint16_t{0x80} : uint16_t{0x00};
-    return static_cast<uint16_t>(byte0) | (b1 << 8);
-}
+uint16_t vpotPosFromNormalized(double v) { return vpotPosFromUnipolar(v); }
+
+uint16_t vpotPosFromPan(double pan) { return vpotPosFromBipolar(pan); }
 
 void pushZonesForVisibleSlots()
 {
@@ -1784,15 +1814,17 @@ void pushZonesForVisibleSlots()
         // instead of the linear-fill animation mode 0x02 produces.
         if (slot && fxIdx >= 0) {
             const double norm = TrackFX_GetParamNormalized(tr, fxIdx, slot->vst3Param);
+            const double visual = slot->inverted ? 1.0 - norm : norm;
             if (isBinarySlot(*slot)) {
-                // Binary: byte0 = 0xFF (on) or 0x00 (off). byte1 = 0x80
-                // only at zero (per cap20 anchor convention).
-                const uint16_t b0 = (norm >= 0.5) ? 0xFFu : 0x00u;
-                const uint16_t b1 = (b0 == 0) ? uint16_t{0x80} : uint16_t{0x00};
-                vpotBar[s] = b0 | (b1 << 8);
+                // ON = max positive (0x7F in signed). OFF = 0x00 +
+                // byte1=0x80 (centre marker = collapsed bar).
+                vpotBar[s] = (norm >= 0.5)
+                    ? static_cast<uint16_t>(0x7F)
+                    : (uint16_t{0x00} | (uint16_t{0x80} << 8));
+            } else if (isBipolarSlot(*slot)) {
+                vpotBar[s] = vpotPosFromBipolar(visual * 2.0 - 1.0);
             } else {
-                const double visual = slot->inverted ? 1.0 - norm : norm;
-                vpotBar[s] = vpotPosFromNormalized(visual);
+                vpotBar[s] = vpotPosFromUnipolar(visual);
             }
         } else {
             const double pan = GetMediaTrackInfo_Value(tr, "D_PAN");
@@ -1865,6 +1897,21 @@ void pushZonesForVisibleSlots()
                 if (u < 0x20 || u > 0x7E) c = '-';
             }
             while (!valStr.empty() && valStr.front() == ' ') valStr.erase(0, 1);
+            // Strip the space between numeric value and unit suffix so
+            // "16.00 KHz" → "16.00KHz" (saves one char so the leading
+            // digit doesn't get clipped by the LCD value zone). Match
+            // both lower- and upper-case unit variants — 4K E returns
+            // "KHz" with capital K, CS 2 uses lowercase. Generic walk:
+            // find the rightmost space whose preceding char is a digit
+            // or '.' and erase it.
+            for (size_t p = valStr.size(); p > 1; --p) {
+                if (valStr[p - 1] != ' ') continue;
+                const char prev = valStr[p - 2];
+                if ((prev >= '0' && prev <= '9') || prev == '.') {
+                    valStr.erase(p - 1, 1);
+                }
+                break;
+            }
             valLine = composeValueLine(slot->name, valStr);
         } else {
             // No plugin slot → V-Pot controls Pan; reflect that in
@@ -1880,34 +1927,42 @@ void pushZonesForVisibleSlots()
     }
     g_faderPbInit = true;
 
-    // V-Pot mode register (FF 66 09 0D) + V-Pot Readout Bar (FF 66 11
-    // 0F). cap15 confirms SSL360 sends them paired AND dedups — pushing
-    // identical frames every tick re-animates the bar (user-reported:
-    // line sweeps left→right, leaves trailing pixels). Push only when
-    // either mode or position changed.
+    // V-Pot Readout Bar mode register `FF 66 09 0D <8 bytes>`. Per
+    // cap37: mode 0x08 = bipolar centre-out render. Mode 0x03 =
+    // disabled / no bar. We push only when state changes, deduped
+    // against g_lastVPotMode.
     //
-    // Mode bytes per strip:
-    //   0x01 = single-dot indicator (unipolar params, plugin button
-    //          toggles when full/empty — what we use for active strips)
-    //   0x03 = empty / disabled
+    // Per-strip mode:
+    //   0x08 if the strip has a renderable bar (plugin slot that's
+    //        not a binary toggle, OR pan fallback for tracks without
+    //        an SSL plugin)
+    //   0x03 if the strip has no track in the bank, OR the focused
+    //        slot is a binary param (button toggle — user wants text
+    //        only, no bar)
     std::array<uint8_t, 8> vpotMode{};
     {
         const int trackCount = CountTracks(nullptr);
+        const auto focused = uf8::getFocusedParam();
         for (uint8_t s = 0; s < 8; ++s) {
             const int realSlot = static_cast<int>(s) + g_bankOffset.load();
-            vpotMode[s] = (realSlot < trackCount) ? 0x01 : 0x03;
+            if (realSlot >= trackCount) {
+                vpotMode[s] = 0x03;
+                continue;
+            }
+            MediaTrack* tr = GetTrack(nullptr, realSlot);
+            int fxIdx = -1;
+            const uf8::LinkSlot* slot = slotForStrip(tr, focused, &fxIdx);
+            if (slot && isBinarySlot(*slot)) {
+                vpotMode[s] = 0x03;  // binary — no bar
+            } else {
+                vpotMode[s] = 0x08;  // bipolar centre-out
+            }
         }
     }
     bool modeChanged = !g_vpotBarInit;
     if (!modeChanged) {
         for (uint8_t s = 0; s < 8; ++s) {
             if (vpotMode[s] != g_lastVPotMode[s]) { modeChanged = true; break; }
-        }
-    }
-    bool barChanged = !g_vpotBarInit;
-    if (!barChanged) {
-        for (uint8_t s = 0; s < 8; ++s) {
-            if (vpotBar[s] != g_lastVPotBar[s]) { barChanged = true; break; }
         }
     }
     if (modeChanged) {
@@ -1918,12 +1973,16 @@ void pushZonesForVisibleSlots()
         for (size_t i = 1; i < mf.size(); ++i) cks += mf[i];
         mf.push_back(cks);
         g_dev->send(std::move(mf));
+        g_vpotBarInit = true;
+    }
+    bool barChanged = false;
+    for (uint8_t s = 0; s < 8; ++s) {
+        if (vpotBar[s] != g_lastVPotBar[s]) { barChanged = true; break; }
     }
     if (barChanged) {
         g_lastVPotBar = vpotBar;
         g_dev->send(uf8::buildVPotReadoutBar(vpotBar));
     }
-    g_vpotBarInit = true;
 }
 
 void commitDebouncedTouchReleases()
