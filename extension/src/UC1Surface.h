@@ -10,6 +10,7 @@
 // All REAPER API calls happen inside poll().
 //
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <deque>
@@ -171,6 +172,25 @@ private:
     // Per-knob "fine" toggle. UC1's Fine button acts as a modifier:
     // when on, knob clicks move the param by 1/4 the normal amount.
     std::atomic<bool> fineMode_{false};
+
+    // Per-button LED state cache for the per-tick poll. -1 = unknown
+    // (forces the first push), 0 = off, 1 = on. Indexed by button ID.
+    // Cleared by setFocusedTrack/invalidateCache so a focus change or
+    // explicit refresh re-pushes everything.
+    std::array<int8_t, 0x20> lastButtonLed_;
+
+    // Push every mapped button's LED based on current plugin/track
+    // state, deduped against lastButtonLed_. Cheap when nothing changed.
+    // Called from poll() so plugin-GUI edits and project-load init
+    // both reflect on the LEDs without waiting for a UC1 button press.
+    void pollButtonLeds_();
+
+    // Push every mapped knob's ring based on the current normalized
+    // VST3 param value. pushKnobRing_'s ringCellCache_ dedup means
+    // unchanged rings are no-ops. Called from poll() so plugin-GUI
+    // edits, automation, and preset loads reflect on the rings without
+    // waiting for the user to actually move a knob.
+    void pollKnobRings_();
 
     // Per-knob LED-ring cell state cache. Each entry packs the last-
     // sent (selection_state | brightness_state << 8) so dedup catches

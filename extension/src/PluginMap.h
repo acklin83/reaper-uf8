@@ -75,13 +75,25 @@ const PluginMap* lookupPluginMapByName(std::string_view fxName);
 // All compiled-in maps — for debugging / tests.
 std::span<const PluginMap> allPluginMaps();
 
-// Find the slot index whose vst3Param matches `vst3Param`. Used by
-// cross-device focus sync: when UC1 (or the plugin GUI) writes a param,
-// we need to map "this plugin's VST3 param N" back to the slot list
-// position so the same focused-param state can be projected onto UF8.
+// Find the SSL 360 Link slot index (linkIdx) whose vst3Param matches.
+// Used by cross-device focus sync: when UC1 (or the plugin GUI) writes
+// a param, we map "this plugin's VST3 param N" back to the linkIdx so
+// the focused-param state can be projected onto UF8 strips that may
+// host *different* plugin variants with their own slot orderings.
 //
 // Returns -1 when no slot maps to that VST3 param. O(N) linear scan;
 // slot lists are tiny (≤32) so a hash map would be overkill.
+//
+// IMPORTANT: returns the LinkSlot.linkIdx field — the SSL 360 Link
+// virtual-strip slot number that's stable across plugin variants —
+// NOT the array index into PluginMap.slots. Callers store this in
+// FocusedParam.slotIdx and look up the slot via findSlotByLinkIdx
+// against whichever plugin happens to be on the rendering track.
 int slotIdxForVst3Param(const PluginMap& map, int vst3Param);
+
+// Find a slot in `map` by its SSL 360 Link slot index (linkIdx).
+// Returns nullptr when the plugin doesn't expose a slot with that
+// linkIdx (e.g. CompPeak's linkIdx=25 has no entry on 4K E/G/B).
+const LinkSlot* findSlotByLinkIdx(const PluginMap& map, int linkIdx);
 
 } // namespace uf8

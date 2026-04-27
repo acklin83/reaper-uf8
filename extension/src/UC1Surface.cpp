@@ -120,7 +120,10 @@ led::Cell cellForButton(uint8_t buttonId)
 
 } // namespace
 
-UC1Surface::UC1Surface() = default;
+UC1Surface::UC1Surface()
+{
+    lastButtonLed_.fill(-1);  // -1 = unknown, force first push per button
+}
 
 void UC1Surface::attach(UC1Device& device)
 {
@@ -146,6 +149,7 @@ void UC1Surface::setFocusedTrack(void* track)
     // but our cache thinks is OFF stays stuck until the user rotates
     // the dot through it — manifests as a "hanging" LED in EQ rings.
     ringCellCache_.clear();
+    lastButtonLed_.fill(-1);  // re-push every button LED on the new focus
     refresh();
 }
 
@@ -153,6 +157,7 @@ void UC1Surface::invalidateCache()
 {
     ringCellCache_.clear();
     lastZone05Text_.clear();  // force the next pushFocusedParamReadout_ to send
+    lastButtonLed_.fill(-1);  // re-push every button LED on the next poll
 }
 
 int UC1Surface::poll()
@@ -178,6 +183,14 @@ int UC1Surface::poll()
     // nothing changed, so the cost when idle is just two REAPER API
     // calls + a string compare.
     pushFocusedParamReadout_();
+
+    // Mirror plugin/track state to button LEDs and knob rings every
+    // tick. Both have internal dedup, so the cost when idle is just
+    // a few REAPER API reads + cache compares — no USB traffic. This
+    // is what makes plugin-GUI edits, automation, and preset loads
+    // reflect on the surface without waiting for a UC1 input event.
+    pollButtonLeds_();
+    pollKnobRings_();
 
     return handled;
 }
@@ -662,9 +675,44 @@ void UC1Surface::handleButton_(const ButtonEvent& ev)
     if (vst3Param == kParamNone) { ++stats_.buttonEventsSuppressed; return; }
 
     const double cur = TrackFX_GetParamNormalized(tr, bindings.channelFxIdx, vst3Param);
-    const double next = (cur < 0.5) ? 1.0 : 0.0;
+
+    // EQ Type on 4K E / 4K G is a 3-state "EQ Colour" cycle (Brown →
+    // Orange → Black → Brown), not a binary in/out. Normalised values
+    // are 0.0 / 0.5 / 1.0. CS 2's EQ Type and 4K B (no EQ Type) are
+    // binary or absent. Detect by plugin shortName.
+    const bool is3StateEqColour = (ev.id == button::kEqType)
+        && (std::strcmp(bindings.channelMap->shortName, "4K E") == 0
+         || std::strcmp(bindings.channelMap->shortName, "4K G") == 0);
+
+    double next;
+    if (is3StateEqColour) {
+        int step = static_cast<int>(cur * 2.0 + 0.5);
+        if (step < 0) step = 0;
+        if (step > 2) step = 2;
+        step = (step + 1) % 3;
+        next = step * 0.5;
+    } else {
+        next = (cur < 0.5) ? 1.0 : 0.0;
+    }
     TrackFX_SetParamNormalized(tr, bindings.channelFxIdx, vst3Param, next);
-    pushButtonLed_(ev.id, next > 0.5);
+    pushButtonLed_(ev.id, next >= 0.5);
+
+    // Project the toggled param onto UF8 so all 8 V-Pots show + control
+    // it across the bank — same broadcast model the UC1 knob path uses.
+    // Looks up the UF8 PluginMap (separate from uc1::PluginBindings),
+    // finds the slot whose vst3Param matches, and sets the focus. UC1
+    // zone 0x05 picks this up via pushFocusedParamReadout_ on the next
+    // poll tick (and we call it inline so the user sees the new focus
+    // immediately rather than after one tick of latency).
+    auto uf8Match = uf8::lookupPluginOnTrack(focusedTrack_,
+                                             uf8::Domain::ChannelStrip);
+    if (uf8Match.map) {
+        const int slotIdx = uf8::slotIdxForVst3Param(*uf8Match.map, vst3Param);
+        if (slotIdx >= 0) {
+            uf8::setFocus({uf8::Domain::ChannelStrip, slotIdx});
+            pushFocusedParamReadout_();
+        }
+    }
 
     // Push the post-toggle readout. Most CS buttons are binary
     // In/Out toggles; EQ Type is the exception (cycles colours/bell
@@ -813,13 +861,10 @@ void UC1Surface::pushFocusedParamReadout_()
 
     auto match = uf8::lookupPluginOnTrack(focusedTrack_, focused.domain);
     if (!match.map) return;
-    if (focused.slotIdx < 0
-        || static_cast<size_t>(focused.slotIdx) >= match.map->slots.size())
-    {
-        return;
-    }
-
-    const auto& slot = match.map->slots[focused.slotIdx];
+    const uf8::LinkSlot* slotPtr = uf8::findSlotByLinkIdx(*match.map,
+                                                          focused.slotIdx);
+    if (!slotPtr) return;  // plugin doesn't expose this Link slot
+    const auto& slot = *slotPtr;
     MediaTrack* tr = static_cast<MediaTrack*>(focusedTrack_);
     char formatted[64] = {};
     const double cur = TrackFX_GetParamNormalized(tr, match.fxIndex,
@@ -1198,16 +1243,67 @@ void UC1Surface::pushButtonLed_(uint8_t buttonId, bool on)
     auto cell = cellForButton(buttonId);
     if (cell.bank == 0 && cell.cell == 0) return;  // unmapped
 
-    // Per-button state encoding.
-    //   - Most button LEDs use the bank in led::Cell + 0xFF on / 0x00
-    //     off (cap21 decode, plugin-param section).
-    //   - Solo Clear uses bank 0x01 + state 0x01 on / 0x00 off (cap17,
-    //     verified 2026-04-23).
-    //   - Solo and Cut: fan-out test confirmed the LED lights with
-    //     bank 0x01 cell 0x97/0x96 state 0x01 (same scheme as Solo
-    //     Clear). The bank 0x02 cells from cap21 are probably status
-    //     registers, not LED drivers. We override the cell-table bank
-    //     for those two buttons and use state=0x01.
+    // Dedup against the last-pushed state — pollButtonLeds_ runs every
+    // tick so this fires constantly with unchanged values; skip the USB
+    // write when nothing has actually changed. invalidateCache() and
+    // setFocusedTrack() clear lastButtonLed_ so refreshes re-push.
+    if (buttonId < lastButtonLed_.size()) {
+        const int8_t want = on ? 1 : 0;
+        if (lastButtonLed_[buttonId] == want) return;
+        lastButtonLed_[buttonId] = want;
+    }
+
+    auto buildRaw = [](uint8_t bank, uint8_t c, uint8_t b5, uint8_t state) {
+        std::vector<uint8_t> f{0xFF, 0x13, 0x04, bank, c, b5, state};
+        uint8_t cks = 0;
+        for (size_t i = 1; i < f.size(); ++i) cks += f[i];
+        f.push_back(cks);
+        return f;
+    };
+
+    // Right-side Dyn/Gate/SC plugin-param buttons (FastAttComp, Peak,
+    // DynIn, Expand, FastAttGate, ScListen) need TWO frames on
+    // byte5=0x01 — the dyn-section LED address space:
+    //   bank 0x01 = selection bit (0x01 on / 0x00 off)
+    //   bank 0x02 = brightness   (0xFF on / 0x00 off)
+    // Same dual-bank scheme pushKnobRing_ uses, but with byte5=0x01
+    // so the writes don't bleed into EQ-ring rendering (byte5=0x00).
+    // Single bank=0x02 frame alone leaves the selection bit clear and
+    // the LED stays dark.
+    const bool isDynButton =
+        buttonId == button::kFastAttComp || buttonId == button::kPeak      ||
+        buttonId == button::kDynIn       || buttonId == button::kExpand    ||
+        buttonId == button::kFastAttGate || buttonId == button::kScListen;
+    if (isDynButton) {
+        device_->send(buildRaw(0x01, cell.cell, 0x01, on ? 0x01 : 0x00));
+        device_->send(buildRaw(0x02, cell.cell, 0x01, on ? 0xFF : 0x00));
+        return;
+    }
+
+    // Left-side EQ-section plugin-param buttons (HfBell, EqType, EqIn,
+    // LfBell) live in the EQ-section LED address space — byte5=0x00.
+    // Cap21/cap22 show SSL360 sending a single bank=0x02 byte5=0x00
+    // frame per press, but on our extension that single frame doesn't
+    // light the LED (same gap as the dyn buttons before adding the
+    // bank=0x01 selection-bit companion). Send the dual-bank pair on
+    // byte5=0x00. The cells (0x23, 0x50, 0x51, 0x89) sit in gaps
+    // between adjacent EQ rings, so the byte5=0x00 writes don't bleed
+    // into any ring rendering.
+    const bool isEqButton =
+        buttonId == button::kHfBell || buttonId == button::kEqType ||
+        buttonId == button::kEqIn   || buttonId == button::kLfBell;
+    if (isEqButton) {
+        device_->send(buildRaw(0x01, cell.cell, 0x00, on ? 0x01 : 0x00));
+        device_->send(buildRaw(0x02, cell.cell, 0x00, on ? 0xFF : 0x00));
+        return;
+    }
+
+    // Other buttons (Fine, central-section track buttons with Solo/Cut
+    // overrides, Solo Clear) keep the single-frame buildLedWrite path
+    // — those were empirically verified working with one frame.
+    //   - Solo Clear uses bank 0x01 + state 0x01 on / 0x00 off (cap17).
+    //   - Solo/Cut/Polarity/ChannelIn/BusCompIn: fan-out test confirmed
+    //     the LED lights with bank 0x01 + state 0x01.
     uint8_t bank = cell.bank;
     uint8_t stateOn = led::kStateOn;
     if (buttonId == button::kSoloClear) {
@@ -1218,33 +1314,119 @@ void UC1Surface::pushButtonLed_(uint8_t buttonId, bool on)
                buttonId == button::kChannelIn ||
                buttonId == button::kBusCompIn)
     {
-        // Central-section track buttons all use bank 0x01 + state 0x01
-        // for their LEDs. Confirmed empirically: the bank 0x02 cells
-        // listed in cap21 are status registers, not LED drivers.
         bank = 0x01;
         stateOn = 0x01;
     }
     const uint8_t state = on ? stateOn : led::kStateOff;
 
-    auto frame = buildLedWrite(bank, cell.cell, state);
+    device_->send(buildLedWrite(bank, cell.cell, state));
+}
 
-    // One-shot diag so we can eyeball exactly what hits the bulk OUT
-    // endpoint. Matches the cap17/cap21 frame format when things are
-    // right (e.g. Solo on → "FF 13 04 02 97 01 FF B0").
-    static int kDiagLed = 24;
-    if (kDiagLed > 0) {
-        --kDiagLed;
-        char line[128];
-        int off = std::snprintf(line, sizeof(line),
-            "UC1 LED btn=0x%02x on=%d frame=", buttonId, on);
-        for (auto b : frame) {
-            off += std::snprintf(line + off, sizeof(line) - off, "%02x ", b);
+void UC1Surface::pollButtonLeds_()
+{
+    if (!device_) return;
+
+    MediaTrack* tr = static_cast<MediaTrack*>(focusedTrack_);
+    UC1Bindings bindings = tr ? lookupBindingsOnTrack(tr) : UC1Bindings{};
+
+    auto ledForParam = [&](const PluginBindings* map, int fxIdx, uint8_t btnId) {
+        if (!map || !tr) return false;
+        const int p = map->buttonParam[btnId];
+        if (p == kParamNone) return false;
+        return TrackFX_GetParamNormalized(tr, fxIdx, p) >= 0.5;
+    };
+
+    for (uint8_t btn = 0; btn < 0x20; ++btn) {
+        const auto cell = cellForButton(btn);
+        if (cell.bank == 0 && cell.cell == 0) continue;
+
+        bool on = false;
+        switch (classifyButton(btn)) {
+            case ControlDomain::BusComp: {
+                bool bcOn = false;
+                if (bindings.busCompMap && tr) {
+                    bcOn = TrackFX_GetEnabled(tr, bindings.busCompFxIdx);
+                }
+                pushButtonLed_(btn, bcOn);
+                continue;
+            }
+            case ControlDomain::ChannelStrip:
+                if (btn == button::kChannelIn) {
+                    bool cin = false;
+                    if (bindings.channelMap && tr) {
+                        const int p = channelInParam_(tr, bindings.channelFxIdx);
+                        if (p >= 0) {
+                            cin = TrackFX_GetParamNormalized(
+                                tr, bindings.channelFxIdx, p) > 0.5;
+                        } else {
+                            cin = TrackFX_GetEnabled(tr, bindings.channelFxIdx);
+                        }
+                    } else if (tr && TrackFX_GetCount(tr) > 0) {
+                        cin = TrackFX_GetEnabled(tr, 0);
+                    }
+                    pushButtonLed_(btn, cin);
+                    continue;
+                }
+                on = ledForParam(bindings.channelMap, bindings.channelFxIdx, btn);
+                break;
         }
-        std::snprintf(line + off, sizeof(line) - off, "\n");
-        ShowConsoleMsg(line);
-    }
 
-    device_->send(std::move(frame));
+        if (btn == button::kFine) on = fineMode_.load(std::memory_order_relaxed);
+
+        if (btn == button::kSolo) {
+            pushButtonLed_(btn, tr && GetMediaTrackInfo_Value(tr, "I_SOLO") > 0.5);
+            continue;
+        }
+        if (btn == button::kCut) {
+            pushButtonLed_(btn, tr && GetMediaTrackInfo_Value(tr, "B_MUTE") > 0.5);
+            continue;
+        }
+        if (btn == button::kPolarity) {
+            pushButtonLed_(btn, tr && GetMediaTrackInfo_Value(tr, "B_PHASE") > 0.5);
+            continue;
+        }
+        if (btn == button::kSoloClear) {
+            bool anySolo = false;
+            const int nTr = CountTracks(nullptr);
+            for (int i = 0; i < nTr; ++i) {
+                if (GetMediaTrackInfo_Value(GetTrack(nullptr, i), "I_SOLO") > 0.5) {
+                    anySolo = true;
+                    break;
+                }
+            }
+            pushButtonLed_(btn, anySolo);
+            continue;
+        }
+
+        pushButtonLed_(btn, on);
+    }
+}
+
+void UC1Surface::pollKnobRings_()
+{
+    if (!device_) return;
+    MediaTrack* tr = static_cast<MediaTrack*>(focusedTrack_);
+    if (!tr) return;
+    UC1Bindings bindings = lookupBindingsOnTrack(tr);
+
+    auto pushOne = [&](uint8_t knobId, const PluginBindings* m, int fxIdx) {
+        const int vst3Param = m->knobParam[knobId];
+        if (vst3Param == kParamNone) return;
+        const double v = TrackFX_GetParamNormalized(tr, fxIdx, vst3Param);
+        const double visual = m->inverted[knobId] ? (1.0 - v) : v;
+        pushKnobRing_(knobId, visual);
+    };
+
+    if (bindings.channelMap) {
+        for (uint8_t knobId = 0; knobId < 0x20; ++knobId) {
+            pushOne(knobId, bindings.channelMap, bindings.channelFxIdx);
+        }
+    }
+    if (bindings.busCompMap) {
+        for (uint8_t knobId = 0; knobId < 0x20; ++knobId) {
+            pushOne(knobId, bindings.busCompMap, bindings.busCompFxIdx);
+        }
+    }
 }
 
 void UC1Surface::refresh()

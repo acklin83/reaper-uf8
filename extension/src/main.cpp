@@ -217,6 +217,10 @@ double uiVolLinear(MediaTrack* tr)
 // runs on libusb's transfer-callback thread, so per-strip input events
 // (buttons / fader / v-pot) are pushed into this queue and drained in
 // onTimer(), which REAPER invokes on the main thread at ~30 Hz.
+// Forward decl — full definition lives near the LCD helpers below;
+// PanDelta/PanCenter handlers consume it earlier in the file.
+bool isBinarySlot(const uf8::LinkSlot& s);
+
 struct PendingInput {
     enum Kind : uint8_t {
         SoloToggle,
@@ -440,19 +444,19 @@ void drainInputQueue()
                 const auto focused = uf8::getFocusedParam();
                 auto mm = uf8::lookupPluginOnTrack(tr, focused.domain);
                 const bool forcePan = g_forcePan.load();
-                if (!forcePan
-                    && mm.map
-                    && static_cast<size_t>(focused.slotIdx) < mm.map->slots.size())
-                {
-                    const uf8::LinkSlot& sl = mm.map->slots[focused.slotIdx];
+                const uf8::LinkSlot* slPtr = (!forcePan && mm.map)
+                    ? uf8::findSlotByLinkIdx(*mm.map, focused.slotIdx)
+                    : nullptr;
+                if (slPtr) {
+                    const uf8::LinkSlot& sl = *slPtr;
                     const double cur = TrackFX_GetParamNormalized(tr, mm.fxIndex,
                                                                   sl.vst3Param);
-                    // e.value is pan-scaled (≈1/128 per event). Plug-in param
-                    // ranges are 0..1, so without a bump a full sweep would
-                    // take ~128 detents. 4× gives ~32-detent full sweep —
-                    // snappy enough for quick gain grabs without being
-                    // nervous. Fine mode (Shift) quarters.
-                    double delta = e.value * 4.0 * (sl.inverted ? -1.0 : 1.0);
+                    // e.value is pan-scaled (≈1/128 per event). The
+                    // earlier 4× multiplier (32-detent full sweep) was
+                    // too coarse — values jumped past target. Drop to
+                    // 1× for a 128-detent sweep, matching SSL's V-Pot
+                    // feel in 360°. Fine mode (Shift) quarters.
+                    double delta = e.value * (sl.inverted ? -1.0 : 1.0);
                     if (g_shiftHeld.load()) delta *= 0.25;
                     double next = cur + delta;
                     if (next < 0.0) next = 0.0;
@@ -474,14 +478,24 @@ void drainInputQueue()
                 const auto focused = uf8::getFocusedParam();
                 auto mm = uf8::lookupPluginOnTrack(tr, focused.domain);
                 const bool forcePan = g_forcePan.load();
-                if (!forcePan
-                    && mm.map
-                    && static_cast<size_t>(focused.slotIdx) < mm.map->slots.size())
-                {
-                    const auto& sl = mm.map->slots[focused.slotIdx];
-                    const double resetVal = sl.deflt.value_or(0.5);
-                    TrackFX_SetParamNormalized(tr, mm.fxIndex,
-                        sl.vst3Param, resetVal);
+                const uf8::LinkSlot* slPtr = (!forcePan && mm.map)
+                    ? uf8::findSlotByLinkIdx(*mm.map, focused.slotIdx)
+                    : nullptr;
+                if (slPtr) {
+                    if (isBinarySlot(*slPtr)) {
+                        // Binary toggle: V-Pot push flips 0↔1 (matches
+                        // the UC1 button-press semantics for these
+                        // params — EQ In, Dyn In, S/C Listen, etc.).
+                        const double cur = TrackFX_GetParamNormalized(
+                            tr, mm.fxIndex, slPtr->vst3Param);
+                        const double next = (cur < 0.5) ? 1.0 : 0.0;
+                        TrackFX_SetParamNormalized(tr, mm.fxIndex,
+                            slPtr->vst3Param, next);
+                    } else {
+                        const double resetVal = slPtr->deflt.value_or(0.5);
+                        TrackFX_SetParamNormalized(tr, mm.fxIndex,
+                            slPtr->vst3Param, resetVal);
+                    }
                 } else {
                     SetMediaTrackInfo_Value(tr, "D_PAN", 0.0);
                 }
@@ -1088,14 +1102,36 @@ void onUf8Input(const uint8_t* data, size_t len)
                 if (pressed) {
                     const int delta = (id == 0x53) ? 1 : -1;
                     const auto fp = uf8::getFocusedParam();
-                    int next = fp.slotIdx + delta;
-                    if (next < 0) next = 0;
-                    if (next > 31) next = 31;
                     const auto newDomain = (fp.domain == uf8::Domain::None)
                         ? uf8::Domain::ChannelStrip
                         : fp.domain;
-                    uf8::setFocus({newDomain, next});
-                    g_pageDirty.store(true);
+                    // Walk through the canonical plugin map for this
+                    // domain (CS 2 for ChannelStrip — the longest and
+                    // most-complete CS variant; BC 2 for BusComp). Find
+                    // the current focused linkIdx in that map's slot
+                    // array, walk by delta in array order, then store
+                    // the new slot's linkIdx. fp.slotIdx is a linkIdx,
+                    // not an array index — see FocusedParam.h.
+                    const uf8::PluginMap* canon = (newDomain == uf8::Domain::BusComp)
+                        ? uf8::lookupPluginMapByName("Bus Compressor 2")
+                        : uf8::lookupPluginMapByName("Channel Strip 2");
+                    if (canon && !canon->slots.empty()) {
+                        int curArr = 0;
+                        for (size_t i = 0; i < canon->slots.size(); ++i) {
+                            if (canon->slots[i].linkIdx == fp.slotIdx) {
+                                curArr = static_cast<int>(i);
+                                break;
+                            }
+                        }
+                        int nextArr = curArr + delta;
+                        if (nextArr < 0) nextArr = 0;
+                        if (nextArr >= static_cast<int>(canon->slots.size())) {
+                            nextArr = static_cast<int>(canon->slots.size()) - 1;
+                        }
+                        const int nextLink = canon->slots[nextArr].linkIdx;
+                        uf8::setFocus({newDomain, nextLink});
+                        g_pageDirty.store(true);
+                    }
                 }
                 handledNatively = true;
             } else if (id == 0x78 || id == 0x79) {
@@ -1422,6 +1458,39 @@ std::string formatDbReadout(double linearAmp)
     return s;
 }
 
+// Is this slot a binary in/out toggle (driven by a UC1 button on the
+// physical surface)? Binary params render as full-or-empty on the
+// V-Pot bar (no gradient) and respond to V-Pot push as a 0↔1 toggle
+// instead of a "reset to default". Match by slot id rather than
+// linkIdx so any future button additions show up here automatically.
+bool isBinarySlot(const uf8::LinkSlot& s)
+{
+    if (!s.id) return false;
+    std::string_view id{s.id};
+    return id == "EqIn"            || id == "DynamicsIn"
+        || id == "Listen"          || id == "HighEqBell"
+        || id == "LowEqBell"       || id == "CompFastAttack"
+        || id == "CompPeak"        || id == "GateExpander"
+        || id == "GateAttack"      || id == "EqType";
+    // EqType is binary on CS 2 (in/out) and 3-state on 4K E/G (Brown/
+    // Orange/Black) — treat as binary here so the bar renders cleanly;
+    // the 3-state cycle is driven by the UC1 button-press handler.
+}
+
+// Format a -1..+1 pan value as SSL-convention "L100" / "C" / "R50".
+// Centred values render as bare "C" so the label-value gap is obvious.
+std::string formatPanReadout(double pan)
+{
+    if (pan < -1.0) pan = -1.0;
+    if (pan >  1.0) pan =  1.0;
+    if (std::abs(pan) < 0.005) return "C";
+    int pct = static_cast<int>(std::round(std::abs(pan) * 100.0));
+    if (pct > 100) pct = 100;
+    char buf[8];
+    std::snprintf(buf, sizeof(buf), "%c%d", pan < 0 ? 'L' : 'R', pct);
+    return buf;
+}
+
 // Compose the Value Line (19 chars) — e.g. "Vol        -6.0dB".
 // Left-justified label, right-justified value. Truncates both if needed
 // so the total fits within 19 chars.
@@ -1449,6 +1518,7 @@ std::array<std::string, 8> g_lastValueLine{};
 std::array<std::string, 8> g_lastFaderDb{};
 std::array<std::string, 8> g_lastChanNum{};
 std::array<uint16_t, 8>    g_lastVPotBar{};      // 16-bit LE per strip
+std::array<uint8_t, 8>     g_lastVPotMode{};     // FF 66 09 0D mode byte per strip
 bool                       g_vpotBarInit{false};
 
 // Resolve the LinkSlot for one visible strip at the current page index.
@@ -1472,45 +1542,45 @@ const uf8::LinkSlot* slotForStrip(MediaTrack* tr,
     if (g_forcePan.load()) return nullptr;
     auto match = uf8::lookupPluginOnTrack(tr, focused.domain);
     if (!match.map) return nullptr;
-    if (focused.slotIdx < 0
-        || static_cast<size_t>(focused.slotIdx) >= match.map->slots.size())
-    {
-        return nullptr;
-    }
+    // Resolve the Link slot index against THIS track's plugin map —
+    // different tracks may host different CS variants (CS 2 vs 4K E
+    // vs 4K G vs 4K B), each with its own slot ordering.
+    const uf8::LinkSlot* slot = uf8::findSlotByLinkIdx(*match.map,
+                                                       focused.slotIdx);
+    if (!slot) return nullptr;
     if (outFxIdx) *outFxIdx = match.fxIndex;
-    return &match.map->slots[focused.slotIdx];
+    return slot;
 }
 
-// Map a normalised 0..1 to a V-Pot readout-bar 16-bit value. SSL 360°
-// encodes the bar as 2 bytes LE per strip in a FF 66 11 0F broadcast.
-// Working theory (cap20, 2026-04-21): byte[0] is a LED bitmask where
-// bits 0..7 correspond to the 8 LED segments. "Bar fill up to N" =
-// (1 << N) - 1. Linear interpretation (byte[0] = round(v * 255)) didn't
-// render anything in a live test — the firmware likely only accepts
-// specific bit patterns. Needs cap24 to confirm; for now we stay close
-// to the bit-mask theory and let the user report back.
+// Map a normalised 0..1 to a V-Pot readout-bar 16-bit LE value. The
+// bar frame is `FF 66 11 0F <16 bytes: 8 × 2-byte LE per strip>`.
+// byte[0] = position 0x00..0xFF, byte[1] = centre-marker flag (0x80
+// only when byte[0] == 0x00 — matches cap20 sweep behaviour). The
+// rendering animation seen with non-zero byte[1] is suppressed by
+// keeping byte[1] = 0 except at the "value is zero" anchor.
 uint16_t vpotPosFromNormalized(double v)
 {
     if (v < 0.0) v = 0.0;
     if (v > 1.0) v = 1.0;
-    int n = static_cast<int>(v * 8.0 + 0.5);
-    if (n < 0) n = 0;
-    if (n > 8) n = 8;
-    // Build a "fill from left" bitmask: n=0 empty, n=8 all 8 bits lit.
-    uint16_t mask = static_cast<uint16_t>((n == 8) ? 0xFF : ((1u << n) - 1u));
-    return mask;
+    int byte0 = static_cast<int>(v * 255.0 + 0.5);
+    if (byte0 < 0)   byte0 = 0;
+    if (byte0 > 255) byte0 = 255;
+    const uint16_t b1 = (byte0 == 0) ? uint16_t{0x80} : uint16_t{0x00};
+    return static_cast<uint16_t>(byte0) | (b1 << 8);
 }
 
-// Pan in [-1, +1] → V-Pot bar 0..255 with centre at bit-4.
+// Pan in [-1, +1] → V-Pot bar 0x00..0xFF, centre = 0x80. Same byte[1]
+// rule as vpotPosFromNormalized.
 uint16_t vpotPosFromPan(double pan)
 {
     if (pan < -1.0) pan = -1.0;
     if (pan >  1.0) pan =  1.0;
-    int n = static_cast<int>((pan + 1.0) * 4.0 + 0.5);
-    if (n < 0) n = 0;
-    if (n > 8) n = 8;
-    uint16_t mask = static_cast<uint16_t>((n == 8) ? 0xFF : ((1u << n) - 1u));
-    return mask;
+    const double mapped = (pan + 1.0) * 0.5;
+    int byte0 = static_cast<int>(mapped * 255.0 + 0.5);
+    if (byte0 < 0)   byte0 = 0;
+    if (byte0 > 255) byte0 = 255;
+    const uint16_t b1 = (byte0 == 0) ? uint16_t{0x80} : uint16_t{0x00};
+    return static_cast<uint16_t>(byte0) | (b1 << 8);
 }
 
 void pushZonesForVisibleSlots()
@@ -1670,15 +1740,22 @@ void pushZonesForVisibleSlots()
             g_dev->send(uf8::buildChannelStripType(static_cast<uint8_t>(s), csType));
         }
 
-        // Parameter Label (Currently Selected Parameter zone) — also the
-        // "populate slot" flag that gates color-bar rendering. When an
-        // SSL plug-in is active, use the slot legend ("LPF", "HF", …);
-        // otherwise fall back to track name / CH N.
+        // Parameter Label (Currently Selected Parameter zone) — also
+        // the "populate slot" flag that gates color-bar rendering. When
+        // an SSL plug-in is active, use the slot's full name ("HF Type",
+        // "Comp F.Attack", …) so UF8's label matches UC1 zone 0x05's
+        // label exactly. The 4-char legends ("BELL", "F.ATK") collide
+        // across slots (HF Bell + LF Bell both legend "BELL"; CompFast
+        // + GateFast both "F.ATK") and don't disambiguate which knob
+        // the user is on. buildPluginSlotName accepts up to 12 chars,
+        // so the longer slot.name fits.
+        // No SSL plugin slot → V-Pot controls track Pan, so label the
+        // zone "Pan" (matches what the V-Pot actually drives).
         std::string label;
         if (slot) {
-            label = slot->legend;
+            label = slot->name;
         } else {
-            label = slotLabelForVisibleSlot(s);
+            label = "Pan";
         }
         if (label != g_lastSlotLabel[s]) {
             g_lastSlotLabel[s] = label;
@@ -1698,11 +1775,25 @@ void pushZonesForVisibleSlots()
             }
         }
 
-        // V-Pot Readout Bar position. Plugin param → normalised position;
-        // otherwise centre-mapped pan (-1..+1 → 0..14).
+        // V-Pot Readout Bar position. Binary toggle slots render as
+        // full (0xFF) or empty (0x00) — no in-between gradient; their
+        // V-Pot push toggles the param (handled in PanCenter). Other
+        // plugin params + pan render as a single-dot indicator at the
+        // normalised position. The mode register (FF 66 09 0D, set
+        // below) stays at 0x01 so the firmware draws a single line
+        // instead of the linear-fill animation mode 0x02 produces.
         if (slot && fxIdx >= 0) {
             const double norm = TrackFX_GetParamNormalized(tr, fxIdx, slot->vst3Param);
-            vpotBar[s] = vpotPosFromNormalized(slot->inverted ? 1.0 - norm : norm);
+            if (isBinarySlot(*slot)) {
+                // Binary: byte0 = 0xFF (on) or 0x00 (off). byte1 = 0x80
+                // only at zero (per cap20 anchor convention).
+                const uint16_t b0 = (norm >= 0.5) ? 0xFFu : 0x00u;
+                const uint16_t b1 = (b0 == 0) ? uint16_t{0x80} : uint16_t{0x00};
+                vpotBar[s] = b0 | (b1 << 8);
+            } else {
+                const double visual = slot->inverted ? 1.0 - norm : norm;
+                vpotBar[s] = vpotPosFromNormalized(visual);
+            }
         } else {
             const double pan = GetMediaTrackInfo_Value(tr, "D_PAN");
             vpotBar[s] = vpotPosFromPan(pan);
@@ -1776,8 +1867,11 @@ void pushZonesForVisibleSlots()
             while (!valStr.empty() && valStr.front() == ' ') valStr.erase(0, 1);
             valLine = composeValueLine(slot->name, valStr);
         } else {
-            valLine = composeValueLine("Vol",
-                dbStr == "-inf" ? std::string("-inf dB") : dbStr + "dB");
+            // No plugin slot → V-Pot controls Pan; reflect that in
+            // the Value Line. Fader dB stays in the dedicated O/PdB
+            // zone above, so we don't need to repeat volume here.
+            const double pan = GetMediaTrackInfo_Value(tr, "D_PAN");
+            valLine = composeValueLine("Pan", formatPanReadout(pan));
         }
         if (valLine != g_lastValueLine[s]) {
             g_lastValueLine[s] = valLine;
@@ -1786,17 +1880,50 @@ void pushZonesForVisibleSlots()
     }
     g_faderPbInit = true;
 
-    // V-Pot Readout Bar (FF 66 11 0F). Command + byte layout confirmed
-    // in cap20 but the per-strip 16-bit value encoding still eludes us:
-    //   - Linear byte[0] 0..255 → flicker within a narrow range
-    //   - Bit-mask (1<<n)-1 pattern → renders nothing
-    // DISABLED pending cap24: record SSL 360° with plug-in params at
-    // specific normalised values (not just V-Pot rotation deltas) to
-    // cross-reference. Keep the computation intact so the dedup state
-    // stays consistent for when we re-enable.
-    (void)vpotBar;
-    (void)g_lastVPotBar;
-    (void)g_vpotBarInit;
+    // V-Pot mode register (FF 66 09 0D) + V-Pot Readout Bar (FF 66 11
+    // 0F). cap15 confirms SSL360 sends them paired AND dedups — pushing
+    // identical frames every tick re-animates the bar (user-reported:
+    // line sweeps left→right, leaves trailing pixels). Push only when
+    // either mode or position changed.
+    //
+    // Mode bytes per strip:
+    //   0x01 = single-dot indicator (unipolar params, plugin button
+    //          toggles when full/empty — what we use for active strips)
+    //   0x03 = empty / disabled
+    std::array<uint8_t, 8> vpotMode{};
+    {
+        const int trackCount = CountTracks(nullptr);
+        for (uint8_t s = 0; s < 8; ++s) {
+            const int realSlot = static_cast<int>(s) + g_bankOffset.load();
+            vpotMode[s] = (realSlot < trackCount) ? 0x01 : 0x03;
+        }
+    }
+    bool modeChanged = !g_vpotBarInit;
+    if (!modeChanged) {
+        for (uint8_t s = 0; s < 8; ++s) {
+            if (vpotMode[s] != g_lastVPotMode[s]) { modeChanged = true; break; }
+        }
+    }
+    bool barChanged = !g_vpotBarInit;
+    if (!barChanged) {
+        for (uint8_t s = 0; s < 8; ++s) {
+            if (vpotBar[s] != g_lastVPotBar[s]) { barChanged = true; break; }
+        }
+    }
+    if (modeChanged) {
+        g_lastVPotMode = vpotMode;
+        std::vector<uint8_t> mf{0xFF, 0x66, 0x09, 0x0D};
+        for (auto m : vpotMode) mf.push_back(m);
+        uint8_t cks = 0;
+        for (size_t i = 1; i < mf.size(); ++i) cks += mf[i];
+        mf.push_back(cks);
+        g_dev->send(std::move(mf));
+    }
+    if (barChanged) {
+        g_lastVPotBar = vpotBar;
+        g_dev->send(uf8::buildVPotReadoutBar(vpotBar));
+    }
+    g_vpotBarInit = true;
 }
 
 void commitDebouncedTouchReleases()
@@ -2040,6 +2167,18 @@ void onTimer()
         // focus change.
         g_uc1_surface->invalidateCache();
         g_uc1_surface->refresh();
+    }
+    // UF8 init refire: same race as UC1 — the open-time
+    // g_bankDirty.store(true) is consumed by the first onTimer tick
+    // before REAPER has finished loading the project (CountTracks==0
+    // → loop pushes blank/off LEDs and bankDirty clears, leaving SEL
+    // LEDs in their firmware-default white state and no selected
+    // strip lit). Re-arm bankDirty here once tracks are present so
+    // the bank-refresh branch fires with real track state.
+    static bool g_uf8InitDone = false;
+    if (!g_uf8InitDone && g_dev && g_dev->isOpen() && CountTracks(nullptr) > 0) {
+        g_bankDirty.store(true);
+        g_uf8InitDone = true;
     }
     drainInputQueue();
     commitDebouncedTouchReleases();

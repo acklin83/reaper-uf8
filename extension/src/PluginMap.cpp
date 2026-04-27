@@ -217,12 +217,18 @@ std::span<const PluginMap> allPluginMaps()
 
 int slotIdxForVst3Param(const PluginMap& map, int vst3Param)
 {
-    for (size_t i = 0; i < map.slots.size(); ++i) {
-        if (map.slots[i].vst3Param == vst3Param) {
-            return static_cast<int>(i);
-        }
+    for (const auto& s : map.slots) {
+        if (s.vst3Param == vst3Param) return s.linkIdx;
     }
     return -1;
+}
+
+const LinkSlot* findSlotByLinkIdx(const PluginMap& map, int linkIdx)
+{
+    for (const auto& s : map.slots) {
+        if (s.linkIdx == linkIdx) return &s;
+    }
+    return nullptr;
 }
 
 PluginMatch lookupPluginOnTrack(void* trackOpaque)

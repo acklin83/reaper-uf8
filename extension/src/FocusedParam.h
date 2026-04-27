@@ -38,7 +38,14 @@ enum class Domain : uint8_t {
 
 struct alignas(8) FocusedParam {
     Domain  domain;
-    int32_t slotIdx;
+    int32_t slotIdx;   // SSL 360 Link slot index (LinkSlot.linkIdx),
+                       // NOT an array index into PluginMap.slots.
+                       // Resolve via uf8::findSlotByLinkIdx so the same
+                       // focus renders correctly on tracks with
+                       // different plugin variants (CS 2 / 4K E / 4K G
+                       // / 4K B all share linkIdx values for the same
+                       // logical params, but differ in slot ordering
+                       // and which slots they expose).
 
     constexpr bool operator==(const FocusedParam& o) const noexcept {
         return domain == o.domain && slotIdx == o.slotIdx;
