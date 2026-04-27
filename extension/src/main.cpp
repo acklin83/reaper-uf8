@@ -1811,28 +1811,31 @@ void commitDebouncedTouchReleases()
         const bool wasReported = g_touchReported[s].exchange(false);
         if (!wasReported) continue;
 
+        if (!g_dev) continue;
+        MediaTrack* tr = g_slotTrack[s];
+        if (!tr) continue;
+
         // Snap REAPER to the user's last raw fader position (regardless
-        // of the >=4-LSB deadband) so REAPER ends up where the fader
-        // physically is — and crucially so motor-echo on the next tick
-        // computes the same value the firmware will re-engage to.
-        if (g_dev) {
-            MediaTrack* tr = g_slotTrack[s];
-            if (tr && g_lastTouchPbValid[s].load()) {
-                const uint16_t touchPb = g_lastTouchPb[s].load();
-                CSurf_OnVolumeChange(tr, pbToLinearVolume(touchPb), false);
-                g_lastTouchPbValid[s].store(false);
-                // Match dedup so the next motor-echo tick doesn't push
-                // a redundant FF 1E (which would drive the motor
-                // unnecessarily). Firmware re-engages on its own using
-                // the bit-7-set echoes we sent during the touch.
-                g_lastFaderPb[s] = touchPb;
-            }
+        // of the >=4-LSB deadband) so REAPER reflects where the fader
+        // ended up.
+        if (g_lastTouchPbValid[s].load()) {
+            const uint16_t touchPb = g_lastTouchPb[s].load();
+            CSurf_OnVolumeChange(tr, pbToLinearVolume(touchPb), false);
+            g_lastTouchPbValid[s].store(false);
         }
-        // No FF 1D / FF 1E sent on release — SSL360 does NOTHING here
-        // (cap32 confirms zero motor commands between touch release at
-        // 1.785 and next touch press at 2.44). The firmware re-engages
-        // implicitly using the touch-echo target buffer we kept up to
-        // date during the touch.
+
+        // Re-engage the motor. The firmware's target buffer is ALREADY
+        // pointing at the user's final touch position thanks to the
+        // bit-7-set echoes we sent throughout the touch (see FF 21 03
+        // handler in onUf8Input). So FF 1D 02 strip 01 engages the
+        // motor at the correct target — no jerk to a stale pre-touch
+        // value. Without this enable the firmware stays limp and
+        // ignores subsequent FF 1E motor-echo commands. SSL360 likely
+        // sends an equivalent re-engage too; cap32 just doesn't show
+        // one because the DAW had no fader activity between touches.
+        const uint16_t pb  = linearVolumeToPb(uiVolLinear(tr));
+        g_dev->send(uf8::buildMotorEnable(s, true));
+        g_lastFaderPb[s] = pb;
     }
 }
 
