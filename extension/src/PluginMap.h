@@ -20,6 +20,7 @@
 //
 
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string_view>
 
@@ -34,6 +35,13 @@ struct LinkSlot {
     const char* legend;       // short 3-4 char scribble legend ("IN")
     int         vst3Param;    // VST3 parameter index on *this* plugin
     bool        inverted;     // rotate CCW to increase when true
+
+    // Reset target for V-Pot push. nullopt → default to 0.5 (matches the
+    // pre-Stage-7 hardcoded behaviour). Populate per-slot to match each
+    // SSL plug-in's "neutral" position — 0 dB for gains, lowest cutoff
+    // for filters, etc. Tables left at nullopt for now; populate as we
+    // confirm each slot's natural reset point against SSL 360°.
+    std::optional<double> deflt = std::nullopt;
 };
 
 struct PluginMap {

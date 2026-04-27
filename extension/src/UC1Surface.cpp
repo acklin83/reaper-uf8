@@ -412,7 +412,14 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
     // domain, then find the slot whose vst3Param matches what UC1 just
     // wrote. If no slot maps (e.g. UC1 knob writes a param UF8's slot
     // list doesn't expose) we leave the focus untouched.
-    const auto uf8Domain = (domain == ControlDomain::BusComp)
+    //
+    // Discriminator is busCompContext (= "we actually used the BC map"),
+    // NOT the raw `domain` from classifyKnob(): a BC knob on a track
+    // without BC2 falls through to the CS map (line 357 above) and the
+    // resulting write is a CS-domain operation — so the focus must
+    // mirror CS, otherwise we'd write Domain::BusComp + a CS-derived
+    // slotIdx and trigger a render against the wrong plug-in family.
+    const auto uf8Domain = busCompContext
         ? uf8::Domain::BusComp
         : uf8::Domain::ChannelStrip;
     auto uf8Match = uf8::lookupPluginOnTrack(focusedTrack_, uf8Domain);

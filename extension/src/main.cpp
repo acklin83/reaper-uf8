@@ -478,8 +478,10 @@ void drainInputQueue()
                     && mm.map
                     && static_cast<size_t>(focused.slotIdx) < mm.map->slots.size())
                 {
+                    const auto& sl = mm.map->slots[focused.slotIdx];
+                    const double resetVal = sl.deflt.value_or(0.5);
                     TrackFX_SetParamNormalized(tr, mm.fxIndex,
-                        mm.map->slots[focused.slotIdx].vst3Param, 0.5);
+                        sl.vst3Param, resetVal);
                 } else {
                     SetMediaTrackInfo_Value(tr, "D_PAN", 0.0);
                 }
