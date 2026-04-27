@@ -19,6 +19,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "FocusedParam.h"
 #include "UC1Device.h"
 #include "UC1PluginMap.h"
 #include "UC1Protocol.h"
@@ -134,6 +135,15 @@ private:
     // table (cap37..cap41); knobs not yet mapped no-op silently.
     void pushKnobRing_(uint8_t knobId, double normalized);
 
+    // Push the focused-param's value for the focused track to the right
+    // section LCD zone (0x03 for ChannelStrip domain, 0x05 for BusComp).
+    // Used when an external writer (UF8 Page <->, plugin GUI poll)
+    // changes uf8::g_focusedParam, or when setFocusedTrack moves to a
+    // new track and the same focused slot now references a different
+    // plugin instance with a different value. No-op if domain is None
+    // or the focused track lacks a plug-in of the focused domain.
+    void pushFocusedParamReadout_();
+
     // Find the VST3 param index of the SSL Channel Strip's internal
     // "Channel In" switch on the given track+fx slot. Scans param
     // names for common spellings ("CsIn", "ChannelIn", "Channel In"…)
@@ -168,6 +178,18 @@ private:
     // cells whose packed target matches the cache; setFocusedTrack /
     // invalidateCache clears so the next refresh re-writes everything.
     std::unordered_map<uint8_t, std::vector<uint16_t>> ringCellCache_;
+
+    // Text-level dedup for zone 0x05 (the unified "currently edited
+    // value" readout). poll() recomputes the focused param's readout
+    // text every tick; if it matches this cache, the send is skipped.
+    // Catches all four causes of value change with one mechanism:
+    //   - UC1 knob turn (handled inline by pushFocusedParamReadout_)
+    //   - UF8 V-Pot rotation on the focused track (caught by poll-tick recompute)
+    //   - Page <-/-> focus shift (text changes -> cache miss -> push)
+    //   - Plugin-GUI mouse edit (same as UF8 V-Pot path — value-poll catches it)
+    // Empty initial value matches a literal empty readout, but real
+    // readouts are always 22+ bytes so the first push always fires.
+    std::string lastZone05Text_;
 };
 
 } // namespace uc1

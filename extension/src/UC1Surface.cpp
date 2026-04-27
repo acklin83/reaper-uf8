@@ -10,7 +10,9 @@
 #include <vector>
 
 #include "reaper_plugin_functions.h"
+#include "FocusedParam.h"  // uf8::setFocus — project UC1 knob turns onto the broadcast UF8 strip
 #include "Palette.h"  // uf8::quantize for UC1 focused-track colour
+#include "PluginMap.h" // uf8::lookupPluginOnTrack + slotIdxForVst3Param
 
 // Defined in main.cpp — scroll REAPER's MCP so the just-selected track
 // is visible (and, on UF8, rebank the 8-strip window around it). Shared
@@ -150,6 +152,7 @@ void UC1Surface::setFocusedTrack(void* track)
 void UC1Surface::invalidateCache()
 {
     ringCellCache_.clear();
+    lastZone05Text_.clear();  // force the next pushFocusedParamReadout_ to send
 }
 
 int UC1Surface::poll()
@@ -165,6 +168,17 @@ int UC1Surface::poll()
     int handled = 0;
     for (const auto& e : knobs)   { handleKnob_(e);   ++handled; }
     for (const auto& e : buttons) { handleButton_(e); ++handled; }
+
+    // Per-tick value poll. Catches every cause of focused-param change:
+    //   - UF8 Page <-/-> shifted slotIdx (text changes)
+    //   - UF8 V-Pot rotation on the focused track (value changes)
+    //   - Plugin-GUI mouse edit (value changes)
+    //   - REAPER automation moving the param under us (value changes)
+    // Internal dedup against lastZone05Text_ skips the USB write when
+    // nothing changed, so the cost when idle is just two REAPER API
+    // calls + a string compare.
+    pushFocusedParamReadout_();
+
     return handled;
 }
 
@@ -342,18 +356,18 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
     }
 
     // Pick Bus Comp when available and the knob is a V-Pot; otherwise
-    // fall back to Channel Strip.
+    // fall back to Channel Strip. The readout zone is unified to 0x05
+    // (kBusCompReadout) regardless of which family the knob writes to —
+    // see pushFocusedParamReadout_ for the rationale.
     const PluginBindings* map = nullptr;
     int fxIdx = -1;
     bool busCompContext = false;
-    uint8_t zone = zone::kChannelStripReadout;
 
     const ControlDomain domain = classifyKnob(ev.id);
     if (domain == ControlDomain::BusComp && bindings.busCompMap) {
         map           = bindings.busCompMap;
         fxIdx         = bindings.busCompFxIdx;
         busCompContext = true;
-        zone          = zone::kBusCompReadout;
     } else if (bindings.channelMap) {
         map   = bindings.channelMap;
         fxIdx = bindings.channelFxIdx;
@@ -392,7 +406,47 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
     next = std::clamp(next, 0.0, 1.0);
     TrackFX_SetParamNormalized(tr, fxIdx, vst3Param, next);
 
-    pushKnobReadout_(ev.id, tr, fxIdx, vst3Param, zone, labelForKnob(ev.id, busCompContext));
+    // Project the focused-param onto UF8: turning a UC1 knob makes the
+    // touched parameter the new focused param across the bank. We look
+    // up UF8's PluginMap (separate types from uc1::PluginBindings even
+    // though both describe the same on-track plug-in) for the same
+    // domain, then find the slot whose vst3Param matches what UC1 just
+    // wrote. If no slot maps (e.g. UC1 knob writes a param UF8's slot
+    // list doesn't expose) we leave the focus untouched.
+    //
+    // Discriminator is busCompContext (= "we actually used the BC map"),
+    // NOT the raw `domain` from classifyKnob(): a BC knob on a track
+    // without BC2 falls through to the CS map (line 357 above) and the
+    // resulting write is a CS-domain operation — so the focus must
+    // mirror CS, otherwise we'd write Domain::BusComp + a CS-derived
+    // slotIdx and trigger a render against the wrong plug-in family.
+    const auto uf8Domain = busCompContext
+        ? uf8::Domain::BusComp
+        : uf8::Domain::ChannelStrip;
+    auto uf8Match = uf8::lookupPluginOnTrack(focusedTrack_, uf8Domain);
+    bool focusedParamRendered = false;
+    if (uf8Match.map) {
+        const int slotIdx = uf8::slotIdxForVst3Param(*uf8Match.map, vst3Param);
+        if (slotIdx >= 0) {
+            uf8::setFocus({uf8Domain, slotIdx});
+            // Unified readout: same code path as poll-tick value polling
+            // and Page <-/-> external focus changes. Dedup cache inside
+            // pushFocusedParamReadout_ ensures we don't double-push when
+            // the next poll() tick runs immediately after this.
+            pushFocusedParamReadout_();
+            focusedParamRendered = true;
+        }
+    }
+    if (!focusedParamRendered) {
+        // Knob wrote a vst3Param outside UF8's slot list (or the track
+        // has no UF8-recognised plugin for this domain). Fall back to a
+        // direct per-knob readout so the user still sees their edit;
+        // skips the dedup cache (next poll-tick will re-render the
+        // focused param's text, overwriting this transient).
+        pushKnobReadout_(ev.id, tr, fxIdx, vst3Param,
+                         zone::kBusCompReadout,
+                         labelForKnob(ev.id, busCompContext));
+    }
     // Pass the visual position (flipped when the pot is inverted) so
     // the LED ring goes CW when the pot goes CW — independent of which
     // way the VST3 param value moves.
@@ -749,6 +803,46 @@ void UC1Surface::pushButtonReadout_(uint8_t /*buttonId*/, std::string_view label
     if (!device_) return;
     auto readout = formatReadout(label, value);
     device_->send(buildDisplayText(zone, readout, readout.size()));
+}
+
+void UC1Surface::pushFocusedParamReadout_()
+{
+    if (!device_ || !focusedTrack_) return;
+    const auto focused = uf8::getFocusedParam();
+    if (focused.domain == uf8::Domain::None) return;
+
+    auto match = uf8::lookupPluginOnTrack(focusedTrack_, focused.domain);
+    if (!match.map) return;
+    if (focused.slotIdx < 0
+        || static_cast<size_t>(focused.slotIdx) >= match.map->slots.size())
+    {
+        return;
+    }
+
+    const auto& slot = match.map->slots[focused.slotIdx];
+    MediaTrack* tr = static_cast<MediaTrack*>(focusedTrack_);
+    char formatted[64] = {};
+    const double cur = TrackFX_GetParamNormalized(tr, match.fxIndex,
+                                                  slot.vst3Param);
+    TrackFX_FormatParamValueNormalized(tr, match.fxIndex, slot.vst3Param,
+                                       cur, formatted, sizeof(formatted));
+    std::string value = stripUnitIfNonNumeric(compactUnit(formatted));
+    auto readout = formatReadout(slot.name, value);
+
+    // Dedup: poll() calls this every tick at 30 Hz; skip the USB write
+    // when the rendered text didn't change. Same cache also dedups
+    // against handleKnob_'s direct call after a UC1 knob turn — the
+    // setFocus + pushFocusedParamReadout_ path lands here, fills the
+    // cache, and the next poll-tick's recompute is a no-op.
+    if (readout == lastZone05Text_) return;
+    lastZone05Text_ = readout;
+
+    // Unified readout zone — Channel-Strip params and Bus-Comp params
+    // both render here, regardless of which UF8/UC1 control sourced
+    // the change. Matches SSL UC1's user-facing "currently edited
+    // value" display convention. Zone 0x03 stays reserved for button
+    // status text (S/C Listen On, Solo On, ...).
+    device_->send(buildDisplayText(zone::kBusCompReadout, readout, readout.size()));
 }
 
 void UC1Surface::pushKnobReadout_(uint8_t knobId, void* trackRaw, int fxIdx,
@@ -1458,6 +1552,12 @@ void UC1Surface::refresh()
             device_->send(frame);
         }
     }
+
+    // Focused-param readout for the new track. The focus value itself
+    // hasn't changed (track-switch leaves slotIdx + domain alone), but
+    // the displayed value depends on the track's plug-in instance, so
+    // recompute + push (dedup cache handles the text-equal case).
+    pushFocusedParamReadout_();
 }
 
 void UC1Surface::pushGainReduction(float dB)
