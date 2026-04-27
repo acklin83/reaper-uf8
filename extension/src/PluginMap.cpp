@@ -193,11 +193,11 @@ constexpr LinkSlot kBusComp2Slots[] = {
 // against these `match` strings.
 
 constexpr PluginMap kMaps[] = {
-    { "Channel Strip 2",    "CS 2",  Domain::ChannelStrip, kCs2Slots       },
-    { "4K G",               "4K G",  Domain::ChannelStrip, k4kGSlots       },
-    { "4K E",               "4K E",  Domain::ChannelStrip, k4kESlots       },
-    { "4K B",               "4K B",  Domain::ChannelStrip, k4kBSlots       },
-    { "Bus Compressor 2",   "BC 2",  Domain::BusComp,      kBusComp2Slots  },
+    { "Channel Strip 2",    "CS 2",  kCs2Slots       },
+    { "4K G",               "4K G",  k4kGSlots       },
+    { "4K E",               "4K E",  k4kESlots       },
+    { "4K B",               "4K B",  k4kBSlots       },
+    { "Bus Compressor 2",   "BC 2",  kBusComp2Slots  },
 };
 
 } // namespace
@@ -215,16 +215,6 @@ std::span<const PluginMap> allPluginMaps()
     return { kMaps, sizeof(kMaps) / sizeof(kMaps[0]) };
 }
 
-int slotIdxForVst3Param(const PluginMap& map, int vst3Param)
-{
-    for (size_t i = 0; i < map.slots.size(); ++i) {
-        if (map.slots[i].vst3Param == vst3Param) {
-            return static_cast<int>(i);
-        }
-    }
-    return -1;
-}
-
 PluginMatch lookupPluginOnTrack(void* trackOpaque)
 {
     auto* tr = static_cast<MediaTrack*>(trackOpaque);
@@ -238,23 +228,6 @@ PluginMatch lookupPluginOnTrack(void* trackOpaque)
         if (const PluginMap* m = lookupPluginMapByName(buf)) {
             return { m, fx };
         }
-    }
-    return { nullptr, -1 };
-}
-
-PluginMatch lookupPluginOnTrack(void* trackOpaque, Domain domain)
-{
-    if (domain == Domain::None) return { nullptr, -1 };
-    auto* tr = static_cast<MediaTrack*>(trackOpaque);
-    if (!tr) return { nullptr, -1 };
-    const int n = TrackFX_GetCount(tr);
-    char buf[512];
-    for (int fx = 0; fx < n; ++fx) {
-        buf[0] = 0;
-        TrackFX_GetFXName(tr, fx, buf, sizeof(buf));
-        if (buf[0] == 0) continue;
-        const PluginMap* m = lookupPluginMapByName(buf);
-        if (m && m->domain == domain) return { m, fx };
     }
     return { nullptr, -1 };
 }

@@ -56,7 +56,6 @@ add_library(reaper_uf8 MODULE
     src/Protocol.cpp
     src/Palette.cpp
     src/PluginMap.cpp
-    src/FocusedParam.cpp
     src/UF8Device.cpp
     src/UC1Protocol.cpp
     src/UC1Device.cpp
