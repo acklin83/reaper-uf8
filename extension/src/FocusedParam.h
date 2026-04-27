@@ -25,13 +25,18 @@
 
 namespace uf8 {
 
-struct alignas(8) FocusedParam {
-    enum Domain : uint8_t {
-        None         = 0,  // No plugin / fall back to track-name + Vol display
-        ChannelStrip = 1,  // Slot index lives in CS-family PluginMap.slots
-        BusComp      = 2,  // Slot index lives in Bus Comp 2 PluginMap.slots
-    };
+// Domain — which plugin family a focused-param slot belongs to. Lives at
+// namespace scope (not nested in FocusedParam) so PluginMap can carry it
+// as a struct field without dragging in the atomic state.
+enum class Domain : uint8_t {
+    None         = 0,  // No plugin / fall back to track-name + Vol display
+    ChannelStrip = 1,  // Slot index lives in CS-family PluginMap.slots
+                       // (CS 2 / 4K B / 4K E / 4K G — share the SSL 360
+                       // Link virtual-strip layout)
+    BusComp      = 2,  // Slot index lives in Bus Comp 2 PluginMap.slots
+};
 
+struct alignas(8) FocusedParam {
     Domain  domain;
     int32_t slotIdx;
 
@@ -51,6 +56,18 @@ extern std::atomic<bool> g_focusedDirty;
 
 inline FocusedParam getFocusedParam() noexcept {
     return g_focusedParam.load(std::memory_order_relaxed);
+}
+
+// Sole writer to g_focusedParam. CAS-free exchange + dirty flag is
+// fine because writers are all on the main thread (REAPER timer + the
+// UC1/UF8 input drains all run there). The dirty flag fires only when
+// the value actually changed, so spurious re-writes don't trigger
+// useless display re-pushes.
+inline void setFocus(FocusedParam fp) noexcept {
+    const auto prev = g_focusedParam.exchange(fp, std::memory_order_relaxed);
+    if (!(prev == fp)) {
+        g_focusedDirty.store(true, std::memory_order_relaxed);
+    }
 }
 
 } // namespace uf8

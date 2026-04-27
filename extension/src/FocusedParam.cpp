@@ -8,7 +8,7 @@ namespace uf8 {
 // CS 2). Domain stays ChannelStrip until a future write — Stage 2+
 // introduces transitions to None / BusComp.
 std::atomic<FocusedParam> g_focusedParam{
-    FocusedParam{ FocusedParam::ChannelStrip, 0 }
+    FocusedParam{ Domain::ChannelStrip, 0 }
 };
 
 std::atomic<bool> g_focusedDirty{false};

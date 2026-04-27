@@ -23,6 +23,8 @@
 #include <span>
 #include <string_view>
 
+#include "FocusedParam.h"
+
 namespace uf8 {
 
 struct LinkSlot {
@@ -35,9 +37,10 @@ struct LinkSlot {
 };
 
 struct PluginMap {
-    const char*              match;         // case-sensitive substring of TrackFX_GetFXName
-    const char*              displayShort;  // 4-char Channel Strip Type zone label ("CS 2", …)
-    std::span<const LinkSlot> slots;        // ordered — pageIdx indexes into this directly
+    const char*               match;         // case-sensitive substring of TrackFX_GetFXName
+    const char*               displayShort;  // 4-char Channel Strip Type zone label ("CS 2", …)
+    Domain                    domain;        // family classification — drives focused-param routing
+    std::span<const LinkSlot> slots;         // ordered — focused.slotIdx indexes into this directly
 };
 
 // Lookup the first matching plugin map on a track. Walks TrackFX_GetCount
@@ -50,10 +53,27 @@ struct PluginMatch {
 
 PluginMatch lookupPluginOnTrack(void* track /*MediaTrack**/);
 
+// Domain-aware lookup. Walks the track's FX chain and returns the first
+// plugin whose PluginMap.domain matches `domain`. A track can host both
+// CS-family and BC plugins simultaneously (Channel Strip 2 + Bus
+// Compressor 2), and the focused-param projection on UF8 needs to route
+// to the correct one. `Domain::None` is treated as "no match" (returns
+// {nullptr, -1}).
+PluginMatch lookupPluginOnTrack(void* track, Domain domain);
+
 // Lookup by raw FX name (substring match). Exposed for tests.
 const PluginMap* lookupPluginMapByName(std::string_view fxName);
 
 // All compiled-in maps — for debugging / tests.
 std::span<const PluginMap> allPluginMaps();
+
+// Find the slot index whose vst3Param matches `vst3Param`. Used by
+// cross-device focus sync: when UC1 (or the plugin GUI) writes a param,
+// we need to map "this plugin's VST3 param N" back to the slot list
+// position so the same focused-param state can be projected onto UF8.
+//
+// Returns -1 when no slot maps to that VST3 param. O(N) linear scan;
+// slot lists are tiny (≤32) so a hash map would be overkill.
+int slotIdxForVst3Param(const PluginMap& map, int vst3Param);
 
 } // namespace uf8

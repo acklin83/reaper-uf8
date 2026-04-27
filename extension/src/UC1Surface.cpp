@@ -10,7 +10,9 @@
 #include <vector>
 
 #include "reaper_plugin_functions.h"
+#include "FocusedParam.h"  // uf8::setFocus — project UC1 knob turns onto the broadcast UF8 strip
 #include "Palette.h"  // uf8::quantize for UC1 focused-track colour
+#include "PluginMap.h" // uf8::lookupPluginOnTrack + slotIdxForVst3Param
 
 // Defined in main.cpp — scroll REAPER's MCP so the just-selected track
 // is visible (and, on UF8, rebank the 8-strip window around it). Shared
@@ -391,6 +393,24 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
     double next = cur + clickToDelta_(ev.delta) * (map->inverted[ev.id] ? -1.0 : 1.0);
     next = std::clamp(next, 0.0, 1.0);
     TrackFX_SetParamNormalized(tr, fxIdx, vst3Param, next);
+
+    // Project the focused-param onto UF8: turning a UC1 knob makes the
+    // touched parameter the new focused param across the bank. We look
+    // up UF8's PluginMap (separate types from uc1::PluginBindings even
+    // though both describe the same on-track plug-in) for the same
+    // domain, then find the slot whose vst3Param matches what UC1 just
+    // wrote. If no slot maps (e.g. UC1 knob writes a param UF8's slot
+    // list doesn't expose) we leave the focus untouched.
+    const auto uf8Domain = (domain == ControlDomain::BusComp)
+        ? uf8::Domain::BusComp
+        : uf8::Domain::ChannelStrip;
+    auto uf8Match = uf8::lookupPluginOnTrack(focusedTrack_, uf8Domain);
+    if (uf8Match.map) {
+        const int slotIdx = uf8::slotIdxForVst3Param(*uf8Match.map, vst3Param);
+        if (slotIdx >= 0) {
+            uf8::setFocus({uf8Domain, slotIdx});
+        }
+    }
 
     pushKnobReadout_(ev.id, tr, fxIdx, vst3Param, zone, labelForKnob(ev.id, busCompContext));
     // Pass the visual position (flipped when the pot is inverted) so

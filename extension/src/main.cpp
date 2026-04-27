@@ -433,15 +433,14 @@ void drainInputQueue()
                 CSurf_OnVolumeChange(tr, e.value, false);
                 break;
             case PendingInput::PanDelta: {
-                // V-pot rotation: if the strip's track hosts an SSL plug-in
-                // map AND we're not in global Pan mode, drive the focused
-                // parameter on that strip's track. Otherwise fall back to
-                // track pan.
+                // V-pot rotation: if the strip's track hosts a plug-in of
+                // the focused domain (CS / BC) AND we're not in global Pan
+                // mode, drive the focused parameter on that strip's track.
+                // Otherwise fall back to track pan.
                 const auto focused = uf8::getFocusedParam();
-                auto mm = uf8::lookupPluginOnTrack(tr);
+                auto mm = uf8::lookupPluginOnTrack(tr, focused.domain);
                 const bool forcePan = g_forcePan.load();
                 if (!forcePan
-                    && focused.domain != uf8::FocusedParam::None
                     && mm.map
                     && static_cast<size_t>(focused.slotIdx) < mm.map->slots.size())
                 {
@@ -469,14 +468,13 @@ void drainInputQueue()
                 break;
             }
             case PendingInput::PanCenter: {
-                // V-pot push: with an SSL plug-in present (and not in
-                // global Pan mode), reset the focused param to its
-                // midpoint. Otherwise, re-center pan.
-                auto mm = uf8::lookupPluginOnTrack(tr);
+                // V-pot push: with a plug-in of the focused domain present
+                // (and not in global Pan mode), reset the focused param to
+                // its midpoint. Otherwise, re-center pan.
                 const auto focused = uf8::getFocusedParam();
+                auto mm = uf8::lookupPluginOnTrack(tr, focused.domain);
                 const bool forcePan = g_forcePan.load();
                 if (!forcePan
-                    && focused.domain != uf8::FocusedParam::None
                     && mm.map
                     && static_cast<size_t>(focused.slotIdx) < mm.map->slots.size())
                 {
@@ -1062,19 +1060,15 @@ void onUf8Input(const uint8_t* data, size_t len)
                 // a Page key activates the broadcast model).
                 if (pressed) {
                     const int delta = (id == 0x53) ? 1 : -1;
-                    auto fp = uf8::g_focusedParam.load();
+                    const auto fp = uf8::getFocusedParam();
                     int next = fp.slotIdx + delta;
                     if (next < 0) next = 0;
                     if (next > 31) next = 31;
-                    const auto newDomain = (fp.domain == uf8::FocusedParam::None)
-                        ? uf8::FocusedParam::ChannelStrip
+                    const auto newDomain = (fp.domain == uf8::Domain::None)
+                        ? uf8::Domain::ChannelStrip
                         : fp.domain;
-                    const uf8::FocusedParam updated{newDomain, next};
-                    if (!(updated == fp)) {
-                        uf8::g_focusedParam.store(updated);
-                        uf8::g_focusedDirty.store(true);
-                        g_pageDirty.store(true);
-                    }
+                    uf8::setFocus({newDomain, next});
+                    g_pageDirty.store(true);
                 }
                 handledNatively = true;
             } else if (id == 0x78 || id == 0x79) {
@@ -1440,18 +1434,16 @@ bool                       g_vpotBarInit{false};
 //     has 7 slots, walking further reveals pan fallback)
 // Must be called on the main thread — touches REAPER API.
 //
-// Stage 1 note: domain is read but not yet used to differentiate plugin
-// families — lookupPluginOnTrack is still first-hit-wins. Stage 3 will
-// add a domain-aware lookup so a track with both CS2 + BC2 routes the
-// focused-param render to the correct family.
+// Domain-aware: a track with both CS2 + BC2 returns the slot of the plug-in
+// matching the focused domain (so a focused BC param doesn't render against
+// the CS plug-in and miss).
 const uf8::LinkSlot* slotForStrip(MediaTrack* tr,
                                   const uf8::FocusedParam& focused,
                                   int* outFxIdx)
 {
     if (!tr) return nullptr;
     if (g_forcePan.load()) return nullptr;
-    if (focused.domain == uf8::FocusedParam::None) return nullptr;
-    auto match = uf8::lookupPluginOnTrack(tr);
+    auto match = uf8::lookupPluginOnTrack(tr, focused.domain);
     if (!match.map) return nullptr;
     if (focused.slotIdx < 0
         || static_cast<size_t>(focused.slotIdx) >= match.map->slots.size())
