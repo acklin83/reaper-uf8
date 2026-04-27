@@ -1698,6 +1698,20 @@ void pushZonesForVisibleSlots()
                 const uint8_t lsb = static_cast<uint8_t>(pb & 0x7F);
                 const uint8_t msb = static_cast<uint8_t>((pb >> 7) & 0x7F);
                 g_dev->send(uf8::buildFaderPosition(static_cast<uint8_t>(s), lsb, msb));
+                if (FILE* f = std::fopen("/tmp/reaper_uf8_motor.log", "a")) {
+                    std::fprintf(f, "PUSH s=%u pb=%u (lsb=%02x msb=%02x) vol=%.4f\n",
+                                 s, pb, lsb, msb, volLin);
+                    std::fclose(f);
+                }
+            }
+        } else {
+            static int skipLogCount[8] = {0};
+            if (++skipLogCount[s] % 30 == 1) {
+                if (FILE* f = std::fopen("/tmp/reaper_uf8_motor.log", "a")) {
+                    std::fprintf(f, "SKIP s=%u (touch-reported, count=%d)\n",
+                                 s, skipLogCount[s]);
+                    std::fclose(f);
+                }
             }
         }
 
@@ -1757,21 +1771,40 @@ void commitDebouncedTouchReleases()
         const bool wasReported = g_touchReported[s].exchange(false);
         if (!wasReported) continue;
 
-        // No host action on release: SSL 360° sends NOTHING between
-        // touches (cap32, 2026-04-25). Sending FF 1E + FF 1D 02 strip 01
-        // here causes the firmware to briefly drive toward a stale
-        // internal target — visible as a "jump to the last REAPER
-        // value" before the motor settles. See memory file
-        // uf8-pm-mode-invariants.md.
+        // Re-engage motor on touch release. The "next FF 1E re-engages
+        // implicitly" model from cap32 (uf8-pm-mode-invariants.md) does
+        // not actually re-engage on this firmware: motor stays limp
+        // even as fresh FF 1E positions stream in (verified 2026-04-27
+        // via /tmp/reaper_uf8_motor.log — PUSH frames going out, motor
+        // not moving until extension reload).
         //
-        // Instead we let the motor-echo path in pushZonesForVisibleSlots
-        // re-engage on the next timer tick. The g_lastFaderPb[s]
-        // invalidation below guarantees that path fires even when the
-        // touch was a tap with no movement (REAPER's volume unchanged):
-        // dedup would otherwise see pb == g_lastFaderPb and skip the
-        // push, leaving the motor limp until external automation moves
-        // it.
-        g_lastFaderPb[s] = 0xFFFF;
+        // To avoid the historical "jump to stale firmware target" jerk
+        // (commit 039f894 / f73201c), order matters:
+        //   1. Send the CURRENT REAPER position first while motor is
+        //      still limp — firmware updates its internal target
+        //      silently.
+        //   2. Send motor-enable — firmware engages on the fresh
+        //      target, not on whatever stale value was sitting there.
+        //
+        // dedup invalidation is no longer needed since we push the
+        // position explicitly here.
+        if (g_dev) {
+            MediaTrack* tr = g_slotTrack[s];
+            if (tr) {
+                const double volLin = uiVolLinear(tr);
+                const uint16_t pb = linearVolumeToPb(volLin);
+                const uint8_t lsb = static_cast<uint8_t>(pb & 0x7F);
+                const uint8_t msb = static_cast<uint8_t>((pb >> 7) & 0x7F);
+                g_dev->send(uf8::buildFaderPosition(s, lsb, msb));
+                g_dev->send(uf8::buildMotorEnable(s, true));
+                g_lastFaderPb[s] = pb;
+                if (FILE* f = std::fopen("/tmp/reaper_uf8_motor.log", "a")) {
+                    std::fprintf(f, "RELEASE s=%u: pos pb=%u + motor-enable\n",
+                                 s, pb);
+                    std::fclose(f);
+                }
+            }
+        }
     }
 }
 
