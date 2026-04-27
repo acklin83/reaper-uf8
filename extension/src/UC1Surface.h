@@ -179,14 +179,17 @@ private:
     // invalidateCache clears so the next refresh re-writes everything.
     std::unordered_map<uint8_t, std::vector<uint16_t>> ringCellCache_;
 
-    // Last value of uf8::g_focusedParam this surface rendered for. poll()
-    // compares the live value against this to detect external focus
-    // changes (UF8 Page <->, plugin GUI move) and re-render. handleKnob_
-    // updates this after its own setFocus to suppress the redundant
-    // re-render — pushKnobReadout_ already covered that path.
-    // Initialised to a sentinel that never matches a real focus, so the
-    // very first poll() always pushes once.
-    uf8::FocusedParam lastSeenFocus_{ uf8::Domain::None, -1 };
+    // Text-level dedup for zone 0x05 (the unified "currently edited
+    // value" readout). poll() recomputes the focused param's readout
+    // text every tick; if it matches this cache, the send is skipped.
+    // Catches all four causes of value change with one mechanism:
+    //   - UC1 knob turn (handled inline by pushFocusedParamReadout_)
+    //   - UF8 V-Pot rotation on the focused track (caught by poll-tick recompute)
+    //   - Page <-/-> focus shift (text changes -> cache miss -> push)
+    //   - Plugin-GUI mouse edit (same as UF8 V-Pot path — value-poll catches it)
+    // Empty initial value matches a literal empty readout, but real
+    // readouts are always 22+ bytes so the first push always fires.
+    std::string lastZone05Text_;
 };
 
 } // namespace uc1
