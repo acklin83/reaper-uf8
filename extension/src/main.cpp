@@ -862,6 +862,14 @@ reaper_csurf_reg_t g_csurfReg = {
 std::array<std::atomic<uint8_t>, 8> g_lastMsbOut{};
 std::array<std::atomic<uint8_t>, 8> g_lastLsbOut{};
 
+// Latest raw fader position (pb14) seen during a touch — recorded
+// regardless of deadband, so commitDebouncedTouchReleases can snap
+// REAPER to where the user's hand actually left the fader. Without
+// this the motor jerks back to pre-touch on release because the
+// >=4-LSB deadband swallowed the tiny finger-induced shift.
+std::array<std::atomic<uint16_t>, 8> g_lastTouchPb{};
+std::array<std::atomic<bool>, 8>     g_lastTouchPbValid{};
+
 // Last fader motor position we actually wrote to the UF8 — lets the timer
 // dedup motor-echo pushes, and lets the touch-release handler prime the
 // firmware with the user's new position before re-enabling the motor.
@@ -932,6 +940,23 @@ void onUf8Input(const uint8_t* data, size_t len)
                 const uint8_t lsb = data[i + 4] & 0x7F;
                 const uint8_t msb = data[i + 5] & 0x7F;
                 const uint16_t pb14 = static_cast<uint16_t>(lsb | (msb << 7));
+                // Always record the raw position so the touch-release
+                // commit can snap REAPER to where the fader physically
+                // ended up, even if every frame this touch was sub-deadband.
+                g_lastTouchPb[strip].store(pb14);
+                g_lastTouchPbValid[strip].store(true);
+                // Echo the position back to UF8 with bit 7 of LSB SET.
+                // SSL360 does this throughout every touch (cap32 OUT
+                // frames at 0.497..1.748). The firmware uses these
+                // echoes to update its motor-target buffer WITHOUT
+                // engaging the motor. When the touch ends the firmware
+                // implicitly re-engages on this target — no jerk
+                // because the target is exactly where the user's hand
+                // left the fader. Without these echoes the firmware
+                // re-engages to the pre-touch target = the jerk.
+                if (g_dev) {
+                    g_dev->send(uf8::buildFaderPosition(strip, lsb | 0x80, msb));
+                }
                 const uint8_t prevMsb = g_lastMsbOut[strip].load();
                 const uint8_t prevLsb = g_lastLsbOut[strip].load();
                 const int lsbDelta = std::abs(int(lsb) - int(prevLsb));
@@ -1727,20 +1752,6 @@ void pushZonesForVisibleSlots()
                 const uint8_t lsb = static_cast<uint8_t>(pb & 0x7F);
                 const uint8_t msb = static_cast<uint8_t>((pb >> 7) & 0x7F);
                 g_dev->send(uf8::buildFaderPosition(static_cast<uint8_t>(s), lsb, msb));
-                if (FILE* f = std::fopen("/tmp/reaper_uf8_motor.log", "a")) {
-                    std::fprintf(f, "PUSH s=%u pb=%u (lsb=%02x msb=%02x) vol=%.4f\n",
-                                 s, pb, lsb, msb, volLin);
-                    std::fclose(f);
-                }
-            }
-        } else {
-            static int skipLogCount[8] = {0};
-            if (++skipLogCount[s] % 30 == 1) {
-                if (FILE* f = std::fopen("/tmp/reaper_uf8_motor.log", "a")) {
-                    std::fprintf(f, "SKIP s=%u (touch-reported, count=%d)\n",
-                                 s, skipLogCount[s]);
-                    std::fclose(f);
-                }
             }
         }
 
@@ -1800,40 +1811,28 @@ void commitDebouncedTouchReleases()
         const bool wasReported = g_touchReported[s].exchange(false);
         if (!wasReported) continue;
 
-        // Re-engage motor on touch release. The "next FF 1E re-engages
-        // implicitly" model from cap32 (uf8-pm-mode-invariants.md) does
-        // not actually re-engage on this firmware: motor stays limp
-        // even as fresh FF 1E positions stream in (verified 2026-04-27
-        // via /tmp/reaper_uf8_motor.log — PUSH frames going out, motor
-        // not moving until extension reload).
-        //
-        // To avoid the historical "jump to stale firmware target" jerk
-        // (commit 039f894 / f73201c), order matters:
-        //   1. Send the CURRENT REAPER position first while motor is
-        //      still limp — firmware updates its internal target
-        //      silently.
-        //   2. Send motor-enable — firmware engages on the fresh
-        //      target, not on whatever stale value was sitting there.
-        //
-        // dedup invalidation is no longer needed since we push the
-        // position explicitly here.
+        // Snap REAPER to the user's last raw fader position (regardless
+        // of the >=4-LSB deadband) so REAPER ends up where the fader
+        // physically is — and crucially so motor-echo on the next tick
+        // computes the same value the firmware will re-engage to.
         if (g_dev) {
             MediaTrack* tr = g_slotTrack[s];
-            if (tr) {
-                const double volLin = uiVolLinear(tr);
-                const uint16_t pb = linearVolumeToPb(volLin);
-                const uint8_t lsb = static_cast<uint8_t>(pb & 0x7F);
-                const uint8_t msb = static_cast<uint8_t>((pb >> 7) & 0x7F);
-                g_dev->send(uf8::buildFaderPosition(s, lsb, msb));
-                g_dev->send(uf8::buildMotorEnable(s, true));
-                g_lastFaderPb[s] = pb;
-                if (FILE* f = std::fopen("/tmp/reaper_uf8_motor.log", "a")) {
-                    std::fprintf(f, "RELEASE s=%u: pos pb=%u + motor-enable\n",
-                                 s, pb);
-                    std::fclose(f);
-                }
+            if (tr && g_lastTouchPbValid[s].load()) {
+                const uint16_t touchPb = g_lastTouchPb[s].load();
+                CSurf_OnVolumeChange(tr, pbToLinearVolume(touchPb), false);
+                g_lastTouchPbValid[s].store(false);
+                // Match dedup so the next motor-echo tick doesn't push
+                // a redundant FF 1E (which would drive the motor
+                // unnecessarily). Firmware re-engages on its own using
+                // the bit-7-set echoes we sent during the touch.
+                g_lastFaderPb[s] = touchPb;
             }
         }
+        // No FF 1D / FF 1E sent on release — SSL360 does NOTHING here
+        // (cap32 confirms zero motor commands between touch release at
+        // 1.785 and next touch press at 2.44). The firmware re-engages
+        // implicitly using the touch-echo target buffer we kept up to
+        // date during the touch.
     }
 }
 
