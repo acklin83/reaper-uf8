@@ -167,6 +167,17 @@ int UC1Surface::poll()
     int handled = 0;
     for (const auto& e : knobs)   { handleKnob_(e);   ++handled; }
     for (const auto& e : buttons) { handleButton_(e); ++handled; }
+
+    // External focus changes (UF8 Page <->, plugin GUI move, REAPER
+    // automation): re-render the focused-param value. handleKnob_ keeps
+    // lastSeenFocus_ in sync after its own writes so we don't double-push
+    // for UC1's own knob turns.
+    const auto liveFocus = uf8::getFocusedParam();
+    if (!(liveFocus == lastSeenFocus_)) {
+        lastSeenFocus_ = liveFocus;
+        pushFocusedParamReadout_();
+    }
+
     return handled;
 }
 
@@ -408,7 +419,12 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
     if (uf8Match.map) {
         const int slotIdx = uf8::slotIdxForVst3Param(*uf8Match.map, vst3Param);
         if (slotIdx >= 0) {
-            uf8::setFocus({uf8Domain, slotIdx});
+            const uf8::FocusedParam fp{uf8Domain, slotIdx};
+            uf8::setFocus(fp);
+            // Keep poll()'s external-focus detector in sync — the readout
+            // below already covers UC1's view of this change, so we don't
+            // need pushFocusedParamReadout_ to re-fire next tick.
+            lastSeenFocus_ = fp;
         }
     }
 
@@ -769,6 +785,31 @@ void UC1Surface::pushButtonReadout_(uint8_t /*buttonId*/, std::string_view label
     if (!device_) return;
     auto readout = formatReadout(label, value);
     device_->send(buildDisplayText(zone, readout, readout.size()));
+}
+
+void UC1Surface::pushFocusedParamReadout_()
+{
+    if (!device_ || !focusedTrack_) return;
+    const auto focused = uf8::getFocusedParam();
+    if (focused.domain == uf8::Domain::None) return;
+
+    auto match = uf8::lookupPluginOnTrack(focusedTrack_, focused.domain);
+    if (!match.map) return;
+    if (focused.slotIdx < 0
+        || static_cast<size_t>(focused.slotIdx) >= match.map->slots.size())
+    {
+        return;
+    }
+
+    const auto& slot = match.map->slots[focused.slotIdx];
+    const uint8_t zone = (focused.domain == uf8::Domain::BusComp)
+        ? zone::kBusCompReadout
+        : zone::kChannelStripReadout;
+
+    // knobId = 0xFF: sentinel above pushKnobReadout_'s [0x20] debug-log
+    // bound, so external-focus pushes don't spam the console.
+    pushKnobReadout_(0xFF, focusedTrack_, match.fxIndex,
+                     slot.vst3Param, zone, slot.name);
 }
 
 void UC1Surface::pushKnobReadout_(uint8_t knobId, void* trackRaw, int fxIdx,
@@ -1478,6 +1519,15 @@ void UC1Surface::refresh()
             device_->send(frame);
         }
     }
+
+    // Focused-param readout for the new track. The focus value itself
+    // hasn't changed (track-switch leaves slotIdx + domain alone), so
+    // poll()'s liveFocus != lastSeenFocus_ check wouldn't re-fire — but
+    // the displayed value depends on the track's plug-in instance, so
+    // we push directly here. Sync lastSeenFocus_ to the current value
+    // so poll() sees us as caught up.
+    pushFocusedParamReadout_();
+    lastSeenFocus_ = uf8::getFocusedParam();
 }
 
 void UC1Surface::pushGainReduction(float dB)
