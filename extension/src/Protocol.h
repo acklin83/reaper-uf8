@@ -173,6 +173,13 @@ LedColourFrames buildLedColourPair(uint8_t strip, LedClass cls, bool on,
 // Convenience overload — uses ledColourClassDefault(cls) for the colour.
 LedColourFrames buildLedColourPair(uint8_t strip, LedClass cls, bool on);
 
+// Per-strip top-soft-key LED (cap41, 2026-04-28). Cell range `0x18..0x1F`
+// — formula `cell = 0x1F - strip` (strip 0 leftmost = 0x1F, strip 7 = 0x18).
+// Same FF 38/39 04 pair-write family as SEL/CUT/SOLO; ON = bright + FF39
+// `00 F0`, OFF = both frames carrying the dim bytes. Used for "this strip
+// holds the currently-focused param in the active soft-key bank" indicator.
+LedColourFrames buildTopSoftKeyLed(uint8_t strip, bool on, LedColour colour);
+
 // Global button LEDs (cap35/36, 2026-04-26). Same FF 38/39 04 pair-write
 // frame family, but the cell ranges 0x18..0x60 are the 30+ LEDs around
 // the buttons in the upper section of the UF8 (Layer/Send/Plugin row,

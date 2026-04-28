@@ -276,6 +276,29 @@ LedColourFrames buildLedColourPair(uint8_t strip, LedClass cls, bool on)
     return buildLedColourPair(strip, cls, on, ledColourClassDefault(cls));
 }
 
+LedColourFrames buildTopSoftKeyLed(uint8_t strip, bool on, LedColour colour)
+{
+    const uint8_t a38 = on ? colour.aBright : colour.aDim;
+    const uint8_t b38 = on ? colour.bBright : colour.bDim;
+    const uint8_t a39 = on ? 0x00 : colour.aDim;
+    const uint8_t b39 = on ? 0xF0 : colour.bDim;
+
+    const uint8_t cell = static_cast<uint8_t>(0x1F - strip);
+
+    LedColourFrames out;
+    out.ff38 = {0xFF, 0x38, 0x04, cell, 0x00, a38, b38};
+    {
+        std::span<const uint8_t> payload{out.ff38.data() + 1, out.ff38.size() - 1};
+        out.ff38.push_back(checksum(payload));
+    }
+    out.ff39 = {0xFF, 0x39, 0x04, cell, 0x00, a39, b39};
+    {
+        std::span<const uint8_t> payload{out.ff39.data() + 1, out.ff39.size() - 1};
+        out.ff39.push_back(checksum(payload));
+    }
+    return out;
+}
+
 std::vector<uint8_t> buildSelectedStripBitmask(uint16_t mask)
 {
     // FF 66 03 06 <lo> <hi> CKSUM

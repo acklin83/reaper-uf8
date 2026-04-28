@@ -1845,6 +1845,10 @@ std::string composeValueLine(std::string_view label, std::string_view value)
 // OUT endpoint 30× per second.
 std::array<std::string, 8> g_lastTrackName{};
 std::array<std::string, 8> g_lastSlotLabel{};
+// Top-soft-key LED dedup. -1 = unset. Encodes 0/1 = off/on; full re-push on
+// a soft-key dirty (bank change forces re-render via g_lastSlotLabel reset
+// upstream, but the LED state lives separately).
+std::array<int8_t, 8>      g_lastTopSoftKey{-1, -1, -1, -1, -1, -1, -1, -1};
 std::array<std::string, 8> g_lastCsType{};
 std::array<std::string, 8> g_lastValueLine{};
 std::array<std::string, 8> g_lastFaderDb{};
@@ -1975,6 +1979,7 @@ void pushZonesForVisibleSlots()
     if (pageChanged || softKeyChanged) {
         g_lastSlotLabel.fill({});
         g_lastValueLine.fill({});
+        g_lastTopSoftKey.fill(-1);
     }
     if (bankChanged) {
         g_lastTrackName.fill({});
@@ -1984,6 +1989,7 @@ void pushZonesForVisibleSlots()
         g_lastFaderDb.fill({});
         g_lastChanNum.fill({});
         g_lastFaderPb.fill(0xFFFF);
+        g_lastTopSoftKey.fill(-1);
         g_vpotBarInit = false;
         if (g_sync) g_sync->invalidate();
 
@@ -2101,10 +2107,10 @@ void pushZonesForVisibleSlots()
             g_dev->send(uf8::buildChannelStripType(static_cast<uint8_t>(s), csType));
         }
 
-        // Top-zone label (FF 66 .. 04) — UF8 manual p.174 "soft-key
-        // label". Pulls from the active soft-key bank for the focused
-        // domain. Empty cells (kNoSlot positions in the bank table)
-        // render as "" — top zone goes blank for those strips.
+        // Top-zone label + LED (FF 66 .. 04 + cells 0x18..0x1F).
+        // Label = soft-key bank's row N. LED = bright when this strip's
+        // bank position holds the currently-focused param, dim otherwise.
+        // (UF8 manual p.174 "soft-key label" + cap41 LED decode.)
         {
             const auto domSk = (focused.domain == uf8::Domain::BusComp)
                 ? uf8::Domain::BusComp : uf8::Domain::ChannelStrip;
@@ -2112,6 +2118,15 @@ void pushZonesForVisibleSlots()
                 0, softkey::maxBankFor(domSk));
             const auto vSk = softkey::viewFor(domSk, bankSk);
             std::string label = vSk.labels[s];
+            const int slotLink = vSk.linkIdx[s];
+            const bool ledOn = (slotLink != softkey::kNoSlot)
+                && (slotLink == focused.slotIdx);
+            const int8_t ledState = ledOn ? 1 : 0;
+            if (ledState != g_lastTopSoftKey[s]) {
+                g_lastTopSoftKey[s] = ledState;
+                sendLedFrames(uf8::buildTopSoftKeyLed(
+                    static_cast<uint8_t>(s), ledOn, uf8::ledColourWhite()));
+            }
             if (label != g_lastSlotLabel[s]) {
                 g_lastSlotLabel[s] = label;
                 g_dev->send(uf8::buildPluginSlotName(static_cast<uint8_t>(s), label));

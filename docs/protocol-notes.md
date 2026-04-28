@@ -188,6 +188,8 @@ page 153). Commands decoded 2026-04-20 from cap14a–cap18:
 | Fader motor | `FF 1E 03 <strip> <LSB> <MSB> CKSUM` | 7 B | Bidirectional (host→UF8 = set position, UF8→host = user touch) |
 | Motor limp | `FF 1D 02 <strip> <01\|00> CKSUM` | 6 B | 01 = motor active, 00 = user controls |
 
+**Per-strip top-soft-key LEDs — cells `0x18..0x1F`** (cap41, 2026-04-28). Reverse-mapped: `cell = 0x1F - strip` (strip 0 = 0x1F, strip 7 = 0x18). Same FF 38/39 04 pair-write family as SEL/CUT/SOLO. OFF/idle: FF38 == FF39 with the colour's dim bytes; ON/focused: FF38 = bright bytes, FF39 = `00 F0` (mirroring the SEL pattern). Palette additions from this capture: light-green dim = `21 F1`, light-blue dim = `11 F2` (bright TBD — capture didn't include user pressing a top-soft-key on the hardware).
+
 **Still undecoded:**
 - Top Zone soft-key labels (top row above each strip)
 - Plug-in Mixer Position ("No" slot number top-left)
