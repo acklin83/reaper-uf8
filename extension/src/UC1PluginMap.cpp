@@ -272,18 +272,16 @@ const PluginBindings* lookupBindingsByName(std::string_view fxName)
 
 ControlDomain classifyKnob(uint8_t knobId)
 {
-    // Top V-Pots live in 0x0C..0x16 and repurpose per plugin. The two
-    // we've confirmed driving CS params (0x0C Input Trim, 0x16 Fader
-    // Level) are only handled that way when no Bus Comp is on the
-    // track. When a Bus Comp IS present SSL 360° puts those V-Pots on
-    // Bus Comp params (Bus Comp 2 has no input-trim, so 0x0C might sit
-    // unused in that context — needs a confirming capture).
-    //
-    // Implementation: the surface checks whether Bus Comp bindings
-    // exist; if yes, route V-Pot IDs to Bus Comp. If no and CS
-    // bindings exist, fall back to Channel Strip. This classify()
-    // returns the *default* which is Bus Comp for the V-Pot range.
-    if (knobId >= 0x0C && knobId <= 0x16) return ControlDomain::BusComp;
+    // Top V-Pots live in 0x0C..0x16. By physical layout on the SSL UC1:
+    //   0x0C  Input Gain  → sits above the Input VU strip (CS-side)
+    //   0x0E..0x14  BC pots (Ratio/ScHpf/Atk/Rel/Thresh/Makeup/Mix)
+    //   0x16  Output Gain → sits above the Output VU strip (CS-side)
+    // The two end knobs (Input/Output Gain) are wired by default to
+    // Channel Strip Input Trim + Fader Level — even when a Bus Comp
+    // plug-in is on the track. BC2 has no equivalent params for them.
+    if (knobId == knob::kCSInputTrim || knobId == knob::kCSFaderLevel)
+        return ControlDomain::ChannelStrip;
+    if (knobId >= 0x0E && knobId <= 0x14) return ControlDomain::BusComp;
     return ControlDomain::ChannelStrip;
 }
 
