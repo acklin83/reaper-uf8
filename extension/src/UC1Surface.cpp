@@ -1997,6 +1997,20 @@ void UC1Surface::pushVu(uint8_t meter, uint8_t level)
 void UC1Surface::pushCsVu(float dbInput, float dbOutput)
 {
     if (!device_) return;
+    // DISABLED 2026-04-28: kInputCells / kOutputCells below were an
+    // unverified guess from `dual_36_cs_vu_ramp.pcapng` that maps to
+    // RING CELLS, not to the actual CS VU strip. With byte5=0x01
+    // (hardcoded in buildLedWrite), these writes hit:
+    //   cell 0x50 → Comp Release LED 0
+    //   cell 0x66 → Gate Range LED 0
+    //   cell 0x71 → just past Gate Range (Dyn In area)
+    //   cell 0x87 → Gate Hold LED 0
+    // As VU rises with audio level (which correlates with GR), more
+    // of those cells light → user sees "Range CCW1 / Release CCW1 /
+    // Dyn In / Hold CCW1 going off in sequence as GR rises".
+    // Disable until we capture the real CS VU cells. Better silent
+    // than corrupting the dynamics section's knob ring displays.
+    return;
 
     // BC-bypass cascade: when the focused track's BC plug-in is
     // bypassed, force both VU strips to silent so the meter goes
