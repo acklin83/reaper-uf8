@@ -66,6 +66,10 @@ add_library(reaper_uf8 MODULE
     src/ColorSync.cpp
     src/MidiBridge.cpp
     src/HidDevice.cpp
+    # Phase 2.6 — Plugin Mixer Window. Stubs only until ImGui is vendored.
+    src/MixerWindow.cpp
+    src/MixerLayout.cpp
+    src/ThemeBridge.cpp
 )
 
 target_link_libraries(reaper_uf8 PRIVATE PkgConfig::HIDAPI)
