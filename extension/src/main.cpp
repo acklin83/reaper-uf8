@@ -1423,9 +1423,19 @@ void onUf8Input(const uint8_t* data, size_t len)
                 // Per-strip top soft-key. In Plug-in Mixer Mode this picks
                 // the param under that strip from the active bank and
                 // assigns it to all 8 V-Pots (= setFocus across the bus).
-                // Slots not yet in our PluginMap (BYPASS, Ø, PRE, etc.)
-                // are kNoSlot — press is a silent no-op until the
-                // Settings UI lets the user wire them to actions.
+                //
+                // Three V-POT bank positions are non-LinkSlot actions UC1
+                // exposes via dedicated buttons — wire them here so the
+                // soft-keys aren't dead:
+                //   CS V-POT pos 0 (BYPASS)   → toggle CS plug-in enabled
+                //   CS V-POT pos 2 (Ø)        → toggle track B_PHASE
+                //   BC V-POT pos 7 (BUS COMP) → toggle BC plug-in enabled
+                // Track operated on = REAPER's currently selected track
+                // (matches SSL "selected channel" semantic in PM mode).
+                //
+                // Other kNoSlot positions (PRE, MIC/DRIVE, IMPEDANCE,
+                // WIDTH, A/B, HQ MODE, EXT S/C) stay silent — the
+                // Settings UI will wire them to user-defined actions.
                 if (pressed) {
                     const int strip = id - 0x18;
                     const auto fp = uf8::getFocusedParam();
@@ -1433,10 +1443,38 @@ void onUf8Input(const uint8_t* data, size_t len)
                         ? uf8::Domain::BusComp : uf8::Domain::ChannelStrip;
                     const int bank = std::clamp(g_softKeyBank.load(),
                         0, softkey::maxBankFor(domain));
-                    const auto v = softkey::viewFor(domain, bank);
-                    const int linkIdx = v.linkIdx[strip];
-                    if (linkIdx != softkey::kNoSlot) {
-                        uf8::setFocus({domain, linkIdx});
+
+                    auto togglePluginEnabled = [&](uf8::Domain d) {
+                        MediaTrack* tr = GetSelectedTrack(nullptr, 0);
+                        if (!tr) return;
+                        auto m = uf8::lookupPluginOnTrack(tr, d);
+                        if (!m.map) return;
+                        const bool en = TrackFX_GetEnabled(tr, m.fxIndex);
+                        TrackFX_SetEnabled(tr, m.fxIndex, !en);
+                    };
+                    auto toggleTrackPhase = [&]() {
+                        MediaTrack* tr = GetSelectedTrack(nullptr, 0);
+                        if (!tr) return;
+                        const double cur = GetMediaTrackInfo_Value(tr, "B_PHASE");
+                        SetMediaTrackInfo_Value(tr, "B_PHASE",
+                            cur > 0.5 ? 0.0 : 1.0);
+                    };
+
+                    bool dispatched = false;
+                    if (bank == 0) {
+                        if (domain == uf8::Domain::ChannelStrip) {
+                            if (strip == 0) { togglePluginEnabled(domain); dispatched = true; }
+                            else if (strip == 2) { toggleTrackPhase(); dispatched = true; }
+                        } else if (domain == uf8::Domain::BusComp && strip == 7) {
+                            togglePluginEnabled(domain); dispatched = true;
+                        }
+                    }
+                    if (!dispatched) {
+                        const auto v = softkey::viewFor(domain, bank);
+                        const int linkIdx = v.linkIdx[strip];
+                        if (linkIdx != softkey::kNoSlot) {
+                            uf8::setFocus({domain, linkIdx});
+                        }
                     }
                 }
                 handledNatively = true;
