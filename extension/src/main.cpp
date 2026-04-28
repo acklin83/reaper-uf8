@@ -332,6 +332,12 @@ struct PendingInput {
         MainAction,      // value = REAPER action ID (Main_OnCommand)
         AutomationMode,  // value = REAPER automation mode (0..4) on selected track
         FocusSelected,   // re-scroll REAPER MCP + UF8 bank to currently selected track
+        PluginBypass,    // value = 1.0 (ChannelStrip) or 2.0 (BusComp). Toggles the
+                         // matching plug-in's TrackFX_Enabled on the selected track.
+                         // MUST be queued (not called inline from libusb thread):
+                         // TrackFX_SetEnabled triggers REAPER UI updates that end
+                         // in NSWindow setTitle — main-thread-only on macOS.
+        TrackPhase,      // toggle B_PHASE on the selected track. Same thread reason.
     };
     Kind    kind;
     uint8_t strip;
@@ -470,6 +476,27 @@ void drainInputQueue()
         if (e.kind == PendingInput::FocusSelected) {
             if (MediaTrack* tr = GetSelectedTrack(nullptr, 0)) {
                 followSelectedInMixer(tr);
+            }
+            continue;
+        }
+        if (e.kind == PendingInput::PluginBypass) {
+            if (MediaTrack* tr = GetSelectedTrack(nullptr, 0)) {
+                const auto domain = (e.value > 1.5)
+                    ? uf8::Domain::BusComp
+                    : uf8::Domain::ChannelStrip;
+                auto m = uf8::lookupPluginOnTrack(tr, domain);
+                if (m.map) {
+                    const bool en = TrackFX_GetEnabled(tr, m.fxIndex);
+                    TrackFX_SetEnabled(tr, m.fxIndex, !en);
+                }
+            }
+            continue;
+        }
+        if (e.kind == PendingInput::TrackPhase) {
+            if (MediaTrack* tr = GetSelectedTrack(nullptr, 0)) {
+                const double cur = GetMediaTrackInfo_Value(tr, "B_PHASE");
+                SetMediaTrackInfo_Value(tr, "B_PHASE",
+                    cur > 0.5 ? 0.0 : 1.0);
             }
             continue;
         }
@@ -1444,29 +1471,19 @@ void onUf8Input(const uint8_t* data, size_t len)
                     const int bank = std::clamp(g_softKeyBank.load(),
                         0, softkey::maxBankFor(domain));
 
-                    auto togglePluginEnabled = [&](uf8::Domain d) {
-                        MediaTrack* tr = GetSelectedTrack(nullptr, 0);
-                        if (!tr) return;
-                        auto m = uf8::lookupPluginOnTrack(tr, d);
-                        if (!m.map) return;
-                        const bool en = TrackFX_GetEnabled(tr, m.fxIndex);
-                        TrackFX_SetEnabled(tr, m.fxIndex, !en);
-                    };
-                    auto toggleTrackPhase = [&]() {
-                        MediaTrack* tr = GetSelectedTrack(nullptr, 0);
-                        if (!tr) return;
-                        const double cur = GetMediaTrackInfo_Value(tr, "B_PHASE");
-                        SetMediaTrackInfo_Value(tr, "B_PHASE",
-                            cur > 0.5 ? 0.0 : 1.0);
-                    };
-
                     bool dispatched = false;
                     if (bank == 0) {
                         if (domain == uf8::Domain::ChannelStrip) {
-                            if (strip == 0) { togglePluginEnabled(domain); dispatched = true; }
-                            else if (strip == 2) { toggleTrackPhase(); dispatched = true; }
+                            if (strip == 0) {
+                                queueInput({PendingInput::PluginBypass, 0, 1.0});
+                                dispatched = true;
+                            } else if (strip == 2) {
+                                queueInput({PendingInput::TrackPhase, 0, 0.0});
+                                dispatched = true;
+                            }
                         } else if (domain == uf8::Domain::BusComp && strip == 7) {
-                            togglePluginEnabled(domain); dispatched = true;
+                            queueInput({PendingInput::PluginBypass, 0, 2.0});
+                            dispatched = true;
                         }
                     }
                     if (!dispatched) {
@@ -2124,8 +2141,16 @@ void pushZonesForVisibleSlots()
             const int8_t ledState = ledOn ? 1 : 0;
             if (ledState != g_lastTopSoftKey[s]) {
                 g_lastTopSoftKey[s] = ledState;
+                // LED colour follows the strip's REAPER track colour —
+                // matches SEL LED philosophy. Settings UI later will let
+                // users override per-strip / per-bank.
+                const uint32_t rgb = static_cast<uint32_t>(GetTrackColor(tr))
+                    & 0x00FFFFFFu;
+                const uf8::LedColour col = (rgb == 0)
+                    ? uf8::ledColourWhite()
+                    : uf8::ledColourForTrackRgb(rgb);
                 sendLedFrames(uf8::buildTopSoftKeyLed(
-                    static_cast<uint8_t>(s), ledOn, uf8::ledColourWhite()));
+                    static_cast<uint8_t>(s), ledOn, col));
             }
             if (label != g_lastSlotLabel[s]) {
                 g_lastSlotLabel[s] = label;
