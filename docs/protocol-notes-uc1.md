@@ -271,6 +271,113 @@ The SSL plugins ship GR to 360° over encrypted Thrift IPC (see `plugin-ipc-note
 - [ ] Attack knob ID confirmation (probably 0x10 by analogy)
 - [ ] UF8 vs UC1 GR routing re-verification — needs a both-connected capture
 
+## Central-panel buttons + Extended Functions menu (open)
+
+Source: `docs/SSL UC1 User Guide.pdf` p. 17–19. Our prior decode passes
+(`uc1_19/20/21`) only covered the 16 channel-strip-area buttons + Bus Comp
+IN — the central control panel was not yet captured. This panel hosts the
+gateway to all "hidden" CS2 parameters not on dedicated knobs.
+
+Central-panel inventory (per Guide):
+
+| # | Element | Function |
+|---|---------|----------|
+| 1 | 7-Segment display     | CS-plugin position in the Plug-in Mixer |
+| 2 | CHANNEL Encoder       | Selects which CS plugin UC1 controls |
+| 3 | CS-Model display      | "CS 2" / "4K B" / "4K E" / "4K G" |
+| 4 | CS-Name display       | DAW track name (CS) |
+| 5 | BC-Name display       | DAW track name (BC) |
+| 6 | Secondary Encoder     | BC select / ROUTING / PRESETS / TRANSPORT modes |
+| 7 | BACK button           | MAIN → **EXTENDED FUNCTIONS** menu |
+| 8 | CONFIRM button        | Selects param in Extended Functions |
+| 9 | ROUTING button        | Process-Order Routing mode (Secondary Encoder) |
+| 10 | PRESETS button       | Preset-load mode (Secondary Encoder) |
+| 11 | 360° button          | Open/minimise SSL 360° |
+| 12 | Zoom button          | Toggle BC sidebar in Plug-in Mixer |
+
+### Extended Functions menu (Guide p. 18, verbatim)
+
+> "From the MAIN screen, pushing the BACK button will take you to the
+> EXTENDED FUNCTIONS menu for channel strips. This menu hosts any
+> additional parameters of the selected channel strip plug-in such as
+> Compressor Mix, Pre In/Out, Mic Gain, Pan, Width, Output Trim and Solo
+> Safe (exact list depends on the parameters of that particular
+> 360°-enabled channel strip plug-in)."
+
+UX: BACK enters → Secondary Encoder navigates list → CONFIRM selects →
+Secondary Encoder edits value → BACK exits. FINE button = high-resolution.
+
+Maps to these previously-"missing" CS2 vst3 params (see
+`docs/ssl-native-params/VST3__SSL_Native_Channel_Strip_2_(SSL).md`):
+
+| vst3 | param                          | Where on UC1               |
+|-----:|--------------------------------|----------------------------|
+| 1    | External S/C                   | ROUTING ('b'-variants)     |
+| 33   | Filters to Input               | implicit via Process Order |
+| 34   | Dynamics Pre-EQ                | implicit via Process Order |
+| 35   | Filters to S/C                 | implicit via Process Order |
+| 36   | EQ to S/C                      | implicit via Process Order |
+| 40   | Width                          | Extended Functions         |
+| 41   | Pan                            | Extended Functions         |
+| 44   | Legacy Solo Safe               | Extended Functions         |
+| 46   | Filters In                     | Extended Functions         |
+| 47   | Width Mode                     | Extended Functions         |
+| 48   | Width Frequency                | Extended Functions         |
+| 49   | Compressor Auto Make-up        | Extended Functions         |
+| 50   | Compressor Auto Make-up Offset | Extended Functions         |
+
+### Process Order Routing — 10 + 'b'-variants (Guide p. 19)
+
+ROUTING button + Secondary Encoder steps through these orderings; each
+has a 'b' equivalent that sources the Dynamics sidechain externally
+(External S/C In = vst3=1). Effectively 20 routing modes, each setting
+some combination of vst3 1 / 33 / 34 / 35 / 36.
+
+```
+1. Filters > EQ > Dynamics (default)
+2. EQ > Filters > Dynamics
+3. Dynamics > EQ > Filters
+4. Filters > Dynamics > EQ
+5. Filters > Dynamics > EQ (with Filters to DYN S/C)
+6. Filters > EQ > Dynamics (with EQ to DYN S/C)
+7. Filters > EQ > Dynamics (with Filters to DYN S/C)
+8. EQ > Filters > Dynamics (with EQ and Filters to DYN S/C)
+9. EQ > Filters > Dynamics (with EQ to DYN S/C)
+10. EQ > Dynamics > Filters (with DYN and Filters to DYN S/C)
+```
+
+### Open items — central panel
+
+- [ ] Button IDs for BACK, CONFIRM, ROUTING, PRESETS, 360°, Zoom
+      (`FF 22 03 <id> 00 <state>` family expected)
+- [ ] CHANNEL Encoder event-frame ID + tick encoding
+- [ ] Secondary Encoder event-frame ID + tick encoding (does push fire a
+      separate ID? UX says push = enter TRANSPORT from BC mode)
+- [ ] Extended Functions display rendering — does BACK retarget zone
+      0x02/0x04/etc. or use a new zone?
+- [ ] How param-edit mode is indicated to the host (does Secondary
+      Encoder send a different ID once a param is selected, or is it the
+      same encoder ID with the host inferring context?)
+- [ ] Process-Order display string (which zone, which encoding)
+- [ ] PRESETS list rendering (folder navigation, scrollable list)
+- [ ] 7-segment digit segment map (cf. existing TBD section below)
+
+### Suggested capture plan
+
+1. `uc1_50_central_buttons.pcapng` — all 6 central buttons × 5 presses
+2. `uc1_51_channel_encoder.pcapng` — CHANNEL Encoder ±10 ticks + observe
+   7-seg updates
+3. `uc1_52_secondary_encoder.pcapng` — Secondary Encoder default → ROUTING
+   → PRESETS, ±5 ticks each
+4. `uc1_53_extfunc_menu.pcapng` — BACK → navigate Pan / Width / Solo
+   Safe → CONFIRM → edit → BACK
+5. `uc1_54_routing_orders.pcapng` — step through all 10 process orders
+   plus 'b'-variants
+
+Once these land, Rea-Sixty can either (a) mirror the Extended Functions
+menu in REAPER's settings UI, or (b) host its own equivalent on UF8 via
+the Plugin Mixer Window plan (`docs/plan-settings-ui.md`).
+
 ## Capture index
 
 | Date | File | Summary |
