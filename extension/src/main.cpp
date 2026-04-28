@@ -139,7 +139,10 @@ namespace softkey {
     // WIDTH, A/B, HQ MODE — TBD via Settings UI later).
     constexpr int kCsBanks[6][kStrips] = {
         // V-POT: BYPASS, IN TRIM, Ø, PRE, MIC/DRIVE, _, IMPEDANCE IN, IMPEDANCE
-        { kNoSlot,  4, kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot },
+        // BYPASS uses linkIdx 0 — the plug-in's own Bypass param (NOT
+        // REAPER's TrackFX_Enabled). Ø stays kNoSlot, handled as a
+        // track-meta TrackPhase action.
+        { 0,  4, kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot },
         // Bank 1: WIDTH, _, _, A/B, HIGH PASS, LOW PASS, EQ, EQ TYPE
         { kNoSlot, kNoSlot, kNoSlot, kNoSlot,  7,  6, 15, 14 },
         // Bank 2: LF FREQ, LF GAIN, LF TYPE, LMF FREQ, LMF GAIN, LMF Q, _, _
@@ -163,7 +166,9 @@ namespace softkey {
     // BC-mode banks (2 × 8).
     constexpr int kBcBanks[2][kStrips] = {
         // V-POT: THRESHOLD, ATTACK, RELEASE, RATIO, S/C HPF, MIX, EXTERNAL S/C, BUS COMP
-        { 1, 3, 4, 5, 6, 7, kNoSlot, kNoSlot },
+        // BUS COMP at pos 7 = the BC plug-in's own CompBypass param
+        // (linkIdx 0 in the BC 360 Link layout).
+        { 1, 3, 4, 5, 6, 7, kNoSlot, 0 },
         // Bank 1: OUTPUT GAIN (= MakeupGain in BC2 map), rest empty
         { 2, kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot },
     };
@@ -332,12 +337,10 @@ struct PendingInput {
         MainAction,      // value = REAPER action ID (Main_OnCommand)
         AutomationMode,  // value = REAPER automation mode (0..4) on selected track
         FocusSelected,   // re-scroll REAPER MCP + UF8 bank to currently selected track
-        PluginBypass,    // value = 1.0 (ChannelStrip) or 2.0 (BusComp). Toggles the
-                         // matching plug-in's TrackFX_Enabled on the selected track.
-                         // MUST be queued (not called inline from libusb thread):
-                         // TrackFX_SetEnabled triggers REAPER UI updates that end
-                         // in NSWindow setTitle — main-thread-only on macOS.
-        TrackPhase,      // toggle B_PHASE on the selected track. Same thread reason.
+        TrackPhase,      // toggle B_PHASE on the selected track. MUST be queued
+                         // (not called inline from libusb thread):
+                         // SetMediaTrackInfo_Value triggers REAPER UI updates
+                         // that end in NSWindow setTitle — main-thread-only.
     };
     Kind    kind;
     uint8_t strip;
@@ -476,19 +479,6 @@ void drainInputQueue()
         if (e.kind == PendingInput::FocusSelected) {
             if (MediaTrack* tr = GetSelectedTrack(nullptr, 0)) {
                 followSelectedInMixer(tr);
-            }
-            continue;
-        }
-        if (e.kind == PendingInput::PluginBypass) {
-            if (MediaTrack* tr = GetSelectedTrack(nullptr, 0)) {
-                const auto domain = (e.value > 1.5)
-                    ? uf8::Domain::BusComp
-                    : uf8::Domain::ChannelStrip;
-                auto m = uf8::lookupPluginOnTrack(tr, domain);
-                if (m.map) {
-                    const bool en = TrackFX_GetEnabled(tr, m.fxIndex);
-                    TrackFX_SetEnabled(tr, m.fxIndex, !en);
-                }
             }
             continue;
         }
@@ -1451,18 +1441,15 @@ void onUf8Input(const uint8_t* data, size_t len)
                 // the param under that strip from the active bank and
                 // assigns it to all 8 V-Pots (= setFocus across the bus).
                 //
-                // Three V-POT bank positions are non-LinkSlot actions UC1
-                // exposes via dedicated buttons — wire them here so the
-                // soft-keys aren't dead:
-                //   CS V-POT pos 0 (BYPASS)   → toggle CS plug-in enabled
-                //   CS V-POT pos 2 (Ø)        → toggle track B_PHASE
-                //   BC V-POT pos 7 (BUS COMP) → toggle BC plug-in enabled
-                // Track operated on = REAPER's currently selected track
-                // (matches SSL "selected channel" semantic in PM mode).
+                // BYPASS / BUS COMP are normal LinkSlots now (plug-in's
+                // own Bypass param at linkIdx 0). Pressing them sets
+                // focus across the bus; V-Pot push toggles per-strip.
                 //
+                // Ø Phase has no plug-in param — operates on REAPER
+                // track meta (B_PHASE), so it's queued as TrackPhase.
                 // Other kNoSlot positions (PRE, MIC/DRIVE, IMPEDANCE,
-                // WIDTH, A/B, HQ MODE, EXT S/C) stay silent — the
-                // Settings UI will wire them to user-defined actions.
+                // WIDTH, A/B, HQ MODE, EXT S/C) stay silent — Settings
+                // UI will wire them to user-defined actions.
                 if (pressed) {
                     const int strip = id - 0x18;
                     const auto fp = uf8::getFocusedParam();
@@ -1471,22 +1458,11 @@ void onUf8Input(const uint8_t* data, size_t len)
                     const int bank = std::clamp(g_softKeyBank.load(),
                         0, softkey::maxBankFor(domain));
 
-                    bool dispatched = false;
-                    if (bank == 0) {
-                        if (domain == uf8::Domain::ChannelStrip) {
-                            if (strip == 0) {
-                                queueInput({PendingInput::PluginBypass, 0, 1.0});
-                                dispatched = true;
-                            } else if (strip == 2) {
-                                queueInput({PendingInput::TrackPhase, 0, 0.0});
-                                dispatched = true;
-                            }
-                        } else if (domain == uf8::Domain::BusComp && strip == 7) {
-                            queueInput({PendingInput::PluginBypass, 0, 2.0});
-                            dispatched = true;
-                        }
-                    }
-                    if (!dispatched) {
+                    if (bank == 0
+                        && domain == uf8::Domain::ChannelStrip
+                        && strip == 2) {
+                        queueInput({PendingInput::TrackPhase, 0, 0.0});
+                    } else {
                         const auto v = softkey::viewFor(domain, bank);
                         const int linkIdx = v.linkIdx[strip];
                         if (linkIdx != softkey::kNoSlot) {
@@ -1803,7 +1779,8 @@ bool isBinarySlot(const uf8::LinkSlot& s)
 {
     if (!s.id) return false;
     std::string_view id{s.id};
-    return id == "EqIn"            || id == "DynamicsIn"
+    return id == "Bypass"          || id == "CompBypass"
+        || id == "EqIn"            || id == "DynamicsIn"
         || id == "Listen"          || id == "HighEqBell"
         || id == "LowEqBell"       || id == "CompFastAttack"
         || id == "CompPeak"        || id == "GateExpander"

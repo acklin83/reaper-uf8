@@ -27,6 +27,7 @@ namespace {
 
 // Native SSL Channel Strip 2 (VST3: "SSL Native Channel Strip 2 (SSL)")
 constexpr LinkSlot kCs2Slots[] = {
+    {  0, "Bypass",             "Bypass",           "BYP",    0,  false },
     { 35, "LinkableFaderLevel", "Fader",            "FADER", 38,  false },
     {  4, "InputTrim",          "Input Trim",       "IN",     2,  false },
     {  7, "HighPassFreq",       "High Pass Filter", "HPF",    5,  false },
@@ -72,6 +73,7 @@ constexpr LinkSlot kCs2Slots[] = {
 // 4K E — shares all CS-family slots except CompPeak; adds EQ Colour in
 // place of EQ Type. VST3 param indices from docs/ssl-native-params.
 constexpr LinkSlot k4kESlots[] = {
+    {  0, "Bypass",             "Bypass",           "BYP",    0,  false },
     { 35, "LinkableFaderLevel", "Fader",            "FADER",  6,  false },
     {  4, "InputTrim",          "Input Trim",       "IN",     2,  false },
     {  7, "HighPassFreq",       "High Pass Filter", "HPF",   14,  false },
@@ -108,6 +110,7 @@ constexpr LinkSlot k4kESlots[] = {
 // 4K B — no EQ Type toggle, no Fast-Attack / Gate-Hold / Gate-Attack /
 // Comp-Peak (simpler 4000-series B-feature set).
 constexpr LinkSlot k4kBSlots[] = {
+    {  0, "Bypass",             "Bypass",           "BYP",    0,  false },
     { 35, "LinkableFaderLevel", "Fader",            "FADER",  6,  false },
     {  4, "InputTrim",          "Input Trim",       "IN",     2,  false },
     {  7, "HighPassFreq",       "High Pass Filter", "HPF",   10,  false },
@@ -140,6 +143,7 @@ constexpr LinkSlot k4kBSlots[] = {
 
 // 4K G — full-featured G-series strip.
 constexpr LinkSlot k4kGSlots[] = {
+    {  0, "Bypass",             "Bypass",           "BYP",    0,  false },
     { 35, "LinkableFaderLevel", "Fader",            "FADER", 12,  false },
     {  4, "InputTrim",          "Input Trim",       "IN",     6,  false },
     {  7, "HighPassFreq",       "High Pass Filter", "HPF",   20,  false },
@@ -173,8 +177,13 @@ constexpr LinkSlot k4kGSlots[] = {
     { 33, "GateExpander",       "Gate/Exp",    "G/E",   50,  false },
 };
 
-// Bus Compressor 2 — virtual strip has 7 slots (idx 1..7).
+// Bus Compressor 2 — virtual strip has 7 slots (idx 1..7) plus a Bypass
+// at linkIdx 0 (the BC 360 Link wrapper exposes "CompBypass" at vst3
+// idx 0; on the standalone Native Bus Compressor 2 plug-in, the same
+// param lives at vst3 idx 10 — REAPER's auto-injected wrap "Bypass"
+// at idx 12 is NOT what we want).
 constexpr LinkSlot kBusComp2Slots[] = {
+    { 0, "CompBypass",   "Bypass",    "BYP",  10, false },
     { 1, "Threshold",    "Threshold", "THR",   2, false },
     { 2, "MakeupGain",   "Makeup",    "MAKE",  3, false },
     { 5, "Ratio",        "Ratio",     "RATIO", 6, false },

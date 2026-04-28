@@ -42,8 +42,10 @@ PluginBindings makeBusComp2Bindings()
     b.knobParam[knob::kBCRatio]     = 6;
     b.knobParam[knob::kBCScHpf]     = 7;
     b.knobParam[knob::kBCMix]       = 8;
-    // The Bus Comp IN button toggles the plugin's own Bypass, not a
-    // dedicated param — surface handles that via TrackFX_SetEnabled.
+    // BC IN button = the plug-in's own "Comp Bypass" param at vst3 idx 10
+    // (not REAPER's TrackFX_Enabled). Inverted semantic: param=1 means
+    // bypassed → IN is OFF, so the LED state is the inverse of the read.
+    b.bypassParam = 10;
     return b;
 }
 
@@ -111,6 +113,10 @@ PluginBindings makeChannelStrip2Bindings()
     b.buttonParam[button::kFastAttGate] = 28;  // GateAttack (Gate F.Attack)
     b.buttonParam[button::kScListen]    = 37;  // Listen
 
+    // CS IN button (UC1 ChannelIn) → plug-in's own "Bypass" param at
+    // vst3 idx 0 (NOT REAPER's TrackFX_Enabled). Inverted semantic.
+    b.bypassParam = 0;
+
     applyCsInversions(b);
     return b;
 }
@@ -153,6 +159,8 @@ PluginBindings make4kEBindings()
     b.buttonParam[button::kExpand]      = 46;
     b.buttonParam[button::kFastAttGate] = 45;
     b.buttonParam[button::kScListen]    = 47;
+    // CS IN → plug-in Bypass at vst3 idx 0 (same across CS variants).
+    b.bypassParam = 0;
     // 4K E has opposite VST3-value semantic from CS 2 for several knobs
     // (LP, HMF/LMF Q, Comp/Gate Threshold). User confirmed 2026-04-24:
     // applying the CS-2 inversions here makes the pot motion flip.
@@ -193,6 +201,7 @@ PluginBindings make4kGBindings()
     b.buttonParam[button::kExpand]      = 50;
     b.buttonParam[button::kFastAttGate] = 49;
     b.buttonParam[button::kScListen]    = 51;
+    b.bypassParam = 0;  // CS IN → plug-in Bypass at vst3 idx 0
     // 4K G skips CS-2 inversions (same VST3 semantic as 4K E — see above).
     return b;
 }
@@ -230,6 +239,7 @@ PluginBindings make4kBBindings()
     b.buttonParam[button::kDynIn]       = 28;
     b.buttonParam[button::kExpand]      = 37;
     b.buttonParam[button::kScListen]    = 41;
+    b.bypassParam = 0;  // CS IN → plug-in Bypass at vst3 idx 0
     // 4K B skips CS-2 inversions (same VST3 semantic as 4K E — see above).
     return b;
 }

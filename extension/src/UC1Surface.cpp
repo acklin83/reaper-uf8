@@ -615,55 +615,44 @@ void UC1Surface::handleButton_(const ButtonEvent& ev)
     //     "Channel In" switch (found by VST3 param name). This mirrors
     //     the plugin's own IN button, not the global bypass.
     //   * No SSL plugin: fall back to bypassing the first track FX.
+    // CS / BC IN buttons toggle the plug-in's own Bypass param (NOT
+    // REAPER's TrackFX_Enabled). Inverted semantic: param=1 means
+    // bypassed → IN is OFF, so LED brightness is the inverse of the
+    // value we just wrote.
+    auto toggleBypassParam = [&](const PluginBindings* m, int fxIdx,
+                                 const char* labelLong, int readoutZone) {
+        if (!m || m->bypassParam == kParamNone) return false;
+        const double cur = TrackFX_GetParamNormalized(tr, fxIdx, m->bypassParam);
+        const double next = (cur > 0.5) ? 0.0 : 1.0;
+        TrackFX_SetParamNormalized(tr, fxIdx, m->bypassParam, next);
+        const bool inActive = next < 0.5;
+        pushButtonLed_(ev.id, inActive);
+        pushButtonReadout_(ev.id, labelLong,
+                           inActive ? "In" : "Out", readoutZone);
+        return true;
+    };
+
     if (ev.id == button::kChannelIn) {
-        bool newOn = false;
-        bool acted = false;
-        if (bindings.channelMap) {
-            const int p = channelInParam_(tr, bindings.channelFxIdx);
-            if (p >= 0) {
-                const double cur = TrackFX_GetParamNormalized(
-                    tr, bindings.channelFxIdx, p);
-                const double next = (cur > 0.5) ? 0.0 : 1.0;
-                TrackFX_SetParamNormalized(
-                    tr, bindings.channelFxIdx, p, next);
-                newOn = next > 0.5;
-                acted = true;
-            } else {
-                // Param-by-name lookup failed — degrade gracefully to
-                // plugin-bypass so the button still does *something*.
-                const bool wasEnabled = TrackFX_GetEnabled(
-                    tr, bindings.channelFxIdx);
-                TrackFX_SetEnabled(tr, bindings.channelFxIdx, !wasEnabled);
-                newOn = !wasEnabled;
-                acted = true;
-            }
-        } else {
-            // No SSL plugin — bypass the first track FX if any.
+        if (!toggleBypassParam(bindings.channelMap, bindings.channelFxIdx,
+                               "Channel Strip", zone::kChannelStripReadout)) {
+            // No SSL CS plug-in on the focused track — fall back to
+            // bypassing the first track FX (legacy behaviour). Edge
+            // case; LED still tracks the new state.
             if (TrackFX_GetCount(tr) > 0) {
                 const bool wasEnabled = TrackFX_GetEnabled(tr, 0);
                 TrackFX_SetEnabled(tr, 0, !wasEnabled);
-                newOn = !wasEnabled;
-                acted = true;
+                pushButtonLed_(ev.id, !wasEnabled);
+                pushButtonReadout_(ev.id, "Channel Strip",
+                                   !wasEnabled ? "In" : "Out",
+                                   zone::kChannelStripReadout);
             }
-        }
-        if (acted) {
-            pushButtonLed_(ev.id, newOn);
-            pushButtonReadout_(ev.id, "Channel Strip",
-                               newOn ? "In" : "Out",
-                               zone::kChannelStripReadout);
         }
         ++stats_.buttonEventsHandled;
         return;
     }
-    // Bus Comp IN still toggles the Bus Comp plugin's bypass — no
-    // separate internal IN param on BC 2 that we need to route to.
-    if (ev.id == button::kBusCompIn && bindings.busCompMap) {
-        const bool wasEnabled = TrackFX_GetEnabled(tr, bindings.busCompFxIdx);
-        TrackFX_SetEnabled(tr, bindings.busCompFxIdx, !wasEnabled);
-        pushButtonLed_(ev.id, !wasEnabled);
-        pushButtonReadout_(ev.id, "Bus Comp",
-                           !wasEnabled ? "In" : "Out",
-                           zone::kBusCompReadout);
+    if (ev.id == button::kBusCompIn) {
+        toggleBypassParam(bindings.busCompMap, bindings.busCompFxIdx,
+                          "Bus Comp", zone::kBusCompReadout);
         ++stats_.buttonEventsHandled;
         return;
     }
@@ -932,54 +921,6 @@ void UC1Surface::pushKnobReadout_(uint8_t knobId, void* trackRaw, int fxIdx,
     // UC1 accepts either; what matters is that value digits land at
     // position 16 onwards.
     device_->send(buildDisplayText(zone, readout, readout.size()));
-}
-
-int UC1Surface::channelInParam_(void* trackRaw, int fxIdx)
-{
-    MediaTrack* tr = static_cast<MediaTrack*>(trackRaw);
-    if (!tr || fxIdx < 0) return -1;
-
-    // Cache by (track, fxIdx) so we only scan the param list once per
-    // focus change. Simple 1-entry cache — each focus change blows it
-    // away. Good enough for the single-focused-track model.
-    static void* cachedTr = nullptr;
-    static int   cachedFx = -1;
-    static int   cachedP  = -1;
-    if (tr == cachedTr && fxIdx == cachedFx) return cachedP;
-    cachedTr = tr; cachedFx = fxIdx; cachedP = -1;
-
-    const int n = TrackFX_GetNumParams(tr, fxIdx);
-    char buf[256];
-    // Known spellings across SSL plugin variants. Strict exact match.
-    // Do NOT add "Bypass" here — its semantics are inverted from IN
-    // (Bypass=1 means IN=off) and would make the LED mirror the wrong
-    // state. Generic names like "In"/"On"/"Channel" are kept but
-    // placed last so more specific hits win first.
-    static const char* const kCandidates[] = {
-        "CsIn", "ChannelIn", "Channel In", "CHANNELIN", "CHANNEL IN",
-        "ChIn", "Ch In", "CS In", "CS_IN", "Cs In",
-        "In", "On"
-    };
-    // One-shot diag dump of every param name on first access. Helps
-    // identify the correct name when our candidate list misses.
-    static bool kDumpedParams = false;
-    if (!kDumpedParams) {
-        kDumpedParams = true;
-        ShowConsoleMsg("UC1 CS param names:\n");
-        for (int i = 0; i < n; ++i) {
-            if (!TrackFX_GetParamName(tr, fxIdx, i, buf, sizeof(buf))) continue;
-            char line[320];
-            std::snprintf(line, sizeof(line), "  [%d] '%s'\n", i, buf);
-            ShowConsoleMsg(line);
-        }
-    }
-    for (int i = 0; i < n; ++i) {
-        if (!TrackFX_GetParamName(tr, fxIdx, i, buf, sizeof(buf))) continue;
-        for (auto c : kCandidates) {
-            if (std::strcmp(buf, c) == 0) { cachedP = i; return i; }
-        }
-    }
-    return -1;
 }
 
 namespace {
@@ -1343,9 +1284,19 @@ void UC1Surface::pollButtonLeds_()
         bool on = false;
         switch (classifyButton(btn)) {
             case ControlDomain::BusComp: {
+                // BC IN LED reflects the plug-in's Bypass param: lit when
+                // bypass < 0.5 (plug-in active / IN). Falls back to
+                // TrackFX_Enabled if a track has BC2 but no bypassParam
+                // is registered (shouldn't happen — kept defensively).
                 bool bcOn = false;
                 if (bindings.busCompMap && tr) {
-                    bcOn = TrackFX_GetEnabled(tr, bindings.busCompFxIdx);
+                    if (bindings.busCompMap->bypassParam != kParamNone) {
+                        bcOn = TrackFX_GetParamNormalized(
+                            tr, bindings.busCompFxIdx,
+                            bindings.busCompMap->bypassParam) < 0.5;
+                    } else {
+                        bcOn = TrackFX_GetEnabled(tr, bindings.busCompFxIdx);
+                    }
                 }
                 pushButtonLed_(btn, bcOn);
                 continue;
@@ -1354,10 +1305,10 @@ void UC1Surface::pollButtonLeds_()
                 if (btn == button::kChannelIn) {
                     bool cin = false;
                     if (bindings.channelMap && tr) {
-                        const int p = channelInParam_(tr, bindings.channelFxIdx);
-                        if (p >= 0) {
+                        if (bindings.channelMap->bypassParam != kParamNone) {
                             cin = TrackFX_GetParamNormalized(
-                                tr, bindings.channelFxIdx, p) > 0.5;
+                                tr, bindings.channelFxIdx,
+                                bindings.channelMap->bypassParam) < 0.5;
                         } else {
                             cin = TrackFX_GetEnabled(tr, bindings.channelFxIdx);
                         }
@@ -1605,29 +1556,30 @@ void UC1Surface::refresh()
         bool on = false;
         switch (classifyButton(btn)) {
             case ControlDomain::BusComp: {
-                // Bus Comp IN (the only button in this domain) uses the
-                // bank=0x01/state=0x01 override just like the other
-                // central-section track buttons. LED reflects plugin
-                // enabled state; defaults to on when BC is present.
+                // BC IN LED — see comment in pollButtonLeds_; reads
+                // the plug-in's Bypass param (linkIdx 0, vst3 idx 10).
                 bool bcOn = false;
                 if (bindings.busCompMap && tr) {
-                    bcOn = TrackFX_GetEnabled(tr, bindings.busCompFxIdx);
+                    if (bindings.busCompMap->bypassParam != kParamNone) {
+                        bcOn = TrackFX_GetParamNormalized(
+                            tr, bindings.busCompFxIdx,
+                            bindings.busCompMap->bypassParam) < 0.5;
+                    } else {
+                        bcOn = TrackFX_GetEnabled(tr, bindings.busCompFxIdx);
+                    }
                 }
                 pushButtonLed_(btn, bcOn);
                 continue;
             }
             case ControlDomain::ChannelStrip:
                 if (btn == button::kChannelIn) {
-                    // ChannelIn uses the bank=0x01/state=0x01 LED
-                    // encoding override — route through pushButtonLed_
-                    // (same path as Solo/Cut/Polarity) rather than the
-                    // direct buildLedWrite fall-through below.
+                    // ChannelIn LED — same logic, reads plug-in Bypass.
                     bool cin = false;
                     if (bindings.channelMap && tr) {
-                        const int p = channelInParam_(tr, bindings.channelFxIdx);
-                        if (p >= 0) {
+                        if (bindings.channelMap->bypassParam != kParamNone) {
                             cin = TrackFX_GetParamNormalized(
-                                tr, bindings.channelFxIdx, p) > 0.5;
+                                tr, bindings.channelFxIdx,
+                                bindings.channelMap->bypassParam) < 0.5;
                         } else {
                             cin = TrackFX_GetEnabled(tr, bindings.channelFxIdx);
                         }

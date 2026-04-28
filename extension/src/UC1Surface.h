@@ -145,13 +145,6 @@ private:
     // or the focused track lacks a plug-in of the focused domain.
     void pushFocusedParamReadout_();
 
-    // Find the VST3 param index of the SSL Channel Strip's internal
-    // "Channel In" switch on the given track+fx slot. Scans param
-    // names for common spellings ("CsIn", "ChannelIn", "Channel In"…)
-    // and caches the hit. Returns -1 if no match; caller falls back to
-    // TrackFX_SetEnabled.
-    int channelInParam_(void* track /*MediaTrack**/, int fxIdx);
-
     // --- state ---
     UC1Device* device_ = nullptr;
     void*      focusedTrack_ = nullptr;  // MediaTrack*
