@@ -66,9 +66,10 @@ add_library(reaper_uf8 MODULE
     src/ColorSync.cpp
     src/MidiBridge.cpp
     src/HidDevice.cpp
-    # Phase 2.6 — Plugin Mixer Window. Stubs only until ImGui is vendored.
+    # Phase 2.6 — Plugin Mixer Window + Phase 2.7 — Settings Screen
     src/MixerWindow.cpp
     src/MixerLayout.cpp
+    src/SettingsScreen.cpp
     src/ThemeBridge.cpp
 )
 

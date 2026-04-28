@@ -1,9 +1,13 @@
 #include "MixerLayout.h"
 
+#include "reaper_imgui_functions.h"
+
 namespace uf8 {
 
-void MixerLayout::draw()
+void MixerLayout::draw(ImGui_Context* ctx)
 {
+    ImGui_Text(ctx, "Plugin Mixer — scaffold (Phase 2.6b fills this in)");
+
     // Phase 2.6b — single Channel Strip column:
     //   for each visible track:
     //     PluginMatch m = lookupPluginOnTrack(tr, Domain::ChannelStrip);
@@ -12,7 +16,7 @@ void MixerLayout::draw()
     //     drawSection(m, "HPF/LPF");
     //     drawSection(m, "EQ HF/HMF/LMF/LF");
     //     drawSection(m, "Comp");
-    //     drawGrMeter(tr, m.fxIndex);
+    //     drawGrMeter(tr, m.fxIndex);  // GainReduction_dB
     //     drawSection(m, "Gate");
     //     drawSection(m, "Output");
     //     drawFader(tr) + drawAudioMeter(tr);

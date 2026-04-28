@@ -1,6 +1,6 @@
 #pragma once
 //
-// MixerLayout — pure layout/widget logic for the Plugin Mixer window.
+// MixerLayout — pure layout/widget logic for the Plugin Mixer view tab.
 //
 // 75% left: horizontally scrollable channel-strip columns (one per track
 //           hosting a CS-family plugin from PluginMap).
@@ -13,15 +13,13 @@
 // Phase 2.6 scaffold; bodies arrive in 2.6b/2.6c.
 //
 
+class ImGui_Context; // ReaImGui opaque context pointer
+
 namespace uf8 {
 
 class MixerLayout {
 public:
-    // Single per-frame entry point. Reads g_visibleTracks (cached on
-    // SetTrackListChange Surface callback) + per-track parameter values via
-    // TrackFX_GetParamNormalized / GainReduction_dB / Track_GetPeakInfo.
-    // Renders ImGui widgets in the active context.
-    static void draw();
+    static void draw(ImGui_Context* ctx);
 };
 
 } // namespace uf8

@@ -1,4 +1,6 @@
 #include "MixerWindow.h"
+#include "MixerLayout.h"
+#include "SettingsScreen.h"
 #include "ThemeBridge.h"
 
 // One translation unit must define REAIMGUIAPI_IMPLEMENT before including the
@@ -19,7 +21,7 @@ struct MixerWindow::Impl {
         // Title is also the OS window title. v0.1.1 ImGui_CreateContext
         // creates the context and an OS-level window in one call.
         ctx = ImGui_CreateContext(
-            "Rea-Sixty Plugin Mixer",
+            "Rea-Sixty",
             /*size_w*/ 1280, /*size_h*/ 720,
             /*pos_x*/ nullptr, /*pos_y*/ nullptr);
     }
@@ -50,9 +52,21 @@ void MixerWindow::onRunTick()
     const int pushed = ThemeBridge::pushAll(impl_->ctx);
 
     bool open = true;
-    if (ImGui_Begin(impl_->ctx, "Mixer", &open, /*flags*/ nullptr)) {
-        // Phase 2.6a placeholder. 2.6b fills in MixerLayout::draw(ctx).
-        ImGui_Text(impl_->ctx, "Plugin Mixer — scaffold");
+    if (ImGui_Begin(impl_->ctx, "Rea-Sixty", &open, /*flags*/ nullptr)) {
+        // Two-tab layout: Mixer ⇄ Settings. ReaImGui's TabBar persists the
+        // active tab automatically across frames, so no view-state field
+        // is needed in our struct.
+        if (ImGui_BeginTabBar(impl_->ctx, "main", /*flags*/ nullptr)) {
+            if (ImGui_BeginTabItem(impl_->ctx, "Mixer", /*p_open*/ nullptr, /*flags*/ nullptr)) {
+                MixerLayout::draw(impl_->ctx);
+                ImGui_EndTabItem(impl_->ctx);
+            }
+            if (ImGui_BeginTabItem(impl_->ctx, "Settings", /*p_open*/ nullptr, /*flags*/ nullptr)) {
+                SettingsScreen::draw(impl_->ctx);
+                ImGui_EndTabItem(impl_->ctx);
+            }
+            ImGui_EndTabBar(impl_->ctx);
+        }
     }
     ImGui_End(impl_->ctx);
 
