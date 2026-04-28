@@ -1889,19 +1889,28 @@ void UC1Surface::pushGainReduction(float bcGrDb, float csGrDb)
     device_->setGainReduction(bcGrDb);
 
     // Channel-Strip Dynamics GR LEDs.
-    //   Comp GR strip: bank=0x02 byte5=0x01, cells 0x5C..0x60  (5 LEDs)
-    //   Gate GR strip: bank=0x02 byte5=0x01, cells 0x61..0x65  (5 LEDs)
-    // Both strips use per-LED brightness with 5 visible steps {0x19, 0x2D,
-    // 0x54, 0x99, 0xFF}, ~3 dB per LED, 0.6 dB per sub-step. Bank verified
-    // from `dual_35_cs_gr_ramp.pcapng` (state ramp 0x19 → 0xFF on cells
-    // 0x5C..0x60 with bank=0x02). Earlier memory map said bank=0x01 — was
-    // wrong; bank=0x01 with these cells hits Comp-Release / Gate-Range /
-    // Gate-Hold / Dyn-In LEDs (user-observed 2026-04-28).
+    //   Comp GR strip: byte5=0x01, cells 0x5C..0x60  (5 LEDs)
+    //   Gate GR strip: byte5=0x01, cells 0x61..0x65  (5 LEDs)
     //
-    // Until SSL splits Comp vs Gate GR via separate API readouts, drive
-    // both strips with the same csGrDb value — gives the user a visible
-    // GR indicator on both hardware strips even if it's not strictly
-    // independent metering.
+    // Each cell needs a PAIRED write:
+    //   bank=0x01 state=0x01 → mark cell as "active in GR group" (selection)
+    //   bank=0x02 state=<brightness> → set brightness within the group
+    // Without the bank=0x01 selection bit, the bank=0x02 brightness write
+    // falls through to a different LED bank — user-observed 2026-04-28:
+    // bank=0x02-only writes light/dim the first-CCW LED of Comp Release /
+    // Gate Range / Dyn In / Gate Hold instead of the GR strip itself.
+    // Same pair-write rule as `uc1-led-button-invariants.md` documents
+    // for status-register LEDs (Solo/Cut/etc).
+    //
+    // Brightness: 5 visible steps {0x19, 0x2D, 0x54, 0x99, 0xFF}, ~3 dB
+    // per LED, 0.6 dB per sub-step. Verified from `dual_35_cs_gr_ramp`
+    // (state ramp on cells 0x5C..0x60 with paired bank=0x01 selection +
+    // bank=0x02 brightness frames).
+    //
+    // Both strips driven by the same csGrDb. SSL CS2's GainReduction_dB
+    // returns one combined Comp+Gate GR — and per the user's insight,
+    // that's correct: when the Gate fires, GR jumps by Range, so the
+    // single readout already encodes both contributions.
     static const uint8_t kLevels[5] = {0x19, 0x2D, 0x54, 0x99, 0xFF};
     static uint8_t lastComp[5] = {0xFE, 0xFE, 0xFE, 0xFE, 0xFE};
     static uint8_t lastGate[5] = {0xFE, 0xFE, 0xFE, 0xFE, 0xFE};
@@ -1920,9 +1929,12 @@ void UC1Surface::pushGainReduction(float bcGrDb, float csGrDb)
     auto pushStrip = [&](uint8_t baseCell, uint8_t (&cache)[5]) {
         for (int i = 0; i < 5; ++i) {
             if (target[i] != cache[i]) {
+                const uint8_t cell = static_cast<uint8_t>(baseCell + i);
+                const uint8_t selState = target[i] ? 0x01 : 0x00;
+                // Pair-write: selection (bank=0x01) then brightness (bank=0x02).
+                device_->send(buildLedWrite(0x01, cell, selState));
+                device_->send(buildLedWrite(0x02, cell, target[i]));
                 cache[i] = target[i];
-                device_->send(buildLedWrite(0x02,
-                    static_cast<uint8_t>(baseCell + i), target[i]));
             }
         }
     };
