@@ -150,6 +150,10 @@ void UC1Surface::setFocusedTrack(void* track)
     // the dot through it — manifests as a "hanging" LED in EQ rings.
     ringCellCache_.clear();
     lastButtonLed_.fill(-1);  // re-push every button LED on the new focus
+    // Drop the BC-bypass cache too. The next pollBcBypassState_ tick on
+    // the new track will refresh the backlight to match its bypass state
+    // but won't fire the FF 5C cosmetic — focus change is not a press.
+    lastBcBypassed_ = -1;
     refresh();
 }
 
@@ -158,6 +162,7 @@ void UC1Surface::invalidateCache()
     ringCellCache_.clear();
     lastZone05Text_.clear();  // force the next pushFocusedParamReadout_ to send
     lastButtonLed_.fill(-1);  // re-push every button LED on the next poll
+    lastBcBypassed_ = -1;     // re-push BC backlight (without phantom cosmetic)
 }
 
 int UC1Surface::poll()
@@ -191,6 +196,7 @@ int UC1Surface::poll()
     // reflect on the surface without waiting for a UC1 input event.
     pollButtonLeds_();
     pollKnobRings_();
+    pollBcBypassState_();
 
     return handled;
 }
@@ -1440,6 +1446,44 @@ void UC1Surface::pollButtonLeds_()
 
         pushButtonLed_(btn, stateFor(btn, on));
     }
+}
+
+void UC1Surface::pollBcBypassState_()
+{
+    if (!device_) return;
+    MediaTrack* tr = static_cast<MediaTrack*>(focusedTrack_);
+    if (!tr) {
+        // No focused track — leave whatever state the firmware is in.
+        // When a track gets focused later, the next tick will fire the
+        // appropriate cosmetic + backlight write through the unknown→known
+        // transition below.
+        lastBcBypassed_ = -1;
+        return;
+    }
+    UC1Bindings b = lookupBindingsOnTrack(tr);
+    if (!b.busCompMap || b.busCompMap->bypassParam == kParamNone) {
+        lastBcBypassed_ = -1;
+        return;
+    }
+    const bool bypassed = TrackFX_GetParamNormalized(
+        tr, b.busCompFxIdx, b.busCompMap->bypassParam) > 0.5;
+    const int8_t cur = bypassed ? 1 : 0;
+    if (cur == lastBcBypassed_) return;
+
+    // BC mechanical-VU backlight (cap43): binary on/off, FF when enabled
+    // / 00 when bypassed. Lives outside the 0x33 dim cascade — has its
+    // own cell.
+    device_->send(buildLedWrite(0x02, 0x01, bypassed ? 0x00 : 0xFF));
+
+    // FF 5C cosmetic needle-pose (cap45): one frame per real transition.
+    // Skip on the unknown→known boot path so we don't fire a phantom
+    // "you just toggled" pose at every focus change to a track that's
+    // simply already-bypassed or already-enabled.
+    if (lastBcBypassed_ != -1) {
+        device_->send(buildBcBypassPose(/*entering=*/bypassed));
+    }
+
+    lastBcBypassed_ = cur;
 }
 
 void UC1Surface::pollKnobRings_()

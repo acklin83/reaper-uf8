@@ -195,7 +195,7 @@ page 153). Commands decoded 2026-04-20 from cap14a–cap18:
 - Plug-in Mixer Position ("No" slot number top-left)
 - Dynamics Metering (GR bars) — cap17 inconclusive, needs audio-playing retry
 - Input/Output Metering — `FF 38 04` / `FF 39 04` present but byte layout TBD
-- `FF 5B 02 00 00 5D` — always-present poll-like frame (likely status)
+- ~~`FF 5B 02 00 00 5D` — always-present poll-like frame (likely status)~~ **RESOLVED 2026-04-28 (cap43):** This is the BC mechanical-VU motor command at position 0 (needle at rest). Same opcode, same shape, just streamed continuously even when GR=0. See "Decode pass 2026-04-28" below.
 - `FF 13 04 <4 bytes>` — present during fader moves, not a meter (fewer values than expected)
 
 ## Palette corrections (2026-04-20)

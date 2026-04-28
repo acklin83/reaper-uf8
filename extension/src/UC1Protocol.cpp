@@ -60,6 +60,17 @@ std::vector<uint8_t> buildGrMeter(float dB)
     return buildFrame(0x5B, data);
 }
 
+std::vector<uint8_t> buildBcBypassPose(bool entering)
+{
+    // cap45 (2026-04-28): SSL 360° fires exactly one FF 5C frame per BC
+    // bypass-toggle press, with fixed positions independent of current GR.
+    // Same frame shape + checksum formula as FF 5B; opcode 0x5C distinguishes
+    // it as cosmetic-only.
+    const uint8_t pos = entering ? 0x0A : 0x32;
+    const uint8_t data[2] = { 0x00, pos };
+    return buildFrame(0x5C, data);
+}
+
 std::vector<uint8_t> buildVuMeter(uint8_t meter, uint8_t level)
 {
     // bank 0x01 is reserved for I/O VU strips; byte 4 picks input/output.

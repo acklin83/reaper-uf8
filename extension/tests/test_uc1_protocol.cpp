@@ -51,6 +51,12 @@ int main()
     EXPECT(hex(buildGrMeter(-3.0f)) == "ff5b0200005d");   // negative clamps to 0
     EXPECT(hex(buildZeroGr())       == "ff5b0200005d");
 
+    // --- BC bypass cosmetic (FF 5C 02 00 <pos>). cap45 captured exactly:
+    //   bypass-on press   → ff 5c 02 00 0a 68
+    //   un-bypass press   → ff 5c 02 00 32 90
+    EXPECT(hex(buildBcBypassPose(true))  == "ff5c02000a68");
+    EXPECT(hex(buildBcBypassPose(false)) == "ff5c02003290");
+
     // --- VU meter (FF 13 04 01 <level> 01 <in/out>). uc1_13 pair:
     //     ff 13 04 01 1a 01 00 33   (input, level 0x1a)
     //     ff 13 04 01 1a 01 01 34   (output, level 0x1a)

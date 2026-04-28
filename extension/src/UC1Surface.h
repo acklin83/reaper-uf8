@@ -209,6 +209,15 @@ private:
     // waiting for the user to actually move a knob.
     void pollKnobRings_();
 
+    // Detect BC-bypass state transitions and fire the matching cosmetic
+    // frames: the FF 5C single-shot needle-pose (entering vs. exiting
+    // bypass) plus the BC mechanical-VU backlight binary cell
+    // (bank=0x02 cell=0x01 byte5=0x01, FF when enabled / 00 when bypassed).
+    // Decoded in cap43 + cap45 (2026-04-28). Cheap when nothing changes;
+    // dedups against lastBcBypassed_ which stays at -1 until first poll.
+    void pollBcBypassState_();
+    int8_t lastBcBypassed_ = -1;  // -1=unknown, 0=enabled, 1=bypassed
+
     // Per-knob LED-ring cell state cache. Each entry packs the last-
     // sent (selection_state | brightness_state << 8) so dedup catches
     // brightness changes too, not just selection. pushKnobRing_ skips

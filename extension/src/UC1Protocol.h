@@ -174,10 +174,20 @@ struct KnobEvent {
 //   FF 1B 01 <counter> <chk>         (5 bytes)
 std::vector<uint8_t> buildKeepalive(uint8_t counter);
 
-// Gain Reduction meter (Bus Comp center section). 16-bit big-endian value
-// in units of 1/10 dB (0 dB = 0x0000, 12.1 dB = 0x0079).
+// Gain Reduction meter (Bus Comp center section). Drives the BC mechanical
+// analog needle. 16-bit big-endian value in units of 1/10 dB (0 dB = 0x0000,
+// 20 dB = 0x00C8). cap43 confirmed linear position = round(dB × 10), range
+// 0..200 mapping to 0..20 dB GR. Streamed at ~50 Hz by UC1Device's worker.
 //   FF 5B 02 <hi> <lo> <chk>         (6 bytes)
 std::vector<uint8_t> buildGrMeter(float dB);
+
+// Cosmetic single-shot "needle-pose" sent on every BC-bypass-state-change
+// press, mirroring SSL 360°'s behaviour. Not streamed — fire once per
+// transition. Positions are fixed (cap45):
+//   entering=true  → FF 5C 02 00 0A 68    (pos 10 ≈ 1 dB on the 0..20 scale)
+//   entering=false → FF 5C 02 00 32 90    (pos 50 ≈ 5 dB on the 0..20 scale)
+// Skipping these is safe — the meter still works without the cosmetic blip.
+std::vector<uint8_t> buildBcBypassPose(bool entering);
 
 // VU meter (Channel Strip I/O meter strip). Bank is fixed 0x01 for VU.
 // `meter`: 0 = input, 1 = output. `level`: byte value 0..0xFF.
