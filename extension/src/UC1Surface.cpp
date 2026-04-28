@@ -2020,28 +2020,13 @@ void UC1Surface::pushCsVu(float inputL, float inputR,
     //   Output meter: byte5=0x01, base 0x18  (cells 0x18..0x37, 32 total)
     // bank=0x01, state=0x01 lit / 0x00 off (binary, no brightness).
     //
-    // LED 0 is the -60 dBFS bottom LED. Stays lit whenever audio is
-    // present above -60 dBFS — uc1_13 capture didn't show its cells
-    // (0x18/0x19, 0xA0/0xA1) transitioning ON because SSL360 lit them
-    // during init (before capture started). Capture only saw the OFF
-    // transition at session end.
-    //
-    // 16 LEDs total. Calibration points from uc1_13 (silence / -20 /
-    // -10 / -6 / 0 dBFS):
-    //   At -20 dBFS test: 12 LEDs lit (LED 0 always on + LEDs 1..11)
-    //   At -10 dBFS test: 16 LEDs lit (all)
-    //   ⇒ LED 11 threshold ≤ -20, LED 12 threshold > -20, LED 15 ≤ -10
-    // Distribution: 12 LEDs from -60..-20 (3.33 dB/LED), 4 LEDs from
-    // -20..-10 (2.5 dB/LED). Looser at the extremes — finer ramp capture
-    // would tighten the bottom 11 thresholds.
+    // SSL UC1 CS I/O meter LED scale, bottom-to-top, per user spec:
+    //   -60, -50, -40, -30, -27, -24, -21, -18, -15, -12, -9, -6, -3, -2, -1, 0 dBFS
+    // 16 LEDs, LED 0 = -60 dBFS, LED 15 = 0 dBFS (clip).
     constexpr int kNleds = 16;
     static constexpr float kThreshold[kNleds] = {
-        // LED 0..11 — LED 0 always lit on audio (-60 dBFS), LED 11 lights
-        // at the user's -20 dBFS test (so threshold ≤ -20).
-        -60.f, -56.67f, -53.33f, -50.f, -46.67f, -43.33f,
-        -40.f, -36.67f, -33.33f, -30.f, -26.67f, -23.33f,
-        // LEDs 12..15 — light between -20 and -10 dBFS.
-        -17.5f, -15.f, -12.5f, -10.f,
+        -60.f, -50.f, -40.f, -30.f, -27.f, -24.f, -21.f, -18.f,
+        -15.f, -12.f,  -9.f,  -6.f,  -3.f,  -2.f,  -1.f,   0.f,
     };
 
     constexpr uint8_t kInputBase  = 0xA0;  // byte5=0x00
