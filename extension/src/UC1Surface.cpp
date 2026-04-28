@@ -1924,16 +1924,27 @@ void UC1Surface::pushGainReduction(float bcGrDb, float csCompGrDb, float csGateG
         out[active] = (pos == 0 && dB < 0.3f) ? 0x00 : kLevels[sub];
     };
 
+    // GR-strip refresh has to re-assert ALL active cells whenever the
+    // strip changes — activating a new cell via bank=0x01 deselects the
+    // previously-active cells, so their bank=0x02 brightness "fades" until
+    // we re-write it. (User-observed 2026-04-28: at ~10 dB GR, the 6 dB
+    // LED extinguishes, then the 3 dB LED — that's the firmware dropping
+    // older cells as new ones activate.) Matches SSL360's pattern in
+    // dual_35: when activating cell N, it re-emits cell N-1's state=0xFF
+    // explicitly, even though that cell's value didn't change.
     auto pushStrip = [&](uint8_t baseCell, const uint8_t (&target)[5],
                          uint8_t (&cache)[5]) {
+        bool anyChanged = false;
         for (int i = 0; i < 5; ++i) {
-            if (target[i] != cache[i]) {
-                const uint8_t cell = static_cast<uint8_t>(baseCell + i);
-                const uint8_t selState = target[i] ? 0x01 : 0x00;
-                device_->send(buildLedWrite(0x01, cell, selState));
-                device_->send(buildLedWrite(0x02, cell, target[i]));
-                cache[i] = target[i];
-            }
+            if (target[i] != cache[i]) { anyChanged = true; break; }
+        }
+        if (!anyChanged) return;
+        for (int i = 0; i < 5; ++i) {
+            const uint8_t cell = static_cast<uint8_t>(baseCell + i);
+            const uint8_t selState = target[i] ? 0x01 : 0x00;
+            device_->send(buildLedWrite(0x01, cell, selState));
+            device_->send(buildLedWrite(0x02, cell, target[i]));
+            cache[i] = target[i];
         }
     };
 
