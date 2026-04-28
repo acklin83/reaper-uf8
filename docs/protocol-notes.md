@@ -366,3 +366,70 @@ During `dual_36_cs_vu_ramp` the user ramped input signal through a 16-level test
 | 2026-04-24 | `uc1/dual_36_cs_vu_ramp.pcapng` | CS VU ramp — `FF 66 21 09` bytes 6/7 carry Input/Output VU `0x00..0x1F`. |
 | 2026-04-26 | `cap31_solo_cut_led_colours.pcapng` | SOLO/MUTE/SEL LED colour decoded — unified `FF 38/39 04 <cell>` pair, cell range 0x00..0x17 covers all 24 per-strip LEDs (replaces FF 3B mono path). Yellow/orange/white byte tables captured. |
 | 2026-04-26 | `cap33_sel_palette_sweep.pcapng` | SEL DAW-Colour palette decoded — 12 REAPER track-colours mapped to 10 distinct SSL360 byte pairs. Confirmed FF 38/39 fires in PM Layer too. FF39's `b` byte always `0xF0` when lit. |
+| 2026-04-28 | `cap42_uf8_vpot_top.pcapng` | **Top-soft-key 3-state decoded.** Cells `0x18..0x1F`. BRIGHT = FF38 `FF FF` + FF39 `00 F0`. DIM = FF38 `11 F1` + FF39 `11 F1`. (OFF = `00 F0` from cap44.) Replaces handoff guesswork. |
+| 2026-04-28 | `cap43_uc1_bc_vu.pcapng` | **UC1 BC mechanical VU-meter motor command + VU backlight cell decoded.** See "Decode pass 2026-04-28" below. |
+| 2026-04-28 | `cap44_uf8_send_plugin_3state.pcapng` | **Send/Plugin row 3-state decoded.** Cells `0x37..0x30`. OFF = `00 F0` (Layer 1 inactive), DIM = `11 F1` (Layer 2 idle), BRIGHT = `FF FF` (active selection). Plugin button (`0x2F`) is 2-state only: OFF + ON-as-DIM (`11 F1`). Layer 1/2 LEDs (`0x39`/`0x3A`) confirm radio-button BRIGHT/DIM/OFF. New unmapped cells `0x2D`, `0x3B`, `0x3C`, `0x3E`, `0x3F` showing OFF/DIM-only writes — likely cosmetic/ghost LEDs SSL360 still maintains for buttons that never light (Layer 3, 360, Channel, Auto Off). |
+
+## Decode pass 2026-04-28 — UC1 BC mechanical VU + UF8 Send/Plugin 3-state
+
+### UC1 BC mechanical VU-meter motor (`FF 5B 02 00 <position> <ck>`)
+
+The Bus Compressor's analog needle meter is driven by a **vendor command, NOT an LED-cell write**. cap43 captured a stepped GR sweep from 20 → 16 → 12 → 8 → 4 → 0 dB, yielding 6 distinct position bytes:
+
+| dB GR | position byte (decimal) |
+|-------|-------------------------|
+| 0  | `0x00` (0)   |
+| 4  | `0x28` (40)  |
+| 8  | `0x50` (80)  |
+| 12 | `0x78` (120) |
+| 16 | `0xA0` (160) |
+| 20 | `0xC8` (200) |
+
+**Linear: position = round(dB × 10), range `0..200` mapping to `0..20 dB` of gain reduction.**
+
+Frame format: `FF 5B 02 00 <position> <cksum>` (6 bytes).
+**Checksum**: `(byte1 + byte2 + byte3 + byte4) & 0xFF` — i.e. simple sum of bytes 1..4 (`5B + 02 + 00 + position`). Verified against all 6 captured tuples.
+
+The frame is **streamed at ~30 Hz** while a position is held (3568 frames in the 11-second sweep window). To drive the meter live, our extension needs the same continuous re-broadcast — likely sampling the BC plugin's GR param at every onTimer tick.
+
+The previously-classified "always-present poll-like frame" `FF 5B 02 00 00 5D` (line 198) is **just the same command at position 0** — heartbeat-style streaming when the meter is idle/silent.
+
+### UC1 VU mechanical-meter backlight (`bank=0x02 cell=0x01 byte5=0x01`)
+
+cap43's bypass-toggle window (t=13.65 → t=16.76) revealed exactly ONE cell with pure on/off transitions (no `0x33` dim cascade) at the bypass timestamps:
+
+- `FF 13 04 02 01 01 00` → backlight OFF (BC bypassed)
+- `FF 13 04 02 01 01 FF` → backlight ON (BC enabled)
+
+This is the **physical backlight LED behind the mechanical VU meter strip** — separate from the bypass-cascade dim (`0x33`) that handles the rest of the BC LEDs. Drives binary, not gradient. To match SSL360 behaviour our extension should toggle this cell on `bypassParam` state of the BC plug-in.
+
+### UC1 needle-pose anomaly (`FF 5C 02 00 <pos> <ck>`) — OPEN
+
+Two single-shot frames at the bypass-toggle timestamps:
+
+- `FF 5C 02 00 0A 68` at bypass-press
+- `FF 5C 02 00 32 90` at un-bypass-press
+
+Same frame shape as `FF 5B`, opcode differs by 1. Same checksum formula (verified). Function unclear — possibly a "needle-test" pose triggered by SSL360 cosmetics on bypass toggle. Not blocking; flagged for future capture.
+
+### UF8 Send/Plugin row 3-state (cap44)
+
+| Cell range | Buttons | OFF | DIM | BRIGHT |
+|---|---|---|---|---|
+| `0x37..0x30` | Send/Plugin 1..8 (reverse-mapped) | `00 F0` | `11 F1` | `FF FF` |
+| `0x2F` | Plugin button | `00 F0` | (none) | `11 F1` (= 2-state only, no FF FF) |
+| `0x39` | Layer 1 | `00 F0` | `11 F1` | `FF FF` |
+| `0x3A` | Layer 2 | `00 F0` | `11 F1` | `FF FF` |
+
+Same FF38/FF39 pair-write family as SEL/CUT/SOLO/Top-Soft-Key. BRIGHT companion (FF39) follows the SEL convention: when FF38 = `FF FF` (BRIGHT), FF39 = `00 F0`.
+
+Layer-1 selected → Send/Plugin row OFF (firmware-driven). Layer-2 selected → row DIM, with currently-active selection BRIGHT. Implementation: extend `buildUf8GlobalLed(btn, state)` from boolean `on` to tri-state enum (Off / Dim / Bright). Plugin button stays 2-state.
+
+### UF8 top-soft-key BRIGHT decoded (cap42)
+
+Cells `0x18..0x1F`, used for the strip-focus indicator above each LCD:
+- BRIGHT (focused strip): FF38 = `FF FF`, FF39 = `00 F0`
+- DIM (assigned colour, not focused): FF38 = `11 F1`, FF39 = `11 F1`
+- OFF (no slot in this position): FF38 = `00 F0`, FF39 = `00 F0` (from cap44 transitions)
+
+Replaces the cap41-era guess. The `Protocol.cpp` `buildTopSoftKeyLed` should write `FF FF` + `00 F0` for the BRIGHT case — earlier code attempts using SEL-colour bytes for BRIGHT were wrong; SSL uses pure white-bright `FF FF`.
