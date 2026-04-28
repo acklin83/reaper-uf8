@@ -1984,18 +1984,6 @@ void UC1Surface::pushGainReduction(float bcGrDb, float csCompGrDb, float csGateG
     stripTargets(csCompGrDb, compTarget);
     stripTargets(csGateGrDb, gateTarget);
 
-    // SAFETY 2026-04-28: writing cells 0x5D..0x60 via byte5=0x01 corrupts
-    // the displays of Comp Release / Gate Range / Dyn In / Gate Hold
-    // on the user's hardware (each of cells 0x5D..0x60 maps systematically
-    // to those rings' first-CCW LEDs). Cells 0x61..0x65 (Gate strip) likely
-    // have the same problem, untested. dual_35's pattern works for SSL360
-    // in PM mode but breaks here — root cause unclear without an our-
-    // extension USB capture to compare. Mask the problem cells until we
-    // can capture + diff. Cell 0x5C alone gives a single-LED "GR active"
-    // indicator without disturbing anything.
-    for (int i = 1; i < 5; ++i) compTarget[i] = 0;
-    for (int i = 0; i < 5; ++i) gateTarget[i] = 0;
-
     pushStrip(0x5C, compTarget, lastCompBri, lastCompSel);
     pushStrip(0x61, gateTarget, lastGateBri, lastGateSel);
 }

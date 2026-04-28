@@ -6,6 +6,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <queue>
@@ -26,6 +27,38 @@ struct IoStats {
     std::atomic<uint64_t> inBytes{0};
 };
 static IoStats g_stats;
+
+// Optional outbound-frame logger. Enabled by setting env var
+// `UC1_FRAME_LOG=/path/to/file.log` before launching REAPER. Each line
+// is `<t_seconds>\t<hex bytes>` for one OUT frame. Used to debug LED
+// addressing without having to USB-capture (macOS 15 blocks XHC capture).
+static std::mutex      g_frameLogMu;
+static FILE*           g_frameLog = nullptr;
+static auto            g_frameLogStart = std::chrono::steady_clock::now();
+static void frameLogInit_() {
+    static bool tried = false;
+    if (tried) return;
+    tried = true;
+    const char* path = std::getenv("UC1_FRAME_LOG");
+    if (!path || !*path) return;
+    g_frameLog = std::fopen(path, "w");
+    if (g_frameLog) {
+        std::fprintf(g_frameLog, "# UC1 outbound frame log\n");
+        std::fflush(g_frameLog);
+        g_frameLogStart = std::chrono::steady_clock::now();
+    }
+}
+static void frameLogWrite_(const uint8_t* data, size_t n) {
+    if (!g_frameLog) return;
+    std::lock_guard<std::mutex> lk(g_frameLogMu);
+    const auto t = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - g_frameLogStart).count();
+    std::fprintf(g_frameLog, "%.4f\t", t);
+    for (size_t i = 0; i < n; ++i) std::fprintf(g_frameLog, "%02x", data[i]);
+    std::fputc('\n', g_frameLog);
+    std::fflush(g_frameLog);
+}
+
 // Exposed so main.cpp can poll and ShowConsoleMsg once per second.
 uint64_t debugOutFrames()   { return g_stats.outFramesSent.load();   }
 uint64_t debugOutBytes()    { return g_stats.outBytesSent.load();    }
@@ -65,6 +98,7 @@ UC1Device::~UC1Device()
 bool UC1Device::open()
 {
     if (handle_) return true;
+    frameLogInit_();
 
     if (libusb_init(&ctx_) < 0) {
         lastError_ = "libusb_init failed";
@@ -140,6 +174,7 @@ bool UC1Device::open()
             ctx_    = nullptr;
             return false;
         }
+        frameLogWrite_(step.bytes, 4);
     }
     // Short settle before the init flood — captured reference waits
     // ~12 ms after FF 4E.
@@ -166,6 +201,7 @@ bool UC1Device::open()
             ctx_    = nullptr;
             return false;
         }
+        frameLogWrite_(kUc1InitSequence[i].bytes, kUc1InitSequence[i].size);
     }
     // Post-flood settle.
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -210,6 +246,8 @@ void UC1Device::setGainReduction(float dB)
 
 void UC1Device::workerLoop_()
 {
+    frameLogInit_();
+
     // Post the first async IN transfer so UC1 events flow immediately,
     // and so the IN endpoint stays drained (OUT flow-control otherwise
     // stalls just like on UF8).
@@ -224,6 +262,7 @@ void UC1Device::workerLoop_()
         auto f = buildZeroGr();
         int t = 0;
         libusb_bulk_transfer(handle_, kEpOut, f.data(), static_cast<int>(f.size()), &t, 500);
+        frameLogWrite_(f.data(), f.size());
     }
 
     uint8_t keepaliveCounter = 0;
@@ -263,6 +302,7 @@ void UC1Device::workerLoop_()
                                                 static_cast<int>(gr.size()), &t, 100);
             if (rc < 0) { g_stats.outErrors.fetch_add(1); lastError_ = libusb_error_name(rc); }
             else         { g_stats.outFramesSent.fetch_add(1); g_stats.outBytesSent.fetch_add(gr.size()); }
+            frameLogWrite_(gr.data(), gr.size());
             lastGr = now;
         }
 
@@ -274,6 +314,7 @@ void UC1Device::workerLoop_()
                                                 static_cast<int>(ka.size()), &t, 100);
             if (rc < 0) { g_stats.outErrors.fetch_add(1); lastError_ = libusb_error_name(rc); }
             else         { g_stats.outFramesSent.fetch_add(1); g_stats.outBytesSent.fetch_add(ka.size()); }
+            frameLogWrite_(ka.data(), ka.size());
             keepaliveCounter = (keepaliveCounter + 1) & 0x03;
             lastKeepalive    = now;
         }
@@ -292,6 +333,7 @@ void UC1Device::workerLoop_()
                 g_stats.outFramesSent.fetch_add(1);
                 g_stats.outBytesSent.fetch_add(frame.size());
             }
+            frameLogWrite_(frame.data(), frame.size());
         }
 
         // Pump libusb event loop so the IN callback fires.
