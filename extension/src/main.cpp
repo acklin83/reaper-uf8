@@ -1930,26 +1930,14 @@ void pushZonesForVisibleSlots()
             g_dev->send(uf8::buildChannelStripType(static_cast<uint8_t>(s), csType));
         }
 
-        // Parameter Label (Currently Selected Parameter zone) — also
-        // the "populate slot" flag that gates color-bar rendering. When
-        // an SSL plug-in is active, use the slot's full name ("HF Type",
-        // "Comp F.Attack", …) so UF8's label matches UC1 zone 0x05's
-        // label exactly. The 4-char legends ("BELL", "F.ATK") collide
-        // across slots (HF Bell + LF Bell both legend "BELL"; CompFast
-        // + GateFast both "F.ATK") and don't disambiguate which knob
-        // the user is on. buildPluginSlotName accepts up to 12 chars,
-        // so the longer slot.name fits.
-        // No SSL plugin slot → V-Pot controls track Pan, so label the
-        // zone "Pan" (matches what the V-Pot actually drives).
-        std::string label;
-        if (slot) {
-            label = slot->name;
-        } else {
-            label = "Pan";
-        }
-        if (label != g_lastSlotLabel[s]) {
-            g_lastSlotLabel[s] = label;
-            g_dev->send(uf8::buildPluginSlotName(static_cast<uint8_t>(s), label));
+        // Top-zone label (FF 66 .. 04) — UF8 manual p.174 calls this
+        // "soft-key label", reserved for the per-strip top soft-key text.
+        // Cleared here; the upcoming top-soft-key feature will populate
+        // it. The plug-in parameter label+value remains on the V-Pot via
+        // the Value Line below.
+        if (!g_lastSlotLabel[s].empty()) {
+            g_lastSlotLabel[s].clear();
+            g_dev->send(uf8::buildPluginSlotName(static_cast<uint8_t>(s), ""));
         }
 
         // Channel Number Zone — the tiny digit top-left of each strip's
