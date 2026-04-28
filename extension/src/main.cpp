@@ -1839,9 +1839,9 @@ std::string composeValueLine(std::string_view label, std::string_view value)
 // OUT endpoint 30× per second.
 std::array<std::string, 8> g_lastTrackName{};
 std::array<std::string, 8> g_lastSlotLabel{};
-// Top-soft-key LED dedup. -1 = unset. Encodes 0/1 = off/on; full re-push on
-// a soft-key dirty (bank change forces re-render via g_lastSlotLabel reset
-// upstream, but the LED state lives separately).
+// Top-soft-key LED dedup. -1 = unset. Encodes the TopSoftKeyState as
+// 0=Off / 1=Dim / 2=On so transitions between any two visible levels
+// trigger a re-push.
 std::array<int8_t, 8>      g_lastTopSoftKey{-1, -1, -1, -1, -1, -1, -1, -1};
 std::array<std::string, 8> g_lastCsType{};
 std::array<std::string, 8> g_lastValueLine{};
@@ -2113,20 +2113,26 @@ void pushZonesForVisibleSlots()
             const auto vSk = softkey::viewFor(domSk, bankSk);
             std::string label = vSk.labels[s];
             const int slotLink = vSk.linkIdx[s];
-            const bool ledOn = (slotLink != softkey::kNoSlot)
-                && (slotLink == focused.slotIdx);
-            const int8_t ledState = ledOn ? 1 : 0;
-            if (ledState != g_lastTopSoftKey[s]) {
-                g_lastTopSoftKey[s] = ledState;
-                // SSL-mode default: all top-soft-key LEDs render in
-                // white. Bright (FF FF / 00 F0) on the strip whose
-                // bank position holds the focused param, dim (11 F1)
-                // on the rest. White has the highest dim brightness
-                // of any palette colour — the un-focused strips stay
-                // visibly lit instead of fading into ambiguity. User-
-                // defined per-strip colours land with the Settings UI.
+            uf8::TopSoftKeyState tssk;
+            int8_t ledCacheKey;
+            if (slotLink == softkey::kNoSlot) {
+                tssk = uf8::TopSoftKeyState::Off;        // dark
+                ledCacheKey = 0;
+            } else if (slotLink == focused.slotIdx) {
+                tssk = uf8::TopSoftKeyState::On;         // bright = focused
+                ledCacheKey = 2;
+            } else {
+                tssk = uf8::TopSoftKeyState::Dim;        // dim = available
+                ledCacheKey = 1;
+            }
+            if (ledCacheKey != g_lastTopSoftKey[s]) {
+                g_lastTopSoftKey[s] = ledCacheKey;
+                // SSL-mode default: white. Three visible levels —
+                // dark (00 F0) for kNoSlot, dim white (11 F1) for
+                // available, bright white (FF FF) for focused. User
+                // can pick per-strip colours via the Settings UI later.
                 sendLedFrames(uf8::buildTopSoftKeyLed(
-                    static_cast<uint8_t>(s), ledOn, uf8::ledColourWhite()));
+                    static_cast<uint8_t>(s), tssk, uf8::ledColourWhite()));
             }
             if (label != g_lastSlotLabel[s]) {
                 g_lastSlotLabel[s] = label;

@@ -276,12 +276,25 @@ LedColourFrames buildLedColourPair(uint8_t strip, LedClass cls, bool on)
     return buildLedColourPair(strip, cls, on, ledColourClassDefault(cls));
 }
 
-LedColourFrames buildTopSoftKeyLed(uint8_t strip, bool on, LedColour colour)
+LedColourFrames buildTopSoftKeyLed(uint8_t strip, TopSoftKeyState state,
+                                   LedColour colour)
 {
-    const uint8_t a38 = on ? colour.aBright : colour.aDim;
-    const uint8_t b38 = on ? colour.bBright : colour.bDim;
-    const uint8_t a39 = on ? 0x00 : colour.aDim;
-    const uint8_t b39 = on ? 0xF0 : colour.bDim;
+    uint8_t a38, b38, a39, b39;
+    switch (state) {
+        case TopSoftKeyState::On:
+            a38 = colour.aBright;  b38 = colour.bBright;
+            a39 = 0x00;            b39 = 0xF0;
+            break;
+        case TopSoftKeyState::Dim:
+            a38 = colour.aDim;     b38 = colour.bDim;
+            a39 = colour.aDim;     b39 = colour.bDim;
+            break;
+        case TopSoftKeyState::Off:
+        default:
+            // No-colour state (cap41 `00 F0` for unassigned strips).
+            a38 = 0x00;  b38 = 0xF0;  a39 = 0x00;  b39 = 0xF0;
+            break;
+    }
 
     const uint8_t cell = static_cast<uint8_t>(0x1F - strip);
 
