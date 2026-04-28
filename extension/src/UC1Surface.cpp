@@ -1994,7 +1994,8 @@ void UC1Surface::pushVu(uint8_t meter, uint8_t level)
     device_->send(buildVuMeter(meter, level));
 }
 
-void UC1Surface::pushCsVu(float dbInput, float dbOutput)
+void UC1Surface::pushCsVu(float inputL, float inputR,
+                          float outputL, float outputR)
 {
     if (!device_) return;
 
@@ -2007,45 +2008,47 @@ void UC1Surface::pushCsVu(float dbInput, float dbOutput)
                 static_cast<MediaTrack*>(focusedTrack_),
                 b.busCompFxIdx, b.busCompMap->bypassParam);
             if (bypass > 0.5) {
-                dbInput  = -120.f;
-                dbOutput = -120.f;
+                inputL = inputR = outputL = outputR = -120.f;
             }
         }
     }
 
-    // Cell map decoded 2026-04-28 from `uc1_13_vu_meters.pcapng` — the
-    // user's level-stepped CS VU test (silence / −20 / −10 / −6 / 0 dBFS).
-    // Each meter is 30 cells, bank=0x01, state=0x01 lit / 0x00 off.
-    //   Input  meter: byte5=0x00, cells 0xA2..0xBF
-    //   Output meter: byte5=0x01, cells 0x1A..0x37
-    // (Input/output assignment is a best guess — user can flip if reversed.)
+    // Cell map decoded 2026-04-28 from `uc1_13_vu_meters.pcapng`.
+    // Each meter is 16 LEDs tall × 2 cells per LED (L+R interleaved):
+    //   LED i → L cell = base + 2*i, R cell = base + 2*i + 1
+    //   Input  meter: byte5=0x00, base 0xA0  (cells 0xA0..0xBF, 32 total)
+    //   Output meter: byte5=0x01, base 0x18  (cells 0x18..0x37, 32 total)
+    // bank=0x01, state=0x01 lit / 0x00 off (binary, no brightness).
     //
-    // Threshold distribution: linear over −60..0 dBFS across 30 LEDs.
-    // At −20 dBFS the capture lit 22 cells; linear maps to ~20 — close
-    // enough until we calibrate exact per-LED dB.
-    constexpr int kNcells = 30;
-    static constexpr uint8_t kInputCells[kNcells] = {
-        0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB,
-        0xAC, 0xAD, 0xAE, 0xAF, 0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5,
-        0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xBB, 0xBC, 0xBD, 0xBE, 0xBF,
-    };
-    static constexpr uint8_t kOutputCells[kNcells] = {
-        0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20, 0x21, 0x22, 0x23,
-        0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D,
-        0x2E, 0x2F, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37,
+    // LED 0 is "dark padding" — never lit per SSL UC1 hardware (user
+    // confirmed: "die -60db unterste LED leuchtet nie"). Effective
+    // range is LED 1..15 (15 visible LEDs).
+    //
+    // Per-LED thresholds derived from uc1_13's 4 calibration levels
+    // (silence / −20 / −10 / −6 / 0 dBFS):
+    //   At -20 dBFS: 22 cells lit = 11 LEDs (1..11) → threshold ≤ -20
+    //   At -10 dBFS: 30 cells lit = 15 LEDs (1..15) → top 4 LEDs
+    //                                                  threshold (-20, -10]
+    //   Distributed: bottom 11 LEDs cover roughly -50..-20 dBFS (3 dB/LED),
+    //                top 4 LEDs cover -20..-10 dBFS (2.5 dB/LED).
+    // Calibration is loose at the extremes — refine once we have a
+    // finer-grained capture (1 dB/step ramp).
+    constexpr int kNleds = 16;
+    static constexpr float kThreshold[kNleds] = {
+        // LED 0 = dark padding (threshold lower than any audio)
+        -200.f,
+        // LEDs 1..11 — must all light at -20 dBFS test → ≤ -20
+        -50.f, -47.f, -44.f, -41.f, -38.f,
+        -35.f, -32.f, -29.f, -26.f, -23.f, -20.f,
+        // LEDs 12..15 — must light between -20 and -10 dBFS → in (-20, -10]
+        -17.5f, -15.f, -12.5f, -10.f,
     };
 
-    auto countLeds = [&](float dB) -> int {
-        if (dB <= -60.f) return 0;
-        if (dB >= 0.f) return kNcells;
-        const int n = static_cast<int>((dB + 60.f) * (kNcells / 60.f) + 0.5f);
-        if (n < 0) return 0;
-        if (n > kNcells) return kNcells;
-        return n;
-    };
+    constexpr uint8_t kInputBase  = 0xA0;  // byte5=0x00
+    constexpr uint8_t kOutputBase = 0x18;  // byte5=0x01
 
-    // Custom frame builder: byte5 is per-meter (0x00 input, 0x01 output).
-    // bank=0x01 state=0x01 = LED lit, state=0x00 = LED off.
+    // Custom frame builder — byte5 is per-meter, can't use buildLedWrite
+    // (which hardcodes byte5=0x01).
     auto sendVu = [&](uint8_t cell, uint8_t byte5, uint8_t state) {
         std::vector<uint8_t> f;
         f.reserve(8);
@@ -2062,27 +2065,40 @@ void UC1Surface::pushCsVu(float dbInput, float dbOutput)
         device_->send(std::move(f));
     };
 
-    auto pushMeter = [&](const uint8_t* cells, uint8_t byte5, float dB,
-                         uint8_t (&lastStates)[kNcells]) {
-        const int n = countLeds(dB);
-        for (int i = 0; i < kNcells; ++i) {
-            const uint8_t target = (i < n) ? 0x01 : 0x00;
-            if (lastStates[i] != target) {
-                lastStates[i] = target;
-                sendVu(cells[i], byte5, target);
+    auto pushMeter = [&](uint8_t base, uint8_t byte5,
+                         float dbL, float dbR,
+                         uint8_t (&lastL)[kNleds],
+                         uint8_t (&lastR)[kNleds]) {
+        // LED 0 is forced dark (matches hardware where it never lights).
+        // For LEDs 1..15: each lights independently for L vs R when its
+        // channel's dB exceeds the LED's threshold.
+        for (int i = 0; i < kNleds; ++i) {
+            const uint8_t targetL = (i > 0 && dbL >= kThreshold[i]) ? 0x01 : 0x00;
+            const uint8_t targetR = (i > 0 && dbR >= kThreshold[i]) ? 0x01 : 0x00;
+            const uint8_t cellL = static_cast<uint8_t>(base + 2 * i);
+            const uint8_t cellR = static_cast<uint8_t>(base + 2 * i + 1);
+            if (lastL[i] != targetL) {
+                lastL[i] = targetL;
+                sendVu(cellL, byte5, targetL);
+            }
+            if (lastR[i] != targetR) {
+                lastR[i] = targetR;
+                sendVu(cellR, byte5, targetR);
             }
         }
     };
 
-    static uint8_t lastIn[kNcells];
-    static uint8_t lastOut[kNcells];
+    static uint8_t lastInL[kNleds],  lastInR[kNleds];
+    static uint8_t lastOutL[kNleds], lastOutR[kNleds];
     static bool initOnce = false;
     if (!initOnce) {
-        for (int i = 0; i < kNcells; ++i) { lastIn[i] = 0xFE; lastOut[i] = 0xFE; }
+        for (int i = 0; i < kNleds; ++i) {
+            lastInL[i] = lastInR[i] = lastOutL[i] = lastOutR[i] = 0xFE;
+        }
         initOnce = true;
     }
-    pushMeter(kInputCells,  0x00, dbInput,  lastIn);
-    pushMeter(kOutputCells, 0x01, dbOutput, lastOut);
+    pushMeter(kInputBase,  0x00, inputL,  inputR,  lastInL,  lastInR);
+    pushMeter(kOutputBase, 0x01, outputL, outputR, lastOutL, lastOutR);
 }
 
 } // namespace uc1

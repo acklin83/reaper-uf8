@@ -2830,8 +2830,11 @@ void onTimer()
     // now driven through sendLed() + the bank-shift refresh, this fallback
     // was overwriting the coloured frames with plain white on every tick.
     pushVuMeter();
-    // UC1 VU — same peak data, mapped to the focused track's L/R
-    // channels. Single meter-pair on UC1 (not per-strip).
+    // UC1 stereo VU — Input + Output meters, each L+R independently.
+    // Track_GetPeakInfo returns POST-FX track peaks. Input meter ideally
+    // wants pre-FX peak which REAPER doesn't expose — for now feed the
+    // same post-FX peaks to both meters (Input == Output until we wire
+    // a JSFX-probe pre-FX source).
     if (g_uc1_surface) {
         void* focus = g_uc1_surface->focusedTrack();
         if (focus) {
@@ -2842,7 +2845,9 @@ void onTimer()
                 if (p <= 0.0) return -120.f;
                 return static_cast<float>(20.0 * std::log10(p));
             };
-            g_uc1_surface->pushCsVu(peakToDb(pl), peakToDb(pr));
+            const float dbL = peakToDb(pl);
+            const float dbR = peakToDb(pr);
+            g_uc1_surface->pushCsVu(dbL, dbR, dbL, dbR);
         }
     }
     // UF8 GR — push only on change. Without a GR data source we leave
