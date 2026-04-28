@@ -2830,21 +2830,63 @@ void onTimer()
     // now driven through sendLed() + the bank-shift refresh, this fallback
     // was overwriting the coloured frames with plain white on every tick.
     pushVuMeter();
-    // UC1 stereo VU. Track_GetPeakInfo returns POST-FX peaks per channel;
-    // pre-FX peak isn't exposed by REAPER's ReaScript API (verified by
-    // searching reaper_plugin_functions.h end-to-end). Both meters get
-    // post-FX peak as a placeholder until pre-FX source is decided.
+    // UC1 stereo VU.
+    //   Output meter L/R: REAPER's Track_GetPeakInfo (post-FX track peak).
+    //   Input  meter L/R: AudioAccessor — reads samples "immediately
+    //                     pre-FX" per the API doc. Block-peak around the
+    //                     current play position. Accessor is cached per
+    //                     focused track and rebuilt on focus change.
     if (g_uc1_surface) {
         void* focus = g_uc1_surface->focusedTrack();
-        if (focus) {
+        static MediaTrack*    s_lastVuTrack = nullptr;
+        static AudioAccessor* s_vuAccessor  = nullptr;
+        auto teardownAccessor = [&] {
+            if (s_vuAccessor) {
+                DestroyAudioAccessor(s_vuAccessor);
+                s_vuAccessor = nullptr;
+            }
+            s_lastVuTrack = nullptr;
+        };
+        if (!focus) {
+            teardownAccessor();
+        } else {
             MediaTrack* tr = static_cast<MediaTrack*>(focus);
             auto peakToDb = [](double p) -> float {
                 if (p <= 0.0) return -120.f;
                 return static_cast<float>(20.0 * std::log10(p));
             };
-            const float dbL = peakToDb(Track_GetPeakInfo(tr, 0));
-            const float dbR = peakToDb(Track_GetPeakInfo(tr, 1));
-            g_uc1_surface->pushCsVu(dbL, dbR, dbL, dbR);
+            const float dbOutL = peakToDb(Track_GetPeakInfo(tr, 0));
+            const float dbOutR = peakToDb(Track_GetPeakInfo(tr, 1));
+
+            if (tr != s_lastVuTrack) {
+                teardownAccessor();
+                s_vuAccessor = CreateTrackAudioAccessor(tr);
+                s_lastVuTrack = tr;
+            }
+            float dbInL = -120.f;
+            float dbInR = -120.f;
+            if (s_vuAccessor) {
+                AudioAccessorValidateState(s_vuAccessor);
+                constexpr int kBlock  = 512;
+                constexpr int kNchans = 2;
+                constexpr int kSr     = 48000;
+                static double buf[kBlock * kNchans];
+                const double t = GetPlayPosition();
+                const int rc = GetAudioAccessorSamples(
+                    s_vuAccessor, kSr, kNchans, t, kBlock, buf);
+                if (rc > 0) {
+                    double pL = 0.0, pR = 0.0;
+                    for (int i = 0; i < kBlock; ++i) {
+                        const double sL = std::fabs(buf[i * 2]);
+                        const double sR = std::fabs(buf[i * 2 + 1]);
+                        if (sL > pL) pL = sL;
+                        if (sR > pR) pR = sR;
+                    }
+                    dbInL = peakToDb(pL);
+                    dbInR = peakToDb(pR);
+                }
+            }
+            g_uc1_surface->pushCsVu(dbInL, dbInR, dbOutL, dbOutR);
         }
     }
     // UF8 GR — push only on change. Without a GR data source we leave
