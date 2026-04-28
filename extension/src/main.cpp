@@ -337,6 +337,7 @@ std::vector<PendingInput>   g_inQueue;
 // Forward declarations for helpers defined later in the file but
 // referenced from drainInputQueue's FLIP-mode path.
 uint16_t linearVolumeToPb(double linear);
+double   pbToLinearVolume(uint16_t pb14);
 double   uiVolLinear(MediaTrack* tr);
 
 void queueInput(PendingInput e)
@@ -440,26 +441,67 @@ void drainInputQueue()
                 SetOnlyTrackSelected(tr);
                 followSelectedInMixer(tr);
                 break;
-            case PendingInput::VolumeAbs:
-                // CSurf_OnVolumeChange applies the user's new position to
+            case PendingInput::VolumeAbs: {
+                // FLIP: fader drives the focused plug-in parameter on this
+                // strip's track instead of track volume. We need the fader
+                // position in normalised [0..1] form — reverse the linear
+                // volume back through linearVolumeToPb to recover the pb14
+                // the user moved to (the round-trip is exact at pb14 res).
+                const auto focusedF = uf8::getFocusedParam();
+                auto mmF = uf8::lookupPluginOnTrack(tr, focusedF.domain);
+                const bool forcePanF = g_forcePan.load();
+                const uf8::LinkSlot* slF = (!forcePanF && mmF.map)
+                    ? uf8::findSlotByLinkIdx(*mmF.map, focusedF.slotIdx)
+                    : nullptr;
+                if (g_flip.load() && slF) {
+                    const uint16_t pbF = linearVolumeToPb(e.value);
+                    double normF = static_cast<double>(pbF) / 16383.0;
+                    if (slF->inverted) normF = 1.0 - normF;
+                    if (normF < 0.0) normF = 0.0;
+                    if (normF > 1.0) normF = 1.0;
+                    TrackFX_SetParamNormalized(tr, mmF.fxIndex,
+                        slF->vst3Param, normF);
+                    break;
+                }
+                // Normal: CSurf_OnVolumeChange applies the new position to
                 // the track AND broadcasts to other surfaces. We do not
                 // cache the value — motor echo reads GetTrackUIVolPan
                 // on each tick so it always reflects whatever REAPER
                 // actually has (including envelope playback).
                 CSurf_OnVolumeChange(tr, e.value, false);
                 break;
+            }
             case PendingInput::PanDelta: {
                 // V-pot rotation: if the strip's track hosts a plug-in of
                 // the focused domain (CS / BC) AND we're not in global Pan
                 // mode, drive the focused parameter on that strip's track.
                 // Otherwise fall back to track pan.
                 //
+                // FLIP exception: with a slot present, the V-Pot drives
+                // track volume in pb14 space instead of the param (the
+                // fader has taken over the param).
                 const auto focused = uf8::getFocusedParam();
                 auto mm = uf8::lookupPluginOnTrack(tr, focused.domain);
                 const bool forcePan = g_forcePan.load();
                 const uf8::LinkSlot* slPtr = (!forcePan && mm.map)
                     ? uf8::findSlotByLinkIdx(*mm.map, focused.slotIdx)
                     : nullptr;
+                if (g_flip.load() && slPtr) {
+                    // Map detent fraction (signed6/128) to pb14 delta —
+                    // single detent ≈ 128 pb (1/128 of full sweep, same
+                    // feel as the V-Pot driving the param). Fine quarters.
+                    const uint16_t curPb = linearVolumeToPb(uiVolLinear(tr));
+                    double dPb = e.value * 16383.0;
+                    if (g_shiftHeld.load()) dPb *= 0.25;
+                    int newPb = static_cast<int>(std::round(
+                        static_cast<double>(curPb) + dPb));
+                    if (newPb < 0) newPb = 0;
+                    if (newPb > 16383) newPb = 16383;
+                    const double newLin = pbToLinearVolume(
+                        static_cast<uint16_t>(newPb));
+                    CSurf_OnVolumeChange(tr, newLin, false);
+                    break;
+                }
                 if (slPtr) {
                     const uf8::LinkSlot& sl = *slPtr;
                     const double cur = TrackFX_GetParamNormalized(tr, mm.fxIndex,
@@ -489,12 +531,19 @@ void drainInputQueue()
                 // (and not in global Pan mode), reset the focused param to
                 // its midpoint. Otherwise, re-center pan.
                 //
+                // FLIP exception: with a slot present, the V-Pot push
+                // resets track volume to 0 dB (linear 1.0) — the V-Pot
+                // is driving volume.
                 const auto focused = uf8::getFocusedParam();
                 auto mm = uf8::lookupPluginOnTrack(tr, focused.domain);
                 const bool forcePan = g_forcePan.load();
                 const uf8::LinkSlot* slPtr = (!forcePan && mm.map)
                     ? uf8::findSlotByLinkIdx(*mm.map, focused.slotIdx)
                     : nullptr;
+                if (g_flip.load() && slPtr) {
+                    CSurf_OnVolumeChange(tr, 1.0, false);
+                    break;
+                }
                 if (slPtr) {
                     if (isBinarySlot(*slPtr)) {
                         // V-Pot push cycles to next discrete step. For a
