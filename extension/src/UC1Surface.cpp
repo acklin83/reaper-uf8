@@ -965,8 +965,18 @@ constexpr uint8_t kHpfCells[]    = {0x8A,0x8B,0x8C,0x8D,0x8E,0x8F,0x90,0x91,0x92
 constexpr uint8_t kHfGainCells[] = {0x7E,0x7F,0x80,0x81,0x82,0x83,0x84,0x85,0x86,0x87,0x88};
 constexpr uint8_t kHfFreqCells[] = {0x73,0x74,0x75,0x76,0x77,0x78,0x79,0x7A,0x7B,0x7C,0x7D};
 constexpr uint8_t kHmfGainCells[]= {0x68,0x69,0x6A,0x6B,0x6C,0x6D,0x6E,0x6F,0x70,0x71,0x72};
-constexpr uint8_t kHmfFreqCells[]= {0x5D,0x5E,0x5F,0x60,0x61,0x62,0x63,0x64,0x65,0x66,0x67};
-constexpr uint8_t kHmfQCells[]   = {0x52,0x53,0x54,0x55,0x56,0x57,0x58,0x59,0x5A,0x5B,0x5C};
+// Temporarily disabled (2026-04-28): HMF Freq + HMF Q ring cells overlap
+// with the CS Comp/Gate GR strip cells (0x5C..0x65). Even at different byte5
+// values, our writes here cause the GR strip to flicker on the user's
+// hardware (frame log diff vs dual_35: SSL360 emits ZERO byte5=0x00 frames
+// to these cells during a GR ramp; we emit 40+ from these ring renders,
+// each visibly disturbing Range/Release/Dyn In/Hold first-CCW LEDs that
+// double as GR-strip LEDs in PM mode). Empty cells = pushKnobRing_ no-ops.
+// Restore once we either (a) find a mode-switch frame that suppresses ring
+// rendering for these cells, or (b) confirm the cells are scoped per-byte5
+// in the firmware.
+constexpr uint8_t kHmfFreqCells[]= {};
+constexpr uint8_t kHmfQCells[]   = {0x52,0x53,0x54,0x55,0x56,0x57,0x58,0x59,0x5A,0x5B};
 constexpr uint8_t kLmfGainCells[]= {0x45,0x46,0x47,0x48,0x49,0x4A,0x4B,0x4C,0x4D,0x4E,0x4F};
 constexpr uint8_t kLmfFreqCells[]= {0x3A,0x3B,0x3C,0x3D,0x3E,0x3F,0x40,0x41,0x42,0x43,0x44};
 constexpr uint8_t kLmfQCells[]   = {0x2F,0x30,0x31,0x32,0x33,0x34,0x35,0x36,0x37,0x38,0x39};
@@ -1022,8 +1032,8 @@ const RingDef* ringFor(uint8_t knobId)
     static const RingDef kHfGain    {kHfGainCells,     11, G};
     static const RingDef kHfFreq    {kHfFreqCells,     11, P};
     static const RingDef kHmfGain   {kHmfGainCells,    11, G};
-    static const RingDef kHmfFreq   {kHmfFreqCells,    11, P};
-    static const RingDef kHmfQ      {kHmfQCells,       11, P};
+    static const RingDef kHmfFreq   {kHmfFreqCells,     0, P};  // disabled — overlaps GR strip
+    static const RingDef kHmfQ      {kHmfQCells,       10, P};  // last cell 0x5C dropped — overlaps GR strip
     static const RingDef kLmfGain   {kLmfGainCells,    11, G};
     static const RingDef kLmfFreq   {kLmfFreqCells,    11, P};
     static const RingDef kLmfQ      {kLmfQCells,       11, P};
