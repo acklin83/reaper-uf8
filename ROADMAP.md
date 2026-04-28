@@ -136,17 +136,58 @@ Reuses the existing `PluginMap` slot tables (CS2, 4K B/E/G, Bus Comp 2), `lookup
 
 **Milestone complete when:** A user with a 4K-G + CS2 + Bus Comp 2 mix can leave SSL 360° closed, drive every plugin parameter from the Rea-Sixty mixer window, see correct GR + audio meters, and the window auto-themes to whatever REAPER theme they have active (Reapertips by default in our setup, but no theme is bundled).
 
-## Phase 3 — Config UI
+## Phase 2.7 — Settings Screen
 
-**Goal:** Mappings editable without touching code.
+**Goal:** All Rea-Sixty configuration editable without touching code, surfaced from the same docked window as Phase 2.6's Plugin Mixer. A top-level TabBar inside that window switches between **Mixer** and **Settings**; no separate window, no extra action.
 
-Deliverables:
-- A WebView / Electron / native SwiftUI config UI equivalent to SSL 360°'s mapping screens: soft-keys, quick-keys, send/plugin rows, automation buttons, pan/shift, channel encoder, foot switches
-- Color-picker per button
-- Live preview on UF8 **and UC1**
-- Import/export JSON configs so users can share setups
+Supersedes the earlier Phase 3 design (Electron / SwiftUI standalone). Now that we already host ReaImGui from C++ for the mixer, the settings UI is just additional tabs in the same context — zero extra runtime cost.
 
-**Milestone complete when:** A non-developer user can remap controls via GUI on either device, save, reload, and see the change on the hardware.
+Source notes (to be consolidated into a single canonical spec during 2.7a):
+- `docs/plan-settings-ui.md` — original tab structure and layout
+- `docs/bindings.md` — concrete JSON binding format, Learn-mode flow, builtin action catalogue
+- Memory `uf8-softkey-banks.md` — UF8 PM-mode CS6 / BC2 bank tables, kNoSlot positions
+
+Settings tabs:
+
+| Tab | Source of truth | Purpose |
+|---|---|---|
+| Device | plan-settings-ui §"Device" | LED brightness, scribble brightness, meter ballistic, SEL-follows-color |
+| Bindings | bindings.md | Per-strip, transport, global buttons, soft-keys per layer, Learn mode |
+| Soft-Key Banks | uf8-softkey-banks.md | CS6 / BC2 bank tables with kNoSlot positions wirable to raw VST3 / REAPER actions |
+| Modes | ROADMAP 2.5 | Folder Mode, Show-Only-Selected, Send/Receive, Generic FX |
+| Selection Sets | ROADMAP 2.5b | 8 GUID-keyed track-selection slots per project |
+| About | — | Version, build hash, repo / ReaPack links |
+
+### 2.7a — Spec consolidation + Device + About
+
+- Merge plan-settings-ui.md and bindings.md into a single `docs/settings-spec.md`. Resolve disagreements (multi-tab vs flat scroll → multi-tab wins, that's the implementation).
+- Implement Device tab against existing UF8/UC1 globals.
+- Implement About tab — cheap.
+
+### 2.7b — Bindings tab + JSON persistence
+
+- Per-strip / transport / global-button / soft-key editor matching bindings.md §"Config UI Sketch".
+- JSON read/write to `~/.../REAPER/rea_sixty/bindings.json` with mtime watch + reload.
+- Learn-mode arming via ExtState handshake.
+
+### 2.7c — Soft-Key Banks tab
+
+- CS 6-bank + BC 2-bank grids reading authoritative tables from `softkey::` namespace.
+- kNoSlot wiring picker: raw VST3 param browser (uses `TrackFX_GetParamName`) + REAPER action picker (uses `kbd_getTextFromCmd`).
+- Per-position label + colour override.
+
+### 2.7d — Modes + Selection Sets tabs
+
+- Lands alongside the matching Phase 2.5 feature code, not before — these tabs configure features that don't exist yet.
+
+### 2.7e — Polish
+
+- Color-picker widget for button colours.
+- Import / export JSON for sharing configs between users.
+- Live preview to UF8 and UC1 — touched control highlights on the hardware.
+- Reset-to-defaults action.
+
+**Milestone complete when:** A non-developer user can remap any UF8/UC1 control via the Settings tab, save, reload across REAPER restarts, and see the change reflected on the hardware without restarting REAPER.
 
 ## Phase 4+ — Community
 
