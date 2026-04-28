@@ -1451,12 +1451,12 @@ void UC1Surface::pollButtonLeds_()
 void UC1Surface::pollBcBypassState_()
 {
     if (!device_) return;
-    MediaTrack* tr = static_cast<MediaTrack*>(focusedTrack_);
+    // BC lives on its own track (typically a bus), independent of the
+    // currently-focused track. Use the BC anchor — same source used by
+    // the BC carousel + display — so the backlight + cosmetic fire from
+    // BC presses regardless of where focus is.
+    MediaTrack* tr = static_cast<MediaTrack*>(effectiveBcTrack_());
     if (!tr) {
-        // No focused track — leave whatever state the firmware is in.
-        // When a track gets focused later, the next tick will fire the
-        // appropriate cosmetic + backlight write through the unknown→known
-        // transition below.
         lastBcBypassed_ = -1;
         return;
     }
