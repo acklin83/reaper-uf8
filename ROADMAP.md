@@ -98,6 +98,44 @@ No new captures required; everything here is REAPER-API work on top of the finis
 
 **Milestone complete when:** A user can (a) navigate a 200-track folder session on UF8 without leaving the surface, (b) save/recall 8 selection sets per project, (c) mix sends from UF8, and (d) bind any third-party plugin parameter to any V-Pot or soft-button with learn-mode and see the plugin's formatted value on the scribble strip.
 
+## Phase 2.6 — Plugin Mixer Window
+
+**Goal:** On-screen mixer view that mirrors SSL 360°'s Plugin Mixer — all SSL Channel Strip and Bus Compressor instances visible in a single docked window, fully interactive, themed to the user's REAPER theme. Closes the last gap where users still glance at SSL 360° instead of Rea-Sixty.
+
+Plan: see `~/.claude/plans/splendid-snuggling-hejlsberg.md` (verdict: native REAPER extension with vendored Dear ImGui inside a dockable SWELL window — same in-process model as the rest of the extension; rejected standalone-app variant).
+
+Reuses the existing `PluginMap` slot tables (CS2, 4K B/E/G, Bus Comp 2), `lookupPluginOnTrack`, and the Surface `Run()` tick. New code is purely UI + theme bridge.
+
+### 2.6a — Skeleton + theme bridge
+
+- Vendor `imgui` (docking branch) under `extension/vendor/imgui/`
+- Pull `icontheme.h` from upstream REAPER SDK into `extension/vendor/reaper-sdk/sdk/`
+- `MixerWindow.{cpp,h}` — SWELL window host, registers the action `Rea-Sixty: Toggle Plugin Mixer Window`, opens an OpenGL-backed ImGui context, docks via `DockWindowAddEx`
+- `ThemeBridge.{cpp,h}` — pulls `GetColorThemeStruct` + falls back to indexed `GetColorTheme`; tick-driven hash check to repush on theme change
+- Window opens, dock-state persists across REAPER restarts, theme switch in REAPER live-updates the empty window
+
+### 2.6b — Channel Strip column
+
+- `MixerLayout.{cpp,h}` — UC1-mirrored layout: Input → HPF/LPF → EQ HF/HMF/LMF/LF → Comp → Gate → Output → Fader+Audio-Meter
+- Knob + button widgets backed by `TrackFX_*Normalized`
+- GR meter via `TrackFX_GetNamedConfigParm(tr, fx, "GainReduction_dB", …)` — verifies SSL plugins expose the PreSonus VST3 GR extension to REAPER (user confirmed; in-code verification at this phase)
+- Audio-meter via `Track_GetPeakInfo` + `Track_GetPeakHoldDB` (already imported)
+- One track visible end-to-end before scaling out
+
+### 2.6c — Multi-column + Bus Compressor rack
+
+- 75% left: horizontally scrollable channel-strip columns, one per track that hosts a CS-family plugin
+- 25% right: vertical Bus Compressor rack — one strip per BC instance found via `lookupPluginOnTrack(tr, Domain::BusComp)`
+- Viewport-culling so a 200-track session reads only visible columns
+
+### 2.6d — Polish
+
+- Track-color headers (`GetTrackColor`), tooltips with formatted values, keyboard value entry
+- Trademark audit: no hardcoded SSL palette / no SSL/360° strings in user-facing text
+- Stress test at 100+ tracks; tune per-tick budget if `Run()` slows REAPER
+
+**Milestone complete when:** A user with a 4K-G + CS2 + Bus Comp 2 mix can leave SSL 360° closed, drive every plugin parameter from the Rea-Sixty mixer window, see correct GR + audio meters, and the window auto-themes to whatever REAPER theme they have active (Reapertips by default in our setup, but no theme is bundled).
+
 ## Phase 3 — Config UI
 
 **Goal:** Mappings editable without touching code.
@@ -123,7 +161,7 @@ Candidate work:
 
 ## Non-goals (at least for now)
 
-- Replacing SSL's plugin *GUIs* — the plugins keep their own UIs, we just drive parameters
+- Replacing the *individual plugin GUIs* — the plugins keep their own per-instance UIs (we don't redraw the EQ curve, the Bus Comp face plate, etc.). Phase 2.6 adds a *mixer-style overview* across instances; opening the plugin's own window is still the way to tweak details
 - Full binary compatibility with SSL 360° config files — we ship our own simpler JSON format with a one-time import from SSL 360° XML
 - Reverse-engineering any firmware — we only talk to the controllers through their existing USB protocols
 
