@@ -2830,24 +2830,41 @@ void onTimer()
     // now driven through sendLed() + the bank-shift refresh, this fallback
     // was overwriting the coloured frames with plain white on every tick.
     pushVuMeter();
-    // UC1 stereo VU — Input + Output meters, each L+R independently.
-    // Track_GetPeakInfo returns POST-FX track peaks. Input meter ideally
-    // wants pre-FX peak which REAPER doesn't expose — for now feed the
-    // same post-FX peaks to both meters (Input == Output until we wire
-    // a JSFX-probe pre-FX source).
+    // UC1 stereo VU.
+    //   Output meter L/R: REAPER's Track_GetPeakInfo (post-FX track peak)
+    //   Input  meter L/R: rea_sixty_gr_probe JSFX sliders 4+5
+    //                     (pre_peak_db_l, pre_peak_db_r) if the probe
+    //                     is on the focused track. Falls back to post-FX
+    //                     when the probe isn't installed yet — meters
+    //                     identical until the user inserts the JSFX.
     if (g_uc1_surface) {
         void* focus = g_uc1_surface->focusedTrack();
         if (focus) {
             MediaTrack* tr = static_cast<MediaTrack*>(focus);
-            const double pl = Track_GetPeakInfo(tr, 0);
-            const double pr = Track_GetPeakInfo(tr, 1);
             auto peakToDb = [](double p) -> float {
                 if (p <= 0.0) return -120.f;
                 return static_cast<float>(20.0 * std::log10(p));
             };
-            const float dbL = peakToDb(pl);
-            const float dbR = peakToDb(pr);
-            g_uc1_surface->pushCsVu(dbL, dbR, dbL, dbR);
+            const float dbOutL = peakToDb(Track_GetPeakInfo(tr, 0));
+            const float dbOutR = peakToDb(Track_GetPeakInfo(tr, 1));
+
+            float dbInL = dbOutL;
+            float dbInR = dbOutR;
+            const int nfx = TrackFX_GetCount(tr);
+            for (int i = 0; i < nfx; ++i) {
+                char name[128] = {0};
+                if (!TrackFX_GetFXName(tr, i, name, sizeof(name))) continue;
+                if (std::strstr(name, "Rea-Sixty GR Probe") == nullptr) continue;
+                // slider4 = pre_peak_db_l (param index 3),
+                // slider5 = pre_peak_db_r (param index 4).
+                double mn = 0.0, mx = 0.0;
+                const double pL = TrackFX_GetParam(tr, i, 3, &mn, &mx);
+                const double pR = TrackFX_GetParam(tr, i, 4, &mn, &mx);
+                dbInL = static_cast<float>(pL);
+                dbInR = static_cast<float>(pR);
+                break;
+            }
+            g_uc1_surface->pushCsVu(dbInL, dbInR, dbOutL, dbOutR);
         }
     }
     // UF8 GR — push only on change. Without a GR data source we leave

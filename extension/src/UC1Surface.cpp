@@ -2020,27 +2020,27 @@ void UC1Surface::pushCsVu(float inputL, float inputR,
     //   Output meter: byte5=0x01, base 0x18  (cells 0x18..0x37, 32 total)
     // bank=0x01, state=0x01 lit / 0x00 off (binary, no brightness).
     //
-    // LED 0 is "dark padding" — never lit per SSL UC1 hardware (user
-    // confirmed: "die -60db unterste LED leuchtet nie"). Effective
-    // range is LED 1..15 (15 visible LEDs).
+    // LED 0 is the -60 dBFS bottom LED. Stays lit whenever audio is
+    // present above -60 dBFS — uc1_13 capture didn't show its cells
+    // (0x18/0x19, 0xA0/0xA1) transitioning ON because SSL360 lit them
+    // during init (before capture started). Capture only saw the OFF
+    // transition at session end.
     //
-    // Per-LED thresholds derived from uc1_13's 4 calibration levels
-    // (silence / −20 / −10 / −6 / 0 dBFS):
-    //   At -20 dBFS: 22 cells lit = 11 LEDs (1..11) → threshold ≤ -20
-    //   At -10 dBFS: 30 cells lit = 15 LEDs (1..15) → top 4 LEDs
-    //                                                  threshold (-20, -10]
-    //   Distributed: bottom 11 LEDs cover roughly -50..-20 dBFS (3 dB/LED),
-    //                top 4 LEDs cover -20..-10 dBFS (2.5 dB/LED).
-    // Calibration is loose at the extremes — refine once we have a
-    // finer-grained capture (1 dB/step ramp).
+    // 16 LEDs total. Calibration points from uc1_13 (silence / -20 /
+    // -10 / -6 / 0 dBFS):
+    //   At -20 dBFS test: 12 LEDs lit (LED 0 always on + LEDs 1..11)
+    //   At -10 dBFS test: 16 LEDs lit (all)
+    //   ⇒ LED 11 threshold ≤ -20, LED 12 threshold > -20, LED 15 ≤ -10
+    // Distribution: 12 LEDs from -60..-20 (3.33 dB/LED), 4 LEDs from
+    // -20..-10 (2.5 dB/LED). Looser at the extremes — finer ramp capture
+    // would tighten the bottom 11 thresholds.
     constexpr int kNleds = 16;
     static constexpr float kThreshold[kNleds] = {
-        // LED 0 = dark padding (threshold lower than any audio)
-        -200.f,
-        // LEDs 1..11 — must all light at -20 dBFS test → ≤ -20
-        -50.f, -47.f, -44.f, -41.f, -38.f,
-        -35.f, -32.f, -29.f, -26.f, -23.f, -20.f,
-        // LEDs 12..15 — must light between -20 and -10 dBFS → in (-20, -10]
+        // LED 0..11 — LED 0 always lit on audio (-60 dBFS), LED 11 lights
+        // at the user's -20 dBFS test (so threshold ≤ -20).
+        -60.f, -56.67f, -53.33f, -50.f, -46.67f, -43.33f,
+        -40.f, -36.67f, -33.33f, -30.f, -26.67f, -23.33f,
+        // LEDs 12..15 — light between -20 and -10 dBFS.
         -17.5f, -15.f, -12.5f, -10.f,
     };
 
@@ -2069,12 +2069,12 @@ void UC1Surface::pushCsVu(float inputL, float inputR,
                          float dbL, float dbR,
                          uint8_t (&lastL)[kNleds],
                          uint8_t (&lastR)[kNleds]) {
-        // LED 0 is forced dark (matches hardware where it never lights).
-        // For LEDs 1..15: each lights independently for L vs R when its
-        // channel's dB exceeds the LED's threshold.
+        // Each LED i lights independently per channel when that channel's
+        // dB exceeds the LED's threshold. LED 0 (-60 dBFS) lights as
+        // soon as audio is present.
         for (int i = 0; i < kNleds; ++i) {
-            const uint8_t targetL = (i > 0 && dbL >= kThreshold[i]) ? 0x01 : 0x00;
-            const uint8_t targetR = (i > 0 && dbR >= kThreshold[i]) ? 0x01 : 0x00;
+            const uint8_t targetL = (dbL >= kThreshold[i]) ? 0x01 : 0x00;
+            const uint8_t targetR = (dbR >= kThreshold[i]) ? 0x01 : 0x00;
             const uint8_t cellL = static_cast<uint8_t>(base + 2 * i);
             const uint8_t cellR = static_cast<uint8_t>(base + 2 * i + 1);
             if (lastL[i] != targetL) {

@@ -29,6 +29,11 @@ tags:metering analysis
 slider1:gr_db=0<0,30,0.01>GR (dB)
 slider2:atk_ms=5<0.1,50,0.1>Envelope attack (ms)
 slider3:rel_ms=100<10,500,1>Envelope release (ms)
+// Pre-FX peak readouts — used by the extension to drive UC1's CS Input
+// VU meter (post-FX peaks come from REAPER's Track_GetPeakInfo). Updated
+// in @block at audio rate, polled by the extension at ~30 Hz timer rate.
+slider4:pre_peak_db_l=-120<-120,6,0.01>Pre-FX peak L (dB)
+slider5:pre_peak_db_r=-120<-120,6,0.01>Pre-FX peak R (dB)
 
 in_pin:Main L
 in_pin:Main R
@@ -41,6 +46,9 @@ out_pin:Main R
 eps = 1e-12;
 env_post = 0;
 env_pre  = 0;
+// Per-block peak trackers for L + R of the pre-FX sidechain tap.
+peak_pre_l = 0;
+peak_pre_r = 0;
 
 @slider
 atk_coeff = 1 - exp(-1 / (srate * atk_ms * 0.001));
@@ -61,6 +69,12 @@ env_pre  = pre  > env_pre
          ? env_pre  + atk_coeff * (pre  - env_pre)
          : env_pre  + rel_coeff * (pre  - env_pre);
 
+// Per-channel pre-FX peak — sample max-abs over the audio block.
+abs_pre_l = abs(spl2);
+abs_pre_r = abs(spl3);
+abs_pre_l > peak_pre_l ? peak_pre_l = abs_pre_l;
+abs_pre_r > peak_pre_r ? peak_pre_r = abs_pre_r;
+
 // Main path: pass the post-compressor signal through unchanged.
 // (spl0 and spl1 need no action — JSFX default is pass-through on the first
 // two out_pins.)
@@ -74,4 +88,15 @@ gr      = db_pre - db_post;
 gr < 0 ? gr = 0;
 gr > 30 ? gr = 30;
 slider1 = gr;
+
+// Per-channel pre-FX peak in dBFS. peak_pre_* is amplitude (0..1+);
+// 20*log10 converts to dBFS. Reset after publishing so the next block
+// starts fresh ("peak hold" is the extension's job at its own poll rate).
+slider4 = peak_pre_l > 0 ? 20 * log10(peak_pre_l + eps) : -120;
+slider5 = peak_pre_r > 0 ? 20 * log10(peak_pre_r + eps) : -120;
+peak_pre_l = 0;
+peak_pre_r = 0;
+
 sliderchange(slider1);
+sliderchange(slider4);
+sliderchange(slider5);
