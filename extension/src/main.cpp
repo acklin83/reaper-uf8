@@ -2223,6 +2223,50 @@ void pushZonesForVisibleSlots()
     }
 }
 
+// Mouse-edits in the SSL plug-in GUI: REAPER tracks the most recently
+// touched (track, fx, param) tuple via GetLastTouchedFX. Polling it on
+// each timer tick lets UF8 + UC1 chase plugin-GUI moves without the
+// user needing to first nudge a knob on UC1 / V-Pot on UF8.
+//
+// Dedup against the previous tuple so we don't pay map lookups every
+// tick when the user is idle. Static state is fine: timer is the
+// single caller, all on the main thread.
+//
+// Caveats handled inline:
+//   - master track (trWord low word == 0): skip
+//   - take-FX (high word of trWord nonzero): skip
+//   - record-FX (bit 24 of fxWord set): skip
+// Anything we don't understand falls through silently — chase is
+// best-effort.
+void chaseLastTouchedFx()
+{
+    int trWord = -1, fxWord = -1, paramIdx = -1;
+    if (!GetLastTouchedFX(&trWord, &fxWord, &paramIdx)) return;
+    static int lastTr = -2, lastFx = -2, lastParam = -2;
+    if (trWord == lastTr && fxWord == lastFx && paramIdx == lastParam) return;
+    lastTr = trWord; lastFx = fxWord; lastParam = paramIdx;
+
+    if ((trWord & 0xFFFF0000) != 0) return;        // take-FX
+    const int trLow = trWord & 0xFFFF;
+    if (trLow <= 0) return;                        // master / invalid
+    MediaTrack* tr = GetTrack(nullptr, trLow - 1);
+    if (!tr) return;
+
+    if ((fxWord >> 24) & 0x01) return;             // record-FX
+    const int fxIdx = fxWord & 0x00FFFFFF;
+
+    char fxName[512] = {0};
+    TrackFX_GetFXName(tr, fxIdx, fxName, sizeof(fxName));
+    const uf8::PluginMap* map = uf8::lookupPluginMapByName(fxName);
+    if (!map) return;
+
+    const int linkIdx = uf8::slotIdxForVst3Param(*map, paramIdx);
+    if (linkIdx < 0) return;
+
+    uf8::setFocus({map->domain, linkIdx});
+    if (g_uc1_surface) g_uc1_surface->setFocusedTrack(tr);
+}
+
 void commitDebouncedTouchReleases()
 {
     const auto now = std::chrono::steady_clock::now();
@@ -2560,6 +2604,7 @@ void onTimer()
         g_globalLedsInit = false;
     }
     g_lastTrackCountForReinit = currentTrackCount;
+    chaseLastTouchedFx();
     drainInputQueue();
     commitDebouncedTouchReleases();
     if (g_sync) g_sync->refresh(reaperColorForVisibleSlot);
