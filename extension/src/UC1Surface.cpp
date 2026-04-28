@@ -1997,27 +1997,9 @@ void UC1Surface::pushVu(uint8_t meter, uint8_t level)
 void UC1Surface::pushCsVu(float dbInput, float dbOutput)
 {
     if (!device_) return;
-    // DISABLED 2026-04-28: kInputCells / kOutputCells below were an
-    // unverified guess from `dual_36_cs_vu_ramp.pcapng` that maps to
-    // RING CELLS, not to the actual CS VU strip. With byte5=0x01
-    // (hardcoded in buildLedWrite), these writes hit:
-    //   cell 0x50 → Comp Release LED 0
-    //   cell 0x66 → Gate Range LED 0
-    //   cell 0x71 → just past Gate Range (Dyn In area)
-    //   cell 0x87 → Gate Hold LED 0
-    // As VU rises with audio level (which correlates with GR), more
-    // of those cells light → user sees "Range CCW1 / Release CCW1 /
-    // Dyn In / Hold CCW1 going off in sequence as GR rises".
-    // Disable until we capture the real CS VU cells. Better silent
-    // than corrupting the dynamics section's knob ring displays.
-    return;
 
     // BC-bypass cascade: when the focused track's BC plug-in is
-    // bypassed, force both VU strips to silent so the meter goes
-    // visually dark (= "Hintergrundlicht löschen" in the user's
-    // brief). Computed once per call against the focused track's
-    // bindings. Cheap: one TrackFX_GetParamNormalized when BC2 is on
-    // the track, otherwise short-circuited to false.
+    // bypassed, silence both meters.
     if (focusedTrack_) {
         UC1Bindings b = lookupBindingsOnTrack(focusedTrack_);
         if (b.busCompMap && b.busCompMap->bypassParam != kParamNone) {
@@ -2031,59 +2013,76 @@ void UC1Surface::pushCsVu(float dbInput, float dbOutput)
         }
     }
 
-    // 16 LED thresholds per meter (user's capture brief):
-    // "16 Stück je auf: alle aus, -60, -50, -40, -30, -27, -24, -21,
-    // -18, -15, -12, -9, -6, -3, -2, -1 und 0". Each LED is plain
-    // on/off — no per-LED brightness.
-    static constexpr float kDbThreshold[16] = {
-        -60.f, -50.f, -40.f, -30.f, -27.f, -24.f, -21.f, -18.f,
-        -15.f, -12.f,  -9.f,  -6.f,  -3.f,  -2.f,  -1.f,   0.f,
+    // Cell map decoded 2026-04-28 from `uc1_13_vu_meters.pcapng` — the
+    // user's level-stepped CS VU test (silence / −20 / −10 / −6 / 0 dBFS).
+    // Each meter is 30 cells, bank=0x01, state=0x01 lit / 0x00 off.
+    //   Input  meter: byte5=0x00, cells 0xA2..0xBF
+    //   Output meter: byte5=0x01, cells 0x1A..0x37
+    // (Input/output assignment is a best guess — user can flip if reversed.)
+    //
+    // Threshold distribution: linear over −60..0 dBFS across 30 LEDs.
+    // At −20 dBFS the capture lit 22 cells; linear maps to ~20 — close
+    // enough until we calibrate exact per-LED dB.
+    constexpr int kNcells = 30;
+    static constexpr uint8_t kInputCells[kNcells] = {
+        0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB,
+        0xAC, 0xAD, 0xAE, 0xAF, 0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5,
+        0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xBB, 0xBC, 0xBD, 0xBE, 0xBF,
+    };
+    static constexpr uint8_t kOutputCells[kNcells] = {
+        0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20, 0x21, 0x22, 0x23,
+        0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D,
+        0x2E, 0x2F, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37,
     };
 
-    // Cell-to-LED mapping is a best-guess from dual_36 capture: 16
-    // cells per meter, written in ascending cell-number order during
-    // SSL's "all-on" mass refresh at t=30.14. Visually unverified —
-    // user can swap cells or mirror the in/out pair after testing.
-    static constexpr uint8_t kInputCells[16] = {
-        0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x45, 0x50, 0x66,
-        0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78,
-    };
-    static constexpr uint8_t kOutputCells[16] = {
-        0x79, 0x7A, 0x7B, 0x7C, 0x87, 0x5B, 0x5C, 0x5D,
-        // Only 8 of 16 mapped — remaining 8 unknown without more capture.
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    };
-
-    // dB → N = number of LEDs lit (0..16). One LED lights per crossed
-    // threshold. At threshold[i] LEDs 0..i-1 are on, LED i lights at
-    // threshold[i+1], etc. At threshold[15] (0 dBFS) all 16 are on.
     auto countLeds = [&](float dB) -> int {
-        int n = 0;
-        for (int i = 0; i < 16; ++i) {
-            if (dB >= kDbThreshold[i]) n = i + 1; else break;
-        }
+        if (dB <= -60.f) return 0;
+        if (dB >= 0.f) return kNcells;
+        const int n = static_cast<int>((dB + 60.f) * (kNcells / 60.f) + 0.5f);
+        if (n < 0) return 0;
+        if (n > kNcells) return kNcells;
         return n;
     };
 
-    auto pushMeter = [&](const uint8_t* cells, float dB,
-                         uint8_t (&lastStates)[16]) {
+    // Custom frame builder: byte5 is per-meter (0x00 input, 0x01 output).
+    // bank=0x01 state=0x01 = LED lit, state=0x00 = LED off.
+    auto sendVu = [&](uint8_t cell, uint8_t byte5, uint8_t state) {
+        std::vector<uint8_t> f;
+        f.reserve(8);
+        f.push_back(0xFF);
+        f.push_back(0x13);
+        f.push_back(0x04);
+        f.push_back(0x01);          // bank
+        f.push_back(cell);
+        f.push_back(byte5);
+        f.push_back(state);
+        uint32_t sum = 0;
+        for (size_t k = 1; k < f.size(); ++k) sum += f[k];
+        f.push_back(static_cast<uint8_t>(sum & 0xFF));
+        device_->send(std::move(f));
+    };
+
+    auto pushMeter = [&](const uint8_t* cells, uint8_t byte5, float dB,
+                         uint8_t (&lastStates)[kNcells]) {
         const int n = countLeds(dB);
-        for (int i = 0; i < 16; ++i) {
-            if (cells[i] == 0x00) continue;  // unmapped slot
-            const uint8_t target = (i < n) ? 0xFF : 0x00;
+        for (int i = 0; i < kNcells; ++i) {
+            const uint8_t target = (i < n) ? 0x01 : 0x00;
             if (lastStates[i] != target) {
                 lastStates[i] = target;
-                device_->send(buildLedWrite(0x02, cells[i], target));
+                sendVu(cells[i], byte5, target);
             }
         }
     };
 
-    static uint8_t lastIn[16]  = {0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE,
-                                   0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE};
-    static uint8_t lastOut[16] = {0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE,
-                                   0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE};
-    pushMeter(kInputCells,  dbInput,  lastIn);
-    pushMeter(kOutputCells, dbOutput, lastOut);
+    static uint8_t lastIn[kNcells];
+    static uint8_t lastOut[kNcells];
+    static bool initOnce = false;
+    if (!initOnce) {
+        for (int i = 0; i < kNcells; ++i) { lastIn[i] = 0xFE; lastOut[i] = 0xFE; }
+        initOnce = true;
+    }
+    pushMeter(kInputCells,  0x00, dbInput,  lastIn);
+    pushMeter(kOutputCells, 0x01, dbOutput, lastOut);
 }
 
 } // namespace uc1
