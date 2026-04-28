@@ -2831,11 +2831,16 @@ void onTimer()
     // was overwriting the coloured frames with plain white on every tick.
     pushVuMeter();
     // UC1 stereo VU.
-    //   Output meter L/R: REAPER's Track_GetPeakInfo (post-FX track peak).
-    //   Input  meter L/R: AudioAccessor — reads samples "immediately
-    //                     pre-FX" per the API doc. Block-peak around the
-    //                     current play position. Accessor is cached per
-    //                     focused track and rebuilt on focus change.
+    //   Input  meter L/R: AudioAccessor (samples "immediately pre-FX"
+    //                     per REAPER docs). Pre-CS, pre-everything.
+    //   Output meter L/R: by default Track_GetPeakInfo (post-FX-chain,
+    //                     == what REAPER's track meter shows). User
+    //                     toggle via ExtState ("Rea-Sixty" /
+    //                     "cs_output_source"): "track" (default) shows
+    //                     post-FX-chain; "off" silences the strip.
+    //                     Default-on because the post-FX level is what
+    //                     the user hears, which is genuinely useful;
+    //                     toggle exists for purist SSL UC1 fidelity.
     if (g_uc1_surface) {
         void* focus = g_uc1_surface->focusedTrack();
         static MediaTrack*    s_lastVuTrack = nullptr;
@@ -2855,8 +2860,16 @@ void onTimer()
                 if (p <= 0.0) return -120.f;
                 return static_cast<float>(20.0 * std::log10(p));
             };
-            const float dbOutL = peakToDb(Track_GetPeakInfo(tr, 0));
-            const float dbOutR = peakToDb(Track_GetPeakInfo(tr, 1));
+
+            // Output meter source — ExtState toggle, default = track meter.
+            float dbOutL = -120.f;
+            float dbOutR = -120.f;
+            const char* outSrc = GetExtState("Rea-Sixty", "cs_output_source");
+            if (!outSrc || !*outSrc || std::strcmp(outSrc, "track") == 0) {
+                dbOutL = peakToDb(Track_GetPeakInfo(tr, 0));
+                dbOutR = peakToDb(Track_GetPeakInfo(tr, 1));
+            }
+            // "off" or any unrecognised value → leave at -120 (silent).
 
             if (tr != s_lastVuTrack) {
                 teardownAccessor();
