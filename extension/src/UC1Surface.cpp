@@ -1519,17 +1519,27 @@ void UC1Surface::pollGainReduction_()
         if (b.busCompMap) bcGr = readGr(bcTr, b.busCompFxIdx);
     }
 
-    // CS: drives the 5-LED Comp GR strip. Source is the focused track's
-    // Channel Strip plug-in (where the CS GR makes sense — it's the
-    // selection-following compressor on the strip).
-    float csGr = 0.0f;
+    // CS Comp GR: drives the 5-LED Comp strip. Source is the focused
+    // track's CS plug-in's combined GainReduction_dB (Comp + Gate
+    // contributions blended; in practice the Gate's contribution shows
+    // up as a Range-sized spike when gating, so the Comp strip is the
+    // closest thing we have to "comp activity" without separate readout).
+    float csCompGr = 0.0f;
     MediaTrack* csTr = static_cast<MediaTrack*>(focusedTrack_);
     if (csTr) {
         UC1Bindings b = lookupBindingsOnTrack(csTr);
-        if (b.channelMap) csGr = readGr(csTr, b.channelFxIdx);
+        if (b.channelMap) csCompGr = readGr(csTr, b.channelFxIdx);
     }
 
-    pushGainReduction(bcGr, csGr);
+    // CS Gate GR: TODO. SSL CS2 doesn't expose a Gate-only readout via
+    // GainReduction_dB; the user's hardware shows Gate GR independently
+    // (it lit up alongside the Range knob during dual_35 capture work).
+    // Until we find the right data source (separate parmname? Range param
+    // value? real-time signal vs Gate-Threshold?), drive at 0 so the
+    // strip stays dark — better than mirroring Comp GR onto it.
+    float csGateGr = 0.0f;
+
+    pushGainReduction(bcGr, csCompGr, csGateGr);
 }
 
 void UC1Surface::pollKnobRings_()
@@ -1881,7 +1891,7 @@ void UC1Surface::refresh()
     pushFocusedParamReadout_();
 }
 
-void UC1Surface::pushGainReduction(float bcGrDb, float csGrDb)
+void UC1Surface::pushGainReduction(float bcGrDb, float csCompGrDb, float csGateGrDb)
 {
     if (!device_) return;
     // Bus Comp meter (FF 5B 02) — UC1Device streams this at 50 Hz on
@@ -1896,50 +1906,45 @@ void UC1Surface::pushGainReduction(float bcGrDb, float csGrDb)
     //   bank=0x01 state=0x01 → mark cell as "active in GR group" (selection)
     //   bank=0x02 state=<brightness> → set brightness within the group
     // Without the bank=0x01 selection bit, the bank=0x02 brightness write
-    // falls through to a different LED bank — user-observed 2026-04-28:
-    // bank=0x02-only writes light/dim the first-CCW LED of Comp Release /
-    // Gate Range / Dyn In / Gate Hold instead of the GR strip itself.
-    // Same pair-write rule as `uc1-led-button-invariants.md` documents
-    // for status-register LEDs (Solo/Cut/etc).
+    // falls through to a different LED bank (lights the first-CCW LED of
+    // Comp Release / Gate Range / Dyn In / Gate Hold). Same pair-write
+    // rule as the bank=0x01-required status-register LEDs.
     //
     // Brightness: 5 visible steps {0x19, 0x2D, 0x54, 0x99, 0xFF}, ~3 dB
-    // per LED, 0.6 dB per sub-step. Verified from `dual_35_cs_gr_ramp`
-    // (state ramp on cells 0x5C..0x60 with paired bank=0x01 selection +
-    // bank=0x02 brightness frames).
-    //
-    // Both strips driven by the same csGrDb. SSL CS2's GainReduction_dB
-    // returns one combined Comp+Gate GR — and per the user's insight,
-    // that's correct: when the Gate fires, GR jumps by Range, so the
-    // single readout already encodes both contributions.
+    // per LED, 0.6 dB per sub-step. Verified from `dual_35_cs_gr_ramp`.
     static const uint8_t kLevels[5] = {0x19, 0x2D, 0x54, 0x99, 0xFF};
-    static uint8_t lastComp[5] = {0xFE, 0xFE, 0xFE, 0xFE, 0xFE};
-    static uint8_t lastGate[5] = {0xFE, 0xFE, 0xFE, 0xFE, 0xFE};
 
-    float gr = csGrDb;
-    if (gr < 0) gr = 0;
-    const int pos = static_cast<int>(gr / 0.6f);  // 0..24 across 15 dB
-    const int active = (pos / 5 > 4) ? 4 : (pos / 5);   // which LED (0..4)
-    const int sub    = (pos % 5 > 4) ? 4 : (pos % 5);   // sub-level 0..4
+    auto stripTargets = [&](float dB, uint8_t (&out)[5]) {
+        if (dB < 0) dB = 0;
+        const int pos = static_cast<int>(dB / 0.6f);  // 0..24 across 15 dB
+        const int active = (pos / 5 > 4) ? 4 : (pos / 5);
+        const int sub    = (pos % 5 > 4) ? 4 : (pos % 5);
+        for (int i = 0; i < 5; ++i) out[i] = 0;
+        for (int i = 0; i < active; ++i) out[i] = 0xFF;
+        out[active] = (pos == 0 && dB < 0.3f) ? 0x00 : kLevels[sub];
+    };
 
-    uint8_t target[5] = {0, 0, 0, 0, 0};
-    for (int i = 0; i < active; ++i) target[i] = 0xFF;  // fully past this LED → full
-    target[active] = (pos == 0 && gr < 0.3f) ? 0x00 : kLevels[sub];
-    // LEDs past active stay 0
-
-    auto pushStrip = [&](uint8_t baseCell, uint8_t (&cache)[5]) {
+    auto pushStrip = [&](uint8_t baseCell, const uint8_t (&target)[5],
+                         uint8_t (&cache)[5]) {
         for (int i = 0; i < 5; ++i) {
             if (target[i] != cache[i]) {
                 const uint8_t cell = static_cast<uint8_t>(baseCell + i);
                 const uint8_t selState = target[i] ? 0x01 : 0x00;
-                // Pair-write: selection (bank=0x01) then brightness (bank=0x02).
                 device_->send(buildLedWrite(0x01, cell, selState));
                 device_->send(buildLedWrite(0x02, cell, target[i]));
                 cache[i] = target[i];
             }
         }
     };
-    pushStrip(0x5C, lastComp);
-    pushStrip(0x61, lastGate);
+
+    static uint8_t lastComp[5] = {0xFE, 0xFE, 0xFE, 0xFE, 0xFE};
+    static uint8_t lastGate[5] = {0xFE, 0xFE, 0xFE, 0xFE, 0xFE};
+    uint8_t compTarget[5];
+    uint8_t gateTarget[5];
+    stripTargets(csCompGrDb, compTarget);
+    stripTargets(csGateGrDb, gateTarget);
+    pushStrip(0x5C, compTarget, lastComp);
+    pushStrip(0x61, gateTarget, lastGate);
 }
 
 void UC1Surface::pushVu(uint8_t meter, uint8_t level)

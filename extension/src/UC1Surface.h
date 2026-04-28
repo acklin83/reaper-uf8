@@ -72,16 +72,17 @@ public:
     // or after the user edits plugin params in REAPER.
     void refresh();
 
-    // Push GR values (positive dB of reduction) to the UC1's two GR
+    // Push GR values (positive dB of reduction) to the UC1's three GR
     // surfaces independently:
-    //   bcGrDb → BC mechanical needle (FF 5B stream at 50 Hz)
-    //   csGrDb → CS Comp 5-LED strip (cells 0x5C..0x60)
+    //   bcGrDb       → BC mechanical needle (FF 5B stream at 50 Hz)
+    //   csCompGrDb   → CS Comp 5-LED strip (cells 0x5C..0x60)
+    //   csGateGrDb   → CS Gate 5-LED strip (cells 0x61..0x65)
     // Thread-safe; enqueued and flushed on the next send. Safe to call
-    // at any rate (clamped internally). Both default to 0 to silence the
+    // at any rate (clamped internally). Defaults to 0 silence the
     // respective surface.
-    void pushGainReduction(float bcGrDb, float csGrDb);
-    // Convenience: both meters get the same value.
-    void pushGainReduction(float dB) { pushGainReduction(dB, dB); }
+    void pushGainReduction(float bcGrDb, float csCompGrDb, float csGateGrDb);
+    // Convenience: same value to all three meters.
+    void pushGainReduction(float dB) { pushGainReduction(dB, dB, dB); }
 
     // Push a VU level (0..255 byte value) for input/output meter.
     // meter: 0 = input, 1 = output.
