@@ -2628,6 +2628,8 @@ bool g_lastFlip = false;
 int  g_lastSoftKeyBank = -1;
 bool g_lastShiftHeld = false;
 EncoderMode g_lastEncoderMode = EncoderMode::Nav;
+int  g_lastPageLeftLit  = -1;     // -1 = unknown / 0 = off / 1 = on
+int  g_lastPageRightLit = -1;
 bool g_globalLedsInit = false;
 
 // Map REAPER's automation-mode integer to a position in kAutoLeds.
@@ -2697,10 +2699,23 @@ void pushUf8GlobalLeds()
     const EncoderMode encMode  = g_encoderMode.load();
     const int  softKeyBank     = g_softKeyBank.load();
 
+    // Page ← / Page → LED state — lit when stepping in that direction
+    // is still possible (bank > 0 / bank < maxBank). Domain follows
+    // focused-param; default ChannelStrip when None.
+    const auto pageDomain = []{
+        const auto fp = uf8::getFocusedParam();
+        return (fp.domain == uf8::Domain::BusComp)
+            ? uf8::Domain::BusComp : uf8::Domain::ChannelStrip;
+    }();
+    const int  pageMaxBank = softkey::maxBankFor(pageDomain);
+    const int  pageLeftLit  = (softKeyBank > 0)            ? 1 : 0;
+    const int  pageRightLit = (softKeyBank < pageMaxBank)  ? 1 : 0;
+
     if (g_globalLedsInit && autoMode == g_lastAutoMode &&
         anyArmed == g_lastAnyArmed && forcePan == g_lastForcePan &&
         flip == g_lastFlip && shiftHeld == g_lastShiftHeld &&
-        encMode == g_lastEncoderMode && softKeyBank == g_lastSoftKeyBank) {
+        encMode == g_lastEncoderMode && softKeyBank == g_lastSoftKeyBank &&
+        pageLeftLit == g_lastPageLeftLit && pageRightLit == g_lastPageRightLit) {
         return;
     }
 
@@ -2743,6 +2758,19 @@ void pushUf8GlobalLeds()
         sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Soft4,    softKeyBank == 4));
         sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Soft5,    softKeyBank == 5));
         g_lastSoftKeyBank = softKeyBank;
+    }
+
+    // Page ← / Page → LEDs — lit when a step in that direction is
+    // available (bank not at the edge of the domain's max range).
+    if (pageLeftLit != g_lastPageLeftLit || !g_globalLedsInit) {
+        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::PageLeft,
+                                             pageLeftLit == 1));
+        g_lastPageLeftLit = pageLeftLit;
+    }
+    if (pageRightLit != g_lastPageRightLit || !g_globalLedsInit) {
+        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::PageRight,
+                                             pageRightLit == 1));
+        g_lastPageRightLit = pageRightLit;
     }
 
     // Channel-encoder mode LEDs — exactly one of Nav/Nudge/Focus is bright,
