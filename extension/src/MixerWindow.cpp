@@ -1,34 +1,67 @@
 #include "MixerWindow.h"
+#include "ThemeBridge.h"
+
+// One translation unit must define REAIMGUIAPI_IMPLEMENT before including the
+// header — this materialises the storage for the lazy-resolved ReaImGuiFunc
+// instances. Every other TU just `#include "reaper_imgui_functions.h"` and
+// uses them as if they were free functions.
+#define REAIMGUIAPI_IMPLEMENT
+#include "reaper_imgui_functions.h"
 
 namespace uf8 {
 
 struct MixerWindow::Impl {
-    bool open = false;
+    ImGui_Context* ctx = nullptr;
+
+    void create()
+    {
+        if (ctx) return;
+        // Title is also the OS window title. v0.1.1 ImGui_CreateContext
+        // creates the context and an OS-level window in one call.
+        ctx = ImGui_CreateContext(
+            "Rea-Sixty Plugin Mixer",
+            /*size_w*/ 1280, /*size_h*/ 720,
+            /*pos_x*/ nullptr, /*pos_y*/ nullptr);
+    }
+
+    void destroy()
+    {
+        if (!ctx) return;
+        ImGui_DestroyContext(ctx);
+        ctx = nullptr;
+    }
 };
 
 MixerWindow::MixerWindow()  : impl_(new Impl) {}
-MixerWindow::~MixerWindow() { delete impl_; }
+MixerWindow::~MixerWindow() { if (impl_) impl_->destroy(); delete impl_; }
 
 void MixerWindow::toggle()
 {
-    impl_->open = !impl_->open;
-    // Phase 2.6a: create/destroy the SWELL window + ImGui context here.
-    //   - SWELL_CreateDialog or raw NSWindow/NSOpenGLView via swell-cocoa hook
-    //   - DockWindowAddEx(hwnd, "Rea-Sixty Mixer", "rea_sixty_mixer", true)
-    //   - ImGui::CreateContext(); ImGui_ImplOpenGL3_Init(...)
+    if (impl_->ctx) impl_->destroy();
+    else            impl_->create();
 }
 
-bool MixerWindow::isOpen() const { return impl_->open; }
+bool MixerWindow::isOpen() const { return impl_->ctx != nullptr; }
 
 void MixerWindow::onRunTick()
 {
-    if (!impl_->open) return;
-    // Phase 2.6a:
-    //   ThemeBridge::tick();          // re-pull on theme-hash change
-    //   ImGui_ImplOpenGL3_NewFrame(); ImGui_ImplOSPlatform_NewFrame();
-    //   ImGui::NewFrame();
-    //   MixerLayout::draw();
-    //   ImGui::Render(); ImGui_ImplOpenGL3_RenderDrawData(...);
+    if (!impl_->ctx) return;
+
+    const int pushed = ThemeBridge::pushAll(impl_->ctx);
+
+    bool open = true;
+    if (ImGui_Begin(impl_->ctx, "Mixer", &open, /*flags*/ nullptr)) {
+        // Phase 2.6a placeholder. 2.6b fills in MixerLayout::draw(ctx).
+        ImGui_Text(impl_->ctx, "Plugin Mixer — scaffold");
+    }
+    ImGui_End(impl_->ctx);
+
+    ThemeBridge::popAll(impl_->ctx, pushed);
+
+    // User clicked the close button → tear the context down on the
+    // following tick (defer until *after* End to keep the API contract
+    // clean).
+    if (!open) impl_->destroy();
 }
 
 } // namespace uf8

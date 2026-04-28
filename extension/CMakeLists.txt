@@ -84,6 +84,7 @@ endif()
 target_include_directories(reaper_uf8 PRIVATE
     src
     "${REAPER_SDK_DIR}/sdk"
+    "${VENDOR_DIR}/reaimgui"
 )
 
 target_link_libraries(reaper_uf8 PRIVATE PkgConfig::LIBUSB)
