@@ -1332,9 +1332,6 @@ void onUf8Input(const uint8_t* data, size_t len)
                     std::snprintf(line, sizeof(line),
                         "Plugin button: faderMode=%d\n", next ? 1 : 0);
                     ShowConsoleMsg(line);
-                    // Force immediate LED re-emit by invalidating cache
-                    // — without this we'd wait up to ~33 ms for next tick.
-                    g_lastPluginLit = -1;
                 }
                 handledNatively = true;
             } else if (id == 0x6E) {
