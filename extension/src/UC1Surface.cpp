@@ -1888,12 +1888,23 @@ void UC1Surface::pushGainReduction(float bcGrDb, float csGrDb)
     // its own; just update the cached value with the BC-side dB.
     device_->setGainReduction(bcGrDb);
 
-    // Channel-Strip Dynamics GR LEDs (5 discrete LEDs at bank=0x01,
-    // cells 0x5C..0x60, per-LED brightness with 5 visible steps).
-    // Mapping: ~3 dB per LED, 5 steps per LED = 0.6 dB per step.
-    // Brightness states from the capture: {0x19, 0x2D, 0x54, 0x99, 0xFF}.
+    // Channel-Strip Dynamics GR LEDs.
+    //   Comp GR strip: bank=0x02 byte5=0x01, cells 0x5C..0x60  (5 LEDs)
+    //   Gate GR strip: bank=0x02 byte5=0x01, cells 0x61..0x65  (5 LEDs)
+    // Both strips use per-LED brightness with 5 visible steps {0x19, 0x2D,
+    // 0x54, 0x99, 0xFF}, ~3 dB per LED, 0.6 dB per sub-step. Bank verified
+    // from `dual_35_cs_gr_ramp.pcapng` (state ramp 0x19 → 0xFF on cells
+    // 0x5C..0x60 with bank=0x02). Earlier memory map said bank=0x01 — was
+    // wrong; bank=0x01 with these cells hits Comp-Release / Gate-Range /
+    // Gate-Hold / Dyn-In LEDs (user-observed 2026-04-28).
+    //
+    // Until SSL splits Comp vs Gate GR via separate API readouts, drive
+    // both strips with the same csGrDb value — gives the user a visible
+    // GR indicator on both hardware strips even if it's not strictly
+    // independent metering.
     static const uint8_t kLevels[5] = {0x19, 0x2D, 0x54, 0x99, 0xFF};
-    static uint8_t lastStates[5] = {0xFE, 0xFE, 0xFE, 0xFE, 0xFE};
+    static uint8_t lastComp[5] = {0xFE, 0xFE, 0xFE, 0xFE, 0xFE};
+    static uint8_t lastGate[5] = {0xFE, 0xFE, 0xFE, 0xFE, 0xFE};
 
     float gr = csGrDb;
     if (gr < 0) gr = 0;
@@ -1906,12 +1917,17 @@ void UC1Surface::pushGainReduction(float bcGrDb, float csGrDb)
     target[active] = (pos == 0 && gr < 0.3f) ? 0x00 : kLevels[sub];
     // LEDs past active stay 0
 
-    for (int i = 0; i < 5; ++i) {
-        if (target[i] != lastStates[i]) {
-            lastStates[i] = target[i];
-            device_->send(buildLedWrite(0x01, static_cast<uint8_t>(0x5C + i), target[i]));
+    auto pushStrip = [&](uint8_t baseCell, uint8_t (&cache)[5]) {
+        for (int i = 0; i < 5; ++i) {
+            if (target[i] != cache[i]) {
+                cache[i] = target[i];
+                device_->send(buildLedWrite(0x02,
+                    static_cast<uint8_t>(baseCell + i), target[i]));
+            }
         }
-    }
+    };
+    pushStrip(0x5C, lastComp);
+    pushStrip(0x61, lastGate);
 }
 
 void UC1Surface::pushVu(uint8_t meter, uint8_t level)
