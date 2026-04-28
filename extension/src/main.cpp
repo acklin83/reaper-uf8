@@ -2241,10 +2241,25 @@ void commitDebouncedTouchReleases()
 
         // Snap REAPER to the user's last raw fader position (regardless
         // of the >=4-LSB deadband) so REAPER reflects where the fader
-        // ended up.
+        // ended up. In FLIP mode the fader drives the focused param
+        // instead of track volume, so the snap goes to the param.
         if (g_lastTouchPbValid[s].load()) {
             const uint16_t touchPb = g_lastTouchPb[s].load();
-            CSurf_OnVolumeChange(tr, pbToLinearVolume(touchPb), false);
+            const auto focusedT = uf8::getFocusedParam();
+            auto mmT = uf8::lookupPluginOnTrack(tr, focusedT.domain);
+            const uf8::LinkSlot* slT = (!g_forcePan.load() && mmT.map)
+                ? uf8::findSlotByLinkIdx(*mmT.map, focusedT.slotIdx)
+                : nullptr;
+            if (g_flip.load() && slT) {
+                double normT = static_cast<double>(touchPb) / 16383.0;
+                if (slT->inverted) normT = 1.0 - normT;
+                if (normT < 0.0) normT = 0.0;
+                if (normT > 1.0) normT = 1.0;
+                TrackFX_SetParamNormalized(tr, mmT.fxIndex,
+                    slT->vst3Param, normT);
+            } else {
+                CSurf_OnVolumeChange(tr, pbToLinearVolume(touchPb), false);
+            }
             g_lastTouchPbValid[s].store(false);
         }
 
