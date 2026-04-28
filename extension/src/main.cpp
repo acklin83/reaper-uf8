@@ -1352,48 +1352,26 @@ void onUf8Input(const uint8_t* data, size_t len)
                 }
                 handledNatively = true;
             } else if (id == 0x52 || id == 0x53) {
-                // Page ← (0x52) / Page → (0x53). Walks the focused-param
-                // slot index that `pushZonesForVisibleSlots` reads.
-                // Clamped at 0..31 — the longest CS-family PluginMap (CS2)
-                // has 32 entries; plugins with fewer slots blank out for
-                // strips past their end. Stage 5 will refine this to
-                // page-stride (±8) via dedicated page-selector keys; for
-                // now we keep slot-stride (±1) as the only available
-                // navigator. If the focus was None, walking implicitly
-                // enters ChannelStrip mode (matches user intent: pressing
-                // a Page key activates the broadcast model).
+                // Page ← (0x52) / Page → (0x53) → previous/next Soft-Key
+                // Bank. Walks g_softKeyBank in the same domain-aware way
+                // the dedicated bank selectors (0x68/0x69..0x6D) do —
+                // clamped to softkey::maxBankFor(domain) (CS = 5, BC = 1).
+                // User-requested default mapping; will be configurable
+                // via the Settings UI later.
                 if (pressed) {
                     const int delta = (id == 0x53) ? 1 : -1;
                     const auto fp = uf8::getFocusedParam();
-                    const auto newDomain = (fp.domain == uf8::Domain::None)
-                        ? uf8::Domain::ChannelStrip
-                        : fp.domain;
-                    // Walk through the canonical plugin map for this
-                    // domain (CS 2 for ChannelStrip — the longest and
-                    // most-complete CS variant; BC 2 for BusComp). Find
-                    // the current focused linkIdx in that map's slot
-                    // array, walk by delta in array order, then store
-                    // the new slot's linkIdx. fp.slotIdx is a linkIdx,
-                    // not an array index — see FocusedParam.h.
-                    const uf8::PluginMap* canon = (newDomain == uf8::Domain::BusComp)
-                        ? uf8::lookupPluginMapByName("Bus Compressor 2")
-                        : uf8::lookupPluginMapByName("Channel Strip 2");
-                    if (canon && !canon->slots.empty()) {
-                        int curArr = 0;
-                        for (size_t i = 0; i < canon->slots.size(); ++i) {
-                            if (canon->slots[i].linkIdx == fp.slotIdx) {
-                                curArr = static_cast<int>(i);
-                                break;
-                            }
-                        }
-                        int nextArr = curArr + delta;
-                        if (nextArr < 0) nextArr = 0;
-                        if (nextArr >= static_cast<int>(canon->slots.size())) {
-                            nextArr = static_cast<int>(canon->slots.size()) - 1;
-                        }
-                        const int nextLink = canon->slots[nextArr].linkIdx;
-                        uf8::setFocus({newDomain, nextLink});
-                        g_pageDirty.store(true);
+                    const auto domain = (fp.domain == uf8::Domain::BusComp)
+                        ? uf8::Domain::BusComp : uf8::Domain::ChannelStrip;
+                    const int maxBank = softkey::maxBankFor(domain);
+                    int next = g_softKeyBank.load() + delta;
+                    if (next < 0)         next = 0;
+                    if (next > maxBank)   next = maxBank;
+                    if (g_softKeyBank.exchange(next) != next) {
+                        g_softKeyDirty.store(true);
+                        char buf[8];
+                        std::snprintf(buf, sizeof(buf), "%d", next);
+                        SetExtState("ReaSixty", "softKeyBank", buf, true);
                     }
                 }
                 handledNatively = true;
@@ -2902,9 +2880,39 @@ void onTimer()
             g_uc1_surface->pushCsVu(dbInL, dbInR, dbOutL, dbOutR);
         }
     }
-    // UF8 GR — push only on change. Without a GR data source we leave
-    // g_uf8GrByte at 0 which clears the meter. A future JSFX probe
-    // updates the byte via a dedicated setter.
+    // UF8 GR — drive from the focused track's CS plug-in via REAPER's
+    // PreSonus-VST3 host hook (TrackFX_GetNamedConfigParm with parmname
+    // "GainReduction_dB"). Same source the UC1's Comp GR strip uses;
+    // SSL Native CS2's value is combined Comp + Gate, so the UF8 arc
+    // shows the full Dynamics-section GR exactly like SSL360 does in
+    // PM mode.
+    //
+    // Map: 0 dB → 0x22 (no GR), 20 dB → 0x64 (max). Larger byte =
+    // more GR per the protocol notes (cells empirically 0x22..0x64
+    // during a CS compressor ramp).
+    if (g_uc1_surface) {
+        if (auto* tr = static_cast<MediaTrack*>(g_uc1_surface->focusedTrack())) {
+            uc1::UC1Bindings b = uc1::lookupBindingsOnTrack(tr);
+            if (b.channelMap && b.channelFxIdx >= 0) {
+                char buf[64];
+                if (TrackFX_GetNamedConfigParm(tr, b.channelFxIdx,
+                                               "GainReduction_dB",
+                                               buf, sizeof(buf))) {
+                    float gr = static_cast<float>(std::atof(buf));
+                    if (gr < 0) gr = -gr;       // sign convention varies
+                    if (gr > 20.f) gr = 20.f;
+                    g_uf8GrByte = static_cast<uint8_t>(
+                        0x22 + std::lround(gr * ((0x64 - 0x22) / 20.0f)));
+                } else {
+                    g_uf8GrByte = 0x22;
+                }
+            } else {
+                g_uf8GrByte = 0x22;
+            }
+        } else {
+            g_uf8GrByte = 0x22;
+        }
+    }
     if (g_dev && g_dev->isOpen() && g_uf8GrByte != g_lastUf8GrByte) {
         g_lastUf8GrByte = g_uf8GrByte;
         g_dev->send(uf8::buildGrByte(g_uf8GrByte));
