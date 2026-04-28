@@ -120,6 +120,12 @@ std::atomic<bool> g_forcePan{false};
 // "Vol  -X.YdB" in the Value Line. Persisted across REAPER sessions.
 std::atomic<bool> g_flip{false};
 
+// Plugin-fader-mode toggle. Press of the global Plugin button (0x50)
+// flips this. When true, UF8 faders should drive plug-in faders directly
+// instead of REAPER track volume. Routing wireup TBD; this state +
+// the Plugin LED feedback land in this commit.
+std::atomic<bool> g_pluginFaderMode{false};
+
 // Soft-Key Bank — which page of params is currently shown across the 8
 // top-soft-key labels (and selectable via the per-strip 0x18..0x1F
 // keys). Range depends on focused.domain:
@@ -1311,6 +1317,17 @@ void onUf8Input(const uint8_t* data, size_t len)
                     g_flip.store(next);
                     g_pageDirty.store(true);
                     SetExtState("ReaSixty", "flip", next ? "1" : "0", true);
+                }
+                handledNatively = true;
+            } else if (id == 0x50) {
+                // Plugin button — toggles "UF8 faders drive plug-in faders"
+                // mode. State + LED-feedback land here; actual fader-routing
+                // wireup is a follow-up phase.
+                if (pressed) {
+                    const bool next = !g_pluginFaderMode.load();
+                    g_pluginFaderMode.store(next);
+                    SetExtState("ReaSixty", "pluginFaderMode",
+                                next ? "1" : "0", true);
                 }
                 handledNatively = true;
             } else if (id == 0x6E) {
@@ -2630,6 +2647,7 @@ bool g_lastShiftHeld = false;
 EncoderMode g_lastEncoderMode = EncoderMode::Nav;
 int  g_lastPageLeftLit  = -1;     // -1 = unknown / 0 = off / 1 = on
 int  g_lastPageRightLit = -1;
+int  g_lastPluginLit    = -1;     // -1 = unknown / 0 = dim / 1 = bright (mode)
 bool g_globalLedsInit = false;
 
 // Map REAPER's automation-mode integer to a position in kAutoLeds.
@@ -2699,23 +2717,26 @@ void pushUf8GlobalLeds()
     const EncoderMode encMode  = g_encoderMode.load();
     const int  softKeyBank     = g_softKeyBank.load();
 
-    // Page ← / Page → LED state — lit when stepping in that direction
-    // is still possible (bank > 0 / bank < maxBank). Domain follows
-    // focused-param; default ChannelStrip when None.
-    const auto pageDomain = []{
-        const auto fp = uf8::getFocusedParam();
-        return (fp.domain == uf8::Domain::BusComp)
-            ? uf8::Domain::BusComp : uf8::Domain::ChannelStrip;
-    }();
-    const int  pageMaxBank = softkey::maxBankFor(pageDomain);
-    const int  pageLeftLit  = (softKeyBank > 0)            ? 1 : 0;
-    const int  pageRightLit = (softKeyBank < pageMaxBank)  ? 1 : 0;
+    // Page ← / Page → LEDs are masked: cells 0x5D / 0x5C in our LED
+    // table collide with Soft 2 / Soft 3. SSL UC1 hardware shares
+    // those physical LEDs across both button rows (multiplexed by
+    // operating mode in firmware). Driving them as independent Page
+    // indicators stomps on whichever Soft-bank LED the user expects
+    // to be the only-lit selector — surface bug "2 buttons selected"
+    // (2026-04-28). Until we identify a separate cell or a mode
+    // switch, leave Page LEDs unmanaged.
+
+    // Plugin button: dim while extension is active, "bright" (= our
+    // function's on=true bytes) when push-mode is on. cap44 only ever
+    // observed off + dim for cell 0x2F so the bright variant might be
+    // visually identical to dim — user asked for both states regardless.
+    const int pluginLit = g_pluginFaderMode.load() ? 1 : 0;
 
     if (g_globalLedsInit && autoMode == g_lastAutoMode &&
         anyArmed == g_lastAnyArmed && forcePan == g_lastForcePan &&
         flip == g_lastFlip && shiftHeld == g_lastShiftHeld &&
         encMode == g_lastEncoderMode && softKeyBank == g_lastSoftKeyBank &&
-        pageLeftLit == g_lastPageLeftLit && pageRightLit == g_lastPageRightLit) {
+        pluginLit == g_lastPluginLit) {
         return;
     }
 
@@ -2760,17 +2781,20 @@ void pushUf8GlobalLeds()
         g_lastSoftKeyBank = softKeyBank;
     }
 
-    // Page ← / Page → LEDs — lit when a step in that direction is
-    // available (bank not at the edge of the domain's max range).
-    if (pageLeftLit != g_lastPageLeftLit || !g_globalLedsInit) {
-        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::PageLeft,
-                                             pageLeftLit == 1));
-        g_lastPageLeftLit = pageLeftLit;
-    }
-    if (pageRightLit != g_lastPageRightLit || !g_globalLedsInit) {
-        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::PageRight,
-                                             pageRightLit == 1));
-        g_lastPageRightLit = pageRightLit;
+    // Page LEDs intentionally not driven — see comment at the top of
+    // pushUf8GlobalLeds explaining the cell collision with Soft 2/3.
+
+    // Plugin button — dim baseline when extension is active, bright
+    // variant when fader-push mode is on. buildUf8GlobalLed(.., false)
+    // emits 11 F1 (= dim, the only "on" state cap44 observed for cell
+    // 0x2F). buildUf8GlobalLed(.., true) emits FF FF — hardware may or
+    // may not render that as bright; cap44 didn't catch it. Both modes
+    // wired so future hardware revisions / plugin-mixer-mode contexts
+    // get visual differentiation if they support it.
+    if (pluginLit != g_lastPluginLit || !g_globalLedsInit) {
+        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Plugin,
+                                             pluginLit == 1));
+        g_lastPluginLit = pluginLit;
     }
 
     // Channel-encoder mode LEDs — exactly one of Nav/Nudge/Focus is bright,
