@@ -369,6 +369,7 @@ During `dual_36_cs_vu_ramp` the user ramped input signal through a 16-level test
 | 2026-04-28 | `cap42_uf8_vpot_top.pcapng` | **Top-soft-key 3-state decoded.** Cells `0x18..0x1F`. BRIGHT = FF38 `FF FF` + FF39 `00 F0`. DIM = FF38 `11 F1` + FF39 `11 F1`. (OFF = `00 F0` from cap44.) Replaces handoff guesswork. |
 | 2026-04-28 | `cap43_uc1_bc_vu.pcapng` | **UC1 BC mechanical VU-meter motor command + VU backlight cell decoded.** See "Decode pass 2026-04-28" below. |
 | 2026-04-28 | `cap44_uf8_send_plugin_3state.pcapng` | **Send/Plugin row 3-state decoded.** Cells `0x37..0x30`. OFF = `00 F0` (Layer 1 inactive), DIM = `11 F1` (Layer 2 idle), BRIGHT = `FF FF` (active selection). Plugin button (`0x2F`) is 2-state only: OFF + ON-as-DIM (`11 F1`). Layer 1/2 LEDs (`0x39`/`0x3A`) confirm radio-button BRIGHT/DIM/OFF. New unmapped cells `0x2D`, `0x3B`, `0x3C`, `0x3E`, `0x3F` showing OFF/DIM-only writes — likely cosmetic/ghost LEDs SSL360 still maintains for buttons that never light (Layer 3, 360, Channel, Auto Off). |
+| 2026-04-28 | `cap45_uc1_ff5c.pcapng` | **FF 5C resolved.** BC-bypass-only cosmetic needle-pose, fired exactly once per toggle press, fixed positions (`0x0A` on bypass-on, `0x32` on un-bypass). CS/EQ/Dyn bypass do NOT emit FF 5C. Side discovery: CS-bypass cascade dims cells to `0x0A`, not `0x33` — SSL has per-section dim levels. |
 
 ## Decode pass 2026-04-28 — UC1 BC mechanical VU + UF8 Send/Plugin 3-state
 
@@ -403,14 +404,20 @@ cap43's bypass-toggle window (t=13.65 → t=16.76) revealed exactly ONE cell wit
 
 This is the **physical backlight LED behind the mechanical VU meter strip** — separate from the bypass-cascade dim (`0x33`) that handles the rest of the BC LEDs. Drives binary, not gradient. To match SSL360 behaviour our extension should toggle this cell on `bypassParam` state of the BC plug-in.
 
-### UC1 needle-pose anomaly (`FF 5C 02 00 <pos> <ck>`) — OPEN
+### UC1 BC bypass-toggle needle-pose (`FF 5C 02 00 <pos> <ck>`) — RESOLVED (cap45)
 
-Two single-shot frames at the bypass-toggle timestamps:
+Cosmetic single-shot needle-pose, fired exactly once per BC-bypass-toggle press. Same frame shape as `FF 5B`, opcode 0x5C, same checksum formula.
 
-- `FF 5C 02 00 0A 68` at bypass-press
-- `FF 5C 02 00 32 90` at un-bypass-press
+- BC bypass press (0 → 1): `FF 5C 02 00 0A 68` (pos = 10)
+- BC un-bypass press (1 → 0): `FF 5C 02 00 32 90` (pos = 50)
+- Position bytes fixed, not GR-dependent.
+- Verified BC-specific: cap45 toggled CS Channel In, EQ In, Dyn In and saw zero FF 5C frames despite clear LED-cascade activity.
 
-Same frame shape as `FF 5B`, opcode differs by 1. Same checksum formula (verified). Function unclear — possibly a "needle-test" pose triggered by SSL360 cosmetics on bypass toggle. Not blocking; flagged for future capture.
+To match SSL behaviour, emit FF 5C at each `bypassParam` transition before resuming FF 5B streaming. Skipping FF 5C is safe — the meter still works without the blip.
+
+### Side discovery (cap45): per-section cascade dim levels differ
+
+CS bypass dims affected cells to `0x0A` (~4% brightness), not the `0x33` (~20%) we use everywhere. Suggests SSL has per-section dim brightness — BC bypass uses `0x33`, CS bypass uses `0x0A`, EQ/Dyn levels TBD. Follow-up capture warranted to map all four.
 
 ### UF8 Send/Plugin row 3-state (cap44)
 
