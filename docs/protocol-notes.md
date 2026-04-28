@@ -346,9 +346,13 @@ Previously classified as an idle heartbeat — actually carries VU data. 37-byte
 
 During `dual_36_cs_vu_ramp` the user ramped input signal through a 16-level test rig with Dyn bypassed — byte 6 and byte 7 stayed equal across the entire ramp, confirming they're Input + Output of the same strip.
 
-### GR meter per strip (`FF 66 11 0F <gr_byte> 00 … <chk>`)
+### GR meter (UF8 on-screen arc): `FF 66 09 15 <gr_byte> 00×7 <chk>`
 
-21-byte frame. Single GR byte at payload position 0; rest zero-padded. Range observed 0x22..0x64 during a Channel Strip compressor ramp. UF8's on-screen GR arc renders from this single byte.
+13-byte frame. Single GR byte ramps `0x02..0x18` across a CS compressor sweep — verified by re-scanning `dual_35_cs_gr_ramp.pcapng` 2026-04-28 (23 distinct payloads, perfectly monotonic 0x02→0x18). Larger byte = more GR; UF8 renders the on-screen GR arc from this byte alone.
+
+### CORRECTION 2026-04-28: `FF 66 11 0F` is NOT the GR meter
+
+Earlier notes labelled `FF 66 11 0F <gr_byte> 00×15 <chk>` as "GR meter per strip" — that was wrong. That opcode addresses the **Comp Threshold parameter-readout zone**: writing arbitrary GR-style bytes there flickers the displayed Comp Thr value on the strip's LCD. User observed this directly when our extension routed GR through that opcode by mistake. Don't re-use that label.
 
 ### Session log (additions)
 

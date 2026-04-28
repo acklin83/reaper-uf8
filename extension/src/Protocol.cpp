@@ -481,15 +481,20 @@ std::array<std::vector<uint8_t>, 2> buildVuMeter(const std::array<uint8_t, 16>& 
 
 std::vector<uint8_t> buildGrByte(uint8_t grByte)
 {
-    // FF 66 11 0F <gr> 00×15 CKSUM  (21 bytes: 3 hdr + 17 data + 1 chk = 21)
+    // FF 66 09 15 <gr> 00×7 CKSUM   (13 bytes: 4 hdr + 8 data + 1 chk = 13)
+    // Decoded 2026-04-28 from `dual_35_cs_gr_ramp.pcapng` — single byte
+    // ramps 0x02..0x18 across a slow CS GR sweep. Earlier mislabel of
+    // `FF 66 11 0F` as the GR frame was wrong; that opcode is actually
+    // the Comp-Threshold parameter-readout zone (user observed flicker
+    // when our writes were routed there).
     std::vector<uint8_t> f;
-    f.reserve(21);
+    f.reserve(13);
     f.push_back(kFrameMagic);
     f.push_back(0x66);
-    f.push_back(0x11);
-    f.push_back(0x0F);
+    f.push_back(0x09);
+    f.push_back(0x15);
     f.push_back(grByte);
-    for (int i = 0; i < 15; ++i) f.push_back(0x00);
+    for (int i = 0; i < 7; ++i) f.push_back(0x00);
     std::span<const uint8_t> payload{f.data() + 1, f.size() - 1};
     f.push_back(checksum(payload));
     return f;

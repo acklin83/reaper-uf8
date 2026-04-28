@@ -272,9 +272,12 @@ std::vector<uint8_t> buildLcdBrightness(uint8_t level);
 std::array<std::vector<uint8_t>, 2> buildVuMeter(const std::array<uint8_t, 16>& levels);
 
 // GR meter (single byte, focused-strip's CS dynamics):
-//   FF 66 11 0F <gr_byte> 00x15 CKSUM    (21 bytes)
-// Observed range 0x22..0x64 during a CS compressor ramp; larger = more
-// GR. UF8 renders the on-screen GR arc from this byte.
+//   FF 66 09 15 <gr_byte> 00x7 CKSUM     (13 bytes)
+// Decoded 2026-04-28 from dual_35_cs_gr_ramp — byte ramps 0x02..0x18
+// across a slow CS GR sweep. Larger byte = more GR; UF8 renders the
+// on-screen GR arc from this single byte. Earlier protocol-notes had
+// FF 66 11 0F labelled as "GR meter per strip" — that was wrong; that
+// opcode is actually the Comp Threshold param-readout zone.
 std::vector<uint8_t> buildGrByte(uint8_t grByte);
 
 // Selected-strip 16-bit bitmask. Fires on selection change.
