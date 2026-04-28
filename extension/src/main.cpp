@@ -2906,6 +2906,21 @@ void onTimer()
                 s_vuAccessor = CreateTrackAudioAccessor(tr);
                 s_lastVuTrack = tr;
             }
+            // Peak-hold with decay, applied to all four channels (in L/R
+            // + out L/R). Without it a steady sine produces 1-2 dB peak
+            // jitter per tick (block size doesn't align with the sine
+            // cycle), which flickers the LED at the boundary between
+            // two thresholds. Decay constant ~150 ms — fast enough that
+            // the meter falls off audibly after a transient, slow
+            // enough to absorb sample-block variability.
+            static double s_holdInL  = -120.0, s_holdInR  = -120.0;
+            static double s_holdOutL = -120.0, s_holdOutR = -120.0;
+            constexpr double kDecayPerTick = 0.85;  // 30 Hz, τ ≈ 150 ms
+            auto holdPeak = [&](double& hold, double raw) {
+                if (raw > hold) hold = raw;
+                else            hold = -120.0 + (hold + 120.0) * kDecayPerTick;
+            };
+
             float dbInL = -120.f;
             float dbInR = -120.f;
             if (s_vuAccessor) {
@@ -2929,13 +2944,28 @@ void onTimer()
                     dbInR = peakToDb(pR);
                 }
             }
-            g_uc1_surface->pushCsVu(dbInL, dbInR, dbOutL, dbOutR);
+            holdPeak(s_holdInL,  dbInL);
+            holdPeak(s_holdInR,  dbInR);
+            holdPeak(s_holdOutL, dbOutL);
+            holdPeak(s_holdOutR, dbOutR);
+            g_uc1_surface->pushCsVu(static_cast<float>(s_holdInL),
+                                    static_cast<float>(s_holdInR),
+                                    static_cast<float>(s_holdOutL),
+                                    static_cast<float>(s_holdOutR));
         }
     }
     // UF8 GR — driven from the focused track's CS plug-in via
     // TrackFX_GetNamedConfigParm("GainReduction_dB"). buildGrByte uses
-    // the correct FF 66 09 15 opcode (decoded from dual_35 2026-04-28).
-    // Range: byte 0x02 = 0 dB GR, byte 0x18 = ~20 dB GR (linear).
+    // FF 66 09 15 (dual_35 2026-04-28). Mapping calibration:
+    //   byte 0x02 = 0 dB GR (rest position)
+    //   byte 0x18 = ~10 dB GR (was 20 dB, but user reports meter shows
+    //               too low — steepen by 2× to give 1.4 byte/dB)
+    // Plus a deadband at the bottom: SSL Native CS2's GainReduction_dB
+    // envelope-follower decays slowly after compression stops, drifting
+    // through fractional 0.1..0.4 dB residue. Without a deadband those
+    // values flicker the byte between 0x02 and 0x03 (= "bottom LED
+    // flickers after GR has occurred", user-observed). Snap to 0 when
+    // |gr| < 0.5 dB.
     if (g_uc1_surface) {
         if (auto* tr = static_cast<MediaTrack*>(g_uc1_surface->focusedTrack())) {
             uc1::UC1Bindings b = uc1::lookupBindingsOnTrack(tr);
@@ -2946,9 +2976,10 @@ void onTimer()
                                                buf, sizeof(buf))) {
                     float gr = static_cast<float>(std::atof(buf));
                     if (gr < 0) gr = -gr;
-                    if (gr > 20.f) gr = 20.f;
+                    if (gr < 0.5f) gr = 0.f;          // deadband
+                    if (gr > 10.f) gr = 10.f;
                     g_uf8GrByte = static_cast<uint8_t>(
-                        0x02 + std::lround(gr * ((0x18 - 0x02) / 20.0f)));
+                        0x02 + std::lround(gr * ((0x18 - 0x02) / 10.0f)));
                 } else {
                     g_uf8GrByte = 0x02;
                 }
