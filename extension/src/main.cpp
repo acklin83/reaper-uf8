@@ -2935,7 +2935,12 @@ void onTimer()
             g_uf8GrByte = 0x02;
         }
     }
-    if (g_dev && g_dev->isOpen() && g_uf8GrByte != g_lastUf8GrByte) {
+    // The UF8 firmware expects this frame as a continuous stream — same
+    // pattern as the BC mechanical-needle at ~30 Hz (dual_35 capture
+    // shows SSL360 re-emits FF 66 09 15 about every 33 ms even when
+    // the GR value is unchanged). Without the stream the on-screen GR
+    // arc fades / stops rendering between updates. Send every tick.
+    if (g_dev && g_dev->isOpen()) {
         g_lastUf8GrByte = g_uf8GrByte;
         g_dev->send(uf8::buildGrByte(g_uf8GrByte));
     }
