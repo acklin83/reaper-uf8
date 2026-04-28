@@ -1077,7 +1077,73 @@ const RingDef* ringFor(uint8_t knobId)
 }
 } // namespace
 
-void UC1Surface::pushKnobRing_(uint8_t knobId, double normalized)
+UC1Surface::CascadeState UC1Surface::computeCascade_(
+    void* trackRaw, const UC1Bindings& bindings)
+{
+    CascadeState s{};
+    MediaTrack* tr = static_cast<MediaTrack*>(trackRaw);
+    if (!tr) return s;
+    auto readBypass = [&](const PluginBindings* m, int fxIdx) -> bool {
+        if (!m || m->bypassParam == kParamNone) return false;
+        return TrackFX_GetParamNormalized(tr, fxIdx, m->bypassParam) > 0.5;
+    };
+    s.csBypassed = readBypass(bindings.channelMap, bindings.channelFxIdx);
+    s.bcBypassed = readBypass(bindings.busCompMap, bindings.busCompFxIdx);
+    if (bindings.channelMap) {
+        const int eqInP = bindings.channelMap->buttonParam[button::kEqIn];
+        if (eqInP != kParamNone) {
+            s.eqOff = TrackFX_GetParamNormalized(
+                tr, bindings.channelFxIdx, eqInP) < 0.5;
+        }
+        const int dynP = bindings.channelMap->buttonParam[button::kDynIn];
+        if (dynP != kParamNone) {
+            s.dynOff = TrackFX_GetParamNormalized(
+                tr, bindings.channelFxIdx, dynP) < 0.5;
+        }
+    }
+    return s;
+}
+
+bool UC1Surface::buttonCascadeDim_(uint8_t btn, const CascadeState& s) const
+{
+    // Bypass-toggle buttons display their own state — never cascade-dim.
+    if (btn == button::kEqIn       || btn == button::kDynIn
+     || btn == button::kChannelIn  || btn == button::kBusCompIn) return false;
+    // Track / surface buttons aren't plug-in controls — exempt.
+    if (btn == button::kSolo       || btn == button::kCut
+     || btn == button::kSoloClear  || btn == button::kPolarity
+     || btn == button::kFine) return false;
+    // EQ subsection: HF/LF Bell + EQ Type
+    if (btn == button::kHfBell || btn == button::kEqType
+     || btn == button::kLfBell) {
+        return s.csBypassed || s.eqOff;
+    }
+    // DYN subsection: Comp / Gate fast-attack + Peak + Expand + ScListen
+    if (btn == button::kFastAttComp || btn == button::kPeak
+     || btn == button::kExpand      || btn == button::kFastAttGate
+     || btn == button::kScListen) {
+        return s.csBypassed || s.dynOff;
+    }
+    return false;
+}
+
+bool UC1Surface::knobCascadeDim_(uint8_t knobId, const CascadeState& s) const
+{
+    using namespace knob;
+    // BC pots (0x0E..0x14: Ratio/ScHpf/Attack/Release/Threshold/Makeup/Mix)
+    if (knobId >= kBCRatio && knobId <= kBCMix) return s.bcBypassed;
+    // EQ knobs (0x00..0x0B: LP/HP + 4 EQ bands × 3 params)
+    if (knobId <= kCSLfGain) return s.csBypassed || s.eqOff;
+    // DYN knobs (0x17..0x1D: Gate Release..Comp Ratio)
+    if (knobId >= kCSGateRelease && knobId <= kCSCompRatio) {
+        return s.csBypassed || s.dynOff;
+    }
+    // Channel knobs that are still CS plug-in params: Input Trim, Fader.
+    if (knobId == kCSInputTrim || knobId == kCSFaderLevel) return s.csBypassed;
+    return false;
+}
+
+void UC1Surface::pushKnobRing_(uint8_t knobId, double normalized, bool dim)
 {
     if (!device_) return;
     const RingDef* def = ringFor(knobId);
@@ -1094,6 +1160,11 @@ void UC1Surface::pushKnobRing_(uint8_t knobId, double normalized)
     if (static_cast<int>(last.size()) != def->nCells) {
         last.assign(def->nCells, 0xFFFF);
     }
+
+    // Dim mode for the section-bypass cascade: replace 0xFF brightness
+    // with 0x33 so the dot is visibly half-bright. Gradient sub-steps
+    // (0x19, 0x4C) stay as-is — they're already faded.
+    const uint8_t brFull = dim ? 0x33 : 0xFF;
 
     int idx = 0;
     std::vector<uint8_t> target(def->nCells, 0);
@@ -1114,7 +1185,7 @@ void UC1Surface::pushKnobRing_(uint8_t knobId, double normalized)
         const int frac     = k % 3;
         idx = mainCell;
         target[mainCell] = 1;
-        brTarget[mainCell] = 0xFF;
+        brTarget[mainCell] = brFull;
         if (frac > 0 && mainCell + 1 < def->nCells) {
             // 1 → 0x19, 2 → 0x4C
             brTarget[mainCell + 1] = (frac == 1) ? 0x19 : 0x4C;
@@ -1126,7 +1197,7 @@ void UC1Surface::pushKnobRing_(uint8_t knobId, double normalized)
         if (idx < 0) idx = 0;
         if (idx >= def->nCells) idx = def->nCells - 1;
         target[idx] = 1;
-        brTarget[idx] = 0xFF;
+        brTarget[idx] = brFull;
     }
 
     // Dual-bank encoding per cell. Bank 0x01 = selection 0/1, bank 0x02
@@ -1178,18 +1249,23 @@ void UC1Surface::pushKnobRing_(uint8_t knobId, double normalized)
     }
 }
 
-void UC1Surface::pushButtonLed_(uint8_t buttonId, bool on)
+void UC1Surface::pushButtonLed_(uint8_t buttonId, LedState state)
 {
     if (!device_) return;
     auto cell = cellForButton(buttonId);
     if (cell.bank == 0 && cell.cell == 0) return;  // unmapped
 
-    // Dedup against the last-pushed state — pollButtonLeds_ runs every
-    // tick so this fires constantly with unchanged values; skip the USB
-    // write when nothing has actually changed. invalidateCache() and
-    // setFocusedTrack() clear lastButtonLed_ so refreshes re-push.
+    const bool on = (state != LedState::Off);
+    const bool dim = (state == LedState::Dim);
+
+    // Dedup packs the tri-state: 0 = off, 1 = on-bright, 2 = on-dim.
+    // pollButtonLeds_ runs every tick so this fires constantly with
+    // unchanged values; skip the USB write when nothing changed.
+    // invalidateCache() and setFocusedTrack() clear lastButtonLed_ so
+    // refreshes re-push.
     if (buttonId < lastButtonLed_.size()) {
-        const int8_t want = on ? 1 : 0;
+        const int8_t want = (state == LedState::Off) ? 0
+                          : (state == LedState::Dim) ? 2 : 1;
         if (lastButtonLed_[buttonId] == want) return;
         lastButtonLed_[buttonId] = want;
     }
@@ -1216,8 +1292,9 @@ void UC1Surface::pushButtonLed_(uint8_t buttonId, bool on)
         buttonId == button::kDynIn       || buttonId == button::kExpand    ||
         buttonId == button::kFastAttGate || buttonId == button::kScListen;
     if (isDynButton) {
+        const uint8_t bri = !on ? 0x00 : (dim ? 0x33 : 0xFF);
         device_->send(buildRaw(0x01, cell.cell, 0x01, on ? 0x01 : 0x00));
-        device_->send(buildRaw(0x02, cell.cell, 0x01, on ? 0xFF : 0x00));
+        device_->send(buildRaw(0x02, cell.cell, 0x01, bri));
         return;
     }
 
@@ -1234,8 +1311,9 @@ void UC1Surface::pushButtonLed_(uint8_t buttonId, bool on)
         buttonId == button::kHfBell || buttonId == button::kEqType ||
         buttonId == button::kEqIn   || buttonId == button::kLfBell;
     if (isEqButton) {
+        const uint8_t bri = !on ? 0x00 : (dim ? 0x33 : 0xFF);
         device_->send(buildRaw(0x01, cell.cell, 0x00, on ? 0x01 : 0x00));
-        device_->send(buildRaw(0x02, cell.cell, 0x00, on ? 0xFF : 0x00));
+        device_->send(buildRaw(0x02, cell.cell, 0x00, bri));
         return;
     }
 
@@ -1258,9 +1336,15 @@ void UC1Surface::pushButtonLed_(uint8_t buttonId, bool on)
         bank = 0x01;
         stateOn = 0x01;
     }
-    const uint8_t state = on ? stateOn : led::kStateOff;
+    // Dim only meaningful for the kStateOn=0xFF path (the Solo/Cut/etc.
+    // 0x01-coded buttons have no firmware-supported dim state); dim
+    // requests on those collapse to plain on.
+    uint8_t stateByte;
+    if (!on)        stateByte = led::kStateOff;
+    else if (dim && stateOn == led::kStateOn) stateByte = led::kStateDim;
+    else            stateByte = stateOn;
 
-    device_->send(buildLedWrite(bank, cell.cell, state));
+    device_->send(buildLedWrite(bank, cell.cell, stateByte));
 }
 
 void UC1Surface::pollButtonLeds_()
@@ -1269,12 +1353,17 @@ void UC1Surface::pollButtonLeds_()
 
     MediaTrack* tr = static_cast<MediaTrack*>(focusedTrack_);
     UC1Bindings bindings = tr ? lookupBindingsOnTrack(tr) : UC1Bindings{};
+    const CascadeState cascade = computeCascade_(tr, bindings);
 
     auto ledForParam = [&](const PluginBindings* map, int fxIdx, uint8_t btnId) {
         if (!map || !tr) return false;
         const int p = map->buttonParam[btnId];
         if (p == kParamNone) return false;
         return TrackFX_GetParamNormalized(tr, fxIdx, p) >= 0.5;
+    };
+    auto stateFor = [&](uint8_t btn, bool on) -> LedState {
+        if (!on) return LedState::Off;
+        return buttonCascadeDim_(btn, cascade) ? LedState::Dim : LedState::On;
     };
 
     for (uint8_t btn = 0; btn < 0x20; ++btn) {
@@ -1349,7 +1438,7 @@ void UC1Surface::pollButtonLeds_()
             continue;
         }
 
-        pushButtonLed_(btn, on);
+        pushButtonLed_(btn, stateFor(btn, on));
     }
 }
 
@@ -1359,13 +1448,14 @@ void UC1Surface::pollKnobRings_()
     MediaTrack* tr = static_cast<MediaTrack*>(focusedTrack_);
     if (!tr) return;
     UC1Bindings bindings = lookupBindingsOnTrack(tr);
+    const CascadeState cascade = computeCascade_(tr, bindings);
 
     auto pushOne = [&](uint8_t knobId, const PluginBindings* m, int fxIdx) {
         const int vst3Param = m->knobParam[knobId];
         if (vst3Param == kParamNone) return;
         const double v = TrackFX_GetParamNormalized(tr, fxIdx, vst3Param);
         const double visual = m->inverted[knobId] ? (1.0 - v) : v;
-        pushKnobRing_(knobId, visual);
+        pushKnobRing_(knobId, visual, knobCascadeDim_(knobId, cascade));
     };
 
     if (bindings.channelMap) {
@@ -1541,12 +1631,17 @@ void UC1Surface::refresh()
     // We walk the full button-ID range and ask the appropriate binding
     // for each one; kParamNone or no binding → LED off.
     MediaTrack* tr = static_cast<MediaTrack*>(focusedTrack_);
+    const CascadeState cascade = computeCascade_(tr, bindings);
     auto ledForParam = [&](const PluginBindings* map, int fxIdx, uint8_t btnId) {
         if (!map || !tr) return false;
         const int p = map->buttonParam[btnId];
         if (p == kParamNone) return false;
         const double v = TrackFX_GetParamNormalized(tr, fxIdx, p);
         return v >= 0.5;
+    };
+    auto stateFor = [&](uint8_t btn, bool on) -> LedState {
+        if (!on) return LedState::Off;
+        return buttonCascadeDim_(btn, cascade) ? LedState::Dim : LedState::On;
     };
 
     for (uint8_t btn = 0; btn < 0x20; ++btn) {
@@ -1630,8 +1725,10 @@ void UC1Surface::refresh()
             continue;
         }
 
-        device_->send(buildLedWrite(cell.bank, cell.cell,
-                                    on ? led::kStateOn : led::kStateOff));
+        // Same dim cascade as pollButtonLeds_ — route through the helper
+        // so the dual-bank dim path applies; this fall-through case is
+        // for buttons not in the dyn/eq groups but still plug-in params.
+        pushButtonLed_(btn, stateFor(btn, on));
     }
 
     // Zero the Bus Comp GR readout so stale values from the last track
@@ -1657,7 +1754,7 @@ void UC1Surface::refresh()
                 tr, bindings.channelFxIdx, vst3Param);
             const double visual =
                 bindings.channelMap->inverted[knobId] ? (1.0 - v) : v;
-            pushKnobRing_(knobId, visual);
+            pushKnobRing_(knobId, visual, knobCascadeDim_(knobId, cascade));
         }
     }
     // BC knob rings only fire when the focused track itself has a BC
@@ -1670,7 +1767,7 @@ void UC1Surface::refresh()
                 tr, bindings.busCompFxIdx, vst3Param);
             const double visual =
                 bindings.busCompMap->inverted[knobId] ? (1.0 - v) : v;
-            pushKnobRing_(knobId, visual);
+            pushKnobRing_(knobId, visual, knobCascadeDim_(knobId, cascade));
         }
     }
 
@@ -1736,6 +1833,25 @@ void UC1Surface::pushVu(uint8_t meter, uint8_t level)
 void UC1Surface::pushCsVu(float dbInput, float dbOutput)
 {
     if (!device_) return;
+
+    // BC-bypass cascade: when the focused track's BC plug-in is
+    // bypassed, force both VU strips to silent so the meter goes
+    // visually dark (= "Hintergrundlicht löschen" in the user's
+    // brief). Computed once per call against the focused track's
+    // bindings. Cheap: one TrackFX_GetParamNormalized when BC2 is on
+    // the track, otherwise short-circuited to false.
+    if (focusedTrack_) {
+        UC1Bindings b = lookupBindingsOnTrack(focusedTrack_);
+        if (b.busCompMap && b.busCompMap->bypassParam != kParamNone) {
+            const double bypass = TrackFX_GetParamNormalized(
+                static_cast<MediaTrack*>(focusedTrack_),
+                b.busCompFxIdx, b.busCompMap->bypassParam);
+            if (bypass > 0.5) {
+                dbInput  = -120.f;
+                dbOutput = -120.f;
+            }
+        }
+    }
 
     // 16 LED thresholds per meter (user's capture brief):
     // "16 Stück je auf: alle aus, -60, -50, -40, -30, -27, -24, -21,

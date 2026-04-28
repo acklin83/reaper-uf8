@@ -111,8 +111,16 @@ private:
                           int vst3Param, uint8_t zone,
                           std::string_view label);
 
-    // Push LED-cell state for a button after it toggles.
-    void pushButtonLed_(uint8_t buttonId, bool on);
+    // Push LED-cell state for a button. Three-state version supports
+    // the section-bypass cascade — when a section is bypassed, its
+    // member LEDs render at half-brightness (kStateDim, 0x33) instead
+    // of full bright/off. The bool overload is a convenience for
+    // single-button toggles where dim isn't applicable.
+    enum class LedState : uint8_t { Off, Dim, On };
+    void pushButtonLed_(uint8_t buttonId, LedState state);
+    void pushButtonLed_(uint8_t buttonId, bool on) {
+        pushButtonLed_(buttonId, on ? LedState::On : LedState::Off);
+    }
 
     // Push a "<label>   <value>" readout to the section LCD after a
     // button toggle, mirroring SSL 360°'s zone-0x03/0x05 transient
@@ -134,7 +142,23 @@ private:
     // Push the LED ring around a rotary pot. `normalized` is the 0..1
     // VST3 param value. Cell layout per knob is stored in a static
     // table (cap37..cap41); knobs not yet mapped no-op silently.
-    void pushKnobRing_(uint8_t knobId, double normalized);
+    // `dim`=true renders the position dot at kStateDim brightness for
+    // the section-bypass cascade — rest of the ring stays unlit.
+    void pushKnobRing_(uint8_t knobId, double normalized, bool dim = false);
+
+    // Section-bypass cascade. Computed once per poll() before LED
+    // pushes; consumed by buttonCascadeDim_/knobCascadeDim_ to override
+    // LED brightness on plug-in-param controls when their section is
+    // bypassed.
+    struct CascadeState {
+        bool csBypassed = false;
+        bool bcBypassed = false;
+        bool eqOff      = false;
+        bool dynOff     = false;
+    };
+    CascadeState computeCascade_(void* tr, const UC1Bindings& bindings);
+    bool buttonCascadeDim_(uint8_t buttonId, const CascadeState&) const;
+    bool knobCascadeDim_(uint8_t knobId, const CascadeState&) const;
 
     // Push the focused-param's value for the focused track to the right
     // section LCD zone (0x03 for ChannelStrip domain, 0x05 for BusComp).
