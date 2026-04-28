@@ -432,6 +432,12 @@ Same FF38/FF39 pair-write family as SEL/CUT/SOLO/Top-Soft-Key. BRIGHT companion 
 
 Layer-1 selected → Send/Plugin row OFF (firmware-driven). Layer-2 selected → row DIM, with currently-active selection BRIGHT. Implementation: extend `buildUf8GlobalLed(btn, state)` from boolean `on` to tri-state enum (Off / Dim / Bright). Plugin button stays 2-state.
 
+### REAPER's GainReduction_dB host hook (2026-04-28)
+
+REAPER exposes plug-in gain reduction host-side via `TrackFX_GetNamedConfigParm` with `parmname = "GainReduction_dB"` — documented for "ReaComp + other supported compressors". Returns a `char[]` decimal string; caller parses with `atof`, takes absolute value (sign convention is plug-in-specific). This IS the PreSonus VST3 GR-meter standard's host-side surface; SSL360 uses the same hook to drive the UC1 mechanical needle in MCU mode.
+
+Wired in `UC1Surface::pollGainReduction_()` (2026-04-28): per `poll()` tick, reads BC GR from the BC-anchor track's BC plug-in and CS GR from the focused track's CS plug-in, then dispatches both via the 2-arg `pushGainReduction(bcGr, csGr)` overload. BC drives the FF 5B 50 Hz needle stream; CS drives the 5-LED Comp GR strip (cells 0x5C..0x60).
+
 ### UF8 top-soft-key BRIGHT decoded (cap42)
 
 Cells `0x18..0x1F`, used for the strip-focus indicator above each LCD:

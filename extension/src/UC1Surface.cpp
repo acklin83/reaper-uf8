@@ -197,6 +197,7 @@ int UC1Surface::poll()
     pollButtonLeds_();
     pollKnobRings_();
     pollBcBypassState_();
+    pollGainReduction_();
 
     return handled;
 }
@@ -1486,6 +1487,51 @@ void UC1Surface::pollBcBypassState_()
     lastBcBypassed_ = cur;
 }
 
+void UC1Surface::pollGainReduction_()
+{
+    if (!device_) return;
+    // PreSonus VST3 GR-meter standard, exposed by REAPER as a named
+    // config parm. Returns a string with the dB value (e.g. "12.345").
+    // Documented as "ReaComp + other supported compressors" — SSL Native
+    // BC2 / CS2 expose the same readback (verified by user; SSL360
+    // itself uses the same host-side mechanism to drive the UC1's
+    // mechanical needle in MCU mode). One read per FX present.
+    auto readGr = [](MediaTrack* tr, int fxIdx) -> float {
+        if (!tr || fxIdx < 0) return 0.0f;
+        char buf[64];
+        if (!TrackFX_GetNamedConfigParm(tr, fxIdx, "GainReduction_dB",
+                                        buf, sizeof(buf))) {
+            return 0.0f;  // plug-in doesn't implement the standard
+        }
+        // String parses as float ("12.345" or similar). Sign convention
+        // varies — some plug-ins report negative dB for reduction. Take
+        // |value| so pushGainReduction's clamp-positive contract holds.
+        const float v = static_cast<float>(std::atof(buf));
+        return v < 0 ? -v : v;
+    };
+
+    // BC: drives the mechanical analog needle. Source is the BC-anchor
+    // track (independent of focus — same as pollBcBypassState_).
+    float bcGr = 0.0f;
+    MediaTrack* bcTr = static_cast<MediaTrack*>(effectiveBcTrack_());
+    if (bcTr) {
+        UC1Bindings b = lookupBindingsOnTrack(bcTr);
+        if (b.busCompMap) bcGr = readGr(bcTr, b.busCompFxIdx);
+    }
+
+    // CS: drives the 5-LED Comp GR strip. Source is the focused track's
+    // Channel Strip plug-in (where the CS GR makes sense — it's the
+    // selection-following compressor on the strip).
+    float csGr = 0.0f;
+    MediaTrack* csTr = static_cast<MediaTrack*>(focusedTrack_);
+    if (csTr) {
+        UC1Bindings b = lookupBindingsOnTrack(csTr);
+        if (b.channelMap) csGr = readGr(csTr, b.channelFxIdx);
+    }
+
+    pushGainReduction(bcGr, csGr);
+}
+
 void UC1Surface::pollKnobRings_()
 {
     if (!device_) return;
@@ -1835,12 +1881,12 @@ void UC1Surface::refresh()
     pushFocusedParamReadout_();
 }
 
-void UC1Surface::pushGainReduction(float dB)
+void UC1Surface::pushGainReduction(float bcGrDb, float csGrDb)
 {
     if (!device_) return;
     // Bus Comp meter (FF 5B 02) — UC1Device streams this at 50 Hz on
-    // its own; just update the cached value.
-    device_->setGainReduction(dB);
+    // its own; just update the cached value with the BC-side dB.
+    device_->setGainReduction(bcGrDb);
 
     // Channel-Strip Dynamics GR LEDs (5 discrete LEDs at bank=0x01,
     // cells 0x5C..0x60, per-LED brightness with 5 visible steps).
@@ -1849,7 +1895,7 @@ void UC1Surface::pushGainReduction(float dB)
     static const uint8_t kLevels[5] = {0x19, 0x2D, 0x54, 0x99, 0xFF};
     static uint8_t lastStates[5] = {0xFE, 0xFE, 0xFE, 0xFE, 0xFE};
 
-    float gr = dB;
+    float gr = csGrDb;
     if (gr < 0) gr = 0;
     const int pos = static_cast<int>(gr / 0.6f);  // 0..24 across 15 dB
     const int active = (pos / 5 > 4) ? 4 : (pos / 5);   // which LED (0..4)

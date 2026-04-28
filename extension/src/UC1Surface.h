@@ -72,10 +72,16 @@ public:
     // or after the user edits plugin params in REAPER.
     void refresh();
 
-    // Push a GR value (positive dB of reduction) to the UC1 Bus Comp
-    // meter. Thread-safe; enqueued and flushed on the next send. Safe to
-    // call at any rate (clamped internally).
-    void pushGainReduction(float dB);
+    // Push GR values (positive dB of reduction) to the UC1's two GR
+    // surfaces independently:
+    //   bcGrDb → BC mechanical needle (FF 5B stream at 50 Hz)
+    //   csGrDb → CS Comp 5-LED strip (cells 0x5C..0x60)
+    // Thread-safe; enqueued and flushed on the next send. Safe to call
+    // at any rate (clamped internally). Both default to 0 to silence the
+    // respective surface.
+    void pushGainReduction(float bcGrDb, float csGrDb);
+    // Convenience: both meters get the same value.
+    void pushGainReduction(float dB) { pushGainReduction(dB, dB); }
 
     // Push a VU level (0..255 byte value) for input/output meter.
     // meter: 0 = input, 1 = output.
@@ -217,6 +223,17 @@ private:
     // dedups against lastBcBypassed_ which stays at -1 until first poll.
     void pollBcBypassState_();
     int8_t lastBcBypassed_ = -1;  // -1=unknown, 0=enabled, 1=bypassed
+
+    // Sample BC + CS gain-reduction from the plug-in via REAPER's
+    // PreSonus-VST3-standard host hook (TrackFX_GetNamedConfigParm with
+    // parmname="GainReduction_dB", documented for "ReaComp + other
+    // supported compressors"). REAPER subscribes to the plug-in's GR
+    // readback host-side and surfaces it as a string-valued config parm.
+    // Called once per poll() tick; cheap (one API call per FX present).
+    // Result is pushed into pushGainReduction(), which drives both the
+    // BC mechanical needle (via the 50 Hz FF 5B stream) and the CS Comp
+    // GR LED strip.
+    void pollGainReduction_();
 
     // Per-knob LED-ring cell state cache. Each entry packs the last-
     // sent (selection_state | brightness_state << 8) so dedup catches
