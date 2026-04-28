@@ -120,6 +120,95 @@ std::atomic<bool> g_forcePan{false};
 // "Vol  -X.YdB" in the Value Line. Persisted across REAPER sessions.
 std::atomic<bool> g_flip{false};
 
+// Soft-Key Bank — which page of params is currently shown across the 8
+// top-soft-key labels (and selectable via the per-strip 0x18..0x1F
+// keys). Range depends on focused.domain:
+//   ChannelStrip: 0..5 (V-POT + Bank 1..5)
+//   BusComp:      0..1 (V-POT + Bank 1)
+// Layout from SSL UF8 User Guide p.180-181. Persisted across sessions.
+std::atomic<int>  g_softKeyBank{0};
+std::atomic<bool> g_softKeyDirty{false};
+
+namespace softkey {
+    constexpr int kNoSlot = -1;
+    constexpr size_t kStrips = 8;
+
+    // CS-mode banks (6 × 8). Values are SSL 360 Link slot indices
+    // (linkIdx). kNoSlot = label shown but not focusable yet (raw VST3
+    // params not in the Link map: BYPASS, Ø, PRE, MIC/DRIVE, IMPEDANCE,
+    // WIDTH, A/B, HQ MODE — TBD via Settings UI later).
+    constexpr int kCsBanks[6][kStrips] = {
+        // V-POT: BYPASS, IN TRIM, Ø, PRE, MIC/DRIVE, _, IMPEDANCE IN, IMPEDANCE
+        { kNoSlot,  4, kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot },
+        // Bank 1: WIDTH, _, _, A/B, HIGH PASS, LOW PASS, EQ, EQ TYPE
+        { kNoSlot, kNoSlot, kNoSlot, kNoSlot,  7,  6, 15, 14 },
+        // Bank 2: LF FREQ, LF GAIN, LF TYPE, LMF FREQ, LMF GAIN, LMF Q, _, _
+        { 19, 20, 21, 17, 16, 18, kNoSlot, kNoSlot },
+        // Bank 3: HMF FREQ, HMF GAIN, HMF Q, _, HF FREQ, HF GAIN, HF TYPE, _
+        { 12, 11, 13, kNoSlot, 10,  9,  8, kNoSlot },
+        // Bank 4: DYNAMICS, COMP MIX, COMP RATIO, COMP THR, COMP REL, COMP ATK, PEAK/RMS, _
+        { 22, 23, 26, 27, 28, 24, 25, kNoSlot },
+        // Bank 5: GATE REL, GATE THR, GATE RNG, GATE HLD, GATE ATK, GATE/EXP, HQ MODE, OUT TRIM
+        { 31, 30, 29, 32, 34, 33, kNoSlot, 37 },
+    };
+    constexpr const char* kCsLabels[6][kStrips] = {
+        { "BYPASS", "IN TRIM", "PHASE",   "PRE",      "MIC/DRV", "",         "IMP IN",  "IMP" },
+        { "WIDTH",  "",        "",        "A/B",      "HPF",     "LPF",      "EQ",      "EQ TYPE" },
+        { "LF FREQ","LF GAIN", "LF TYPE", "LMF FREQ", "LMF GAIN","LMF Q",    "",        "" },
+        { "HMF FREQ","HMF GAIN","HMF Q",  "",         "HF FREQ", "HF GAIN",  "HF TYPE", "" },
+        { "DYNAMICS","COMP MIX","COMP RAT","COMP THR","COMP REL","COMP ATK", "PK/RMS",  "" },
+        { "GATE REL","GATE THR","GATE RNG","GATE HLD","GATE ATK","GATE/EXP", "HQ MODE", "OUT TRIM" },
+    };
+
+    // BC-mode banks (2 × 8).
+    constexpr int kBcBanks[2][kStrips] = {
+        // V-POT: THRESHOLD, ATTACK, RELEASE, RATIO, S/C HPF, MIX, EXTERNAL S/C, BUS COMP
+        { 1, 3, 4, 5, 6, 7, kNoSlot, kNoSlot },
+        // Bank 1: OUTPUT GAIN (= MakeupGain in BC2 map), rest empty
+        { 2, kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot },
+    };
+    constexpr const char* kBcLabels[2][kStrips] = {
+        { "THR",    "ATTACK", "RELEASE","RATIO", "S/C HPF","MIX",  "EXT S/C","BUS COMP" },
+        { "OUTGAIN","",       "",       "",      "",       "",     "",       "" },
+    };
+
+    constexpr int kCsMaxBank = 5;
+    constexpr int kBcMaxBank = 1;
+
+    // Domain-aware bank max so the bank index can be clamped after a
+    // domain switch (BC has fewer banks than CS).
+    inline int maxBankFor(uf8::Domain d) {
+        return d == uf8::Domain::BusComp ? kBcMaxBank : kCsMaxBank;
+    }
+
+    // Resolve the current 8-slot view (linkIdx + label arrays) for a
+    // given domain + bank. Caller clamps bank to maxBankFor(domain).
+    struct View {
+        const int*        linkIdx;
+        const char* const* labels;
+    };
+    inline View viewFor(uf8::Domain d, int bank) {
+        if (d == uf8::Domain::BusComp) {
+            return { kBcBanks[bank], kBcLabels[bank] };
+        }
+        return { kCsBanks[bank], kCsLabels[bank] };
+    }
+
+    // Find which bank in `domain` contains a given linkIdx. -1 if not
+    // found. Used to auto-follow the bank to externally-set focus
+    // (UC1 knob, plugin GUI mouse, FocusedFX chase).
+    inline int bankContaining(uf8::Domain d, int linkIdx) {
+        const int max = maxBankFor(d);
+        for (int b = 0; b <= max; ++b) {
+            const View v = viewFor(d, b);
+            for (size_t s = 0; s < kStrips; ++s) {
+                if (v.linkIdx[s] == linkIdx) return b;
+            }
+        }
+        return -1;
+    }
+}
+
 // Per-strip cache for the SEL-follows-DAW-Colour LED state. Avoids
 // sending FF 38/39 every tick — only on actual changes. Value encodes
 // 0xFF for "bright" / 0x00 for "dim" / 0xFE as "unset".
@@ -1220,15 +1309,29 @@ void onUf8Input(const uint8_t* data, size_t len)
                 }
                 handledNatively = true;
             } else if (id >= 0x68 && id <= 0x6D) {
-                // V-Pot assignment soft keys (0x68 = V-POT top, 0x69-0x6D =
-                // Soft Keys 1-5). Any of these returns from PAN override
-                // back to automatic plug-in-param mode. Specific per-key
-                // page assignment is a Phase-2 (Config UI) feature; for
-                // now we just clear the pan override.
-                if (pressed && g_forcePan.load()) {
-                    g_forcePan.store(false);
-                    g_pageDirty.store(true);
-                    SetExtState("ReaSixty", "forcePan", "0", true);
+                // Soft-key bank selectors: 0x68 = V-POT bank, 0x69..0x6D
+                // = Bank 1..5. Switches which 8 param labels appear in
+                // the top zones. BC mode only has 0..1 — ignore higher.
+                // Pressing any of these also clears global Pan override
+                // (matches SSL paradigm: "I want params, not pan").
+                if (pressed) {
+                    const int target = (id == 0x68) ? 0 : (id - 0x69 + 1);
+                    const auto fp = uf8::getFocusedParam();
+                    const auto domain = (fp.domain == uf8::Domain::BusComp)
+                        ? uf8::Domain::BusComp : uf8::Domain::ChannelStrip;
+                    if (target <= softkey::maxBankFor(domain)) {
+                        if (g_softKeyBank.exchange(target) != target) {
+                            g_softKeyDirty.store(true);
+                            char buf[8];
+                            std::snprintf(buf, sizeof(buf), "%d", target);
+                            SetExtState("ReaSixty", "softKeyBank", buf, true);
+                        }
+                    }
+                    if (g_forcePan.load()) {
+                        g_forcePan.store(false);
+                        g_pageDirty.store(true);
+                        SetExtState("ReaSixty", "forcePan", "0", true);
+                    }
                 }
                 handledNatively = true;
             } else if (id == 0x52 || id == 0x53) {
@@ -1317,10 +1420,25 @@ void onUf8Input(const uint8_t* data, size_t len)
                 }
                 handledNatively = true;
             } else if (id >= 0x18 && id <= 0x1F) {
-                // Top soft-key above the scribble. PM-mode-specific (selects
-                // what the V-Pot controls on SSL plug-ins). We have no
-                // equivalent yet — swallow so the firmware's MCU-SELECT
-                // overlap doesn't leak to REAPER.
+                // Per-strip top soft-key. In Plug-in Mixer Mode this picks
+                // the param under that strip from the active bank and
+                // assigns it to all 8 V-Pots (= setFocus across the bus).
+                // Slots not yet in our PluginMap (BYPASS, Ø, PRE, etc.)
+                // are kNoSlot — press is a silent no-op until the
+                // Settings UI lets the user wire them to actions.
+                if (pressed) {
+                    const int strip = id - 0x18;
+                    const auto fp = uf8::getFocusedParam();
+                    const auto domain = (fp.domain == uf8::Domain::BusComp)
+                        ? uf8::Domain::BusComp : uf8::Domain::ChannelStrip;
+                    const int bank = std::clamp(g_softKeyBank.load(),
+                        0, softkey::maxBankFor(domain));
+                    const auto v = softkey::viewFor(domain, bank);
+                    const int linkIdx = v.linkIdx[strip];
+                    if (linkIdx != softkey::kNoSlot) {
+                        uf8::setFocus({domain, linkIdx});
+                    }
+                }
                 handledNatively = true;
             }
 
@@ -1801,7 +1919,22 @@ void pushZonesForVisibleSlots()
     // either path forces a full label/value re-push next tick.
     const bool focusChanged   = uf8::g_focusedDirty.exchange(false);
     const bool pageChanged    = g_pageDirty.exchange(false) || focusChanged;
-    if (pageChanged) {
+    // Bank-follow-focus: when an external writer (UC1, plugin GUI,
+    // chase) changes the focused param, switch the soft-key bank to
+    // whichever bank in the new domain holds that linkIdx. Skips when
+    // the linkIdx isn't in any bank (custom param, or not yet
+    // registered in the soft-key tables).
+    if (focusChanged) {
+        const int b = softkey::bankContaining(focused.domain, focused.slotIdx);
+        if (b >= 0 && g_softKeyBank.exchange(b) != b) {
+            g_softKeyDirty.store(true);
+            char buf[8];
+            std::snprintf(buf, sizeof(buf), "%d", b);
+            SetExtState("ReaSixty", "softKeyBank", buf, true);
+        }
+    }
+    const bool softKeyChanged = g_softKeyDirty.exchange(false);
+    if (pageChanged || softKeyChanged) {
         g_lastSlotLabel.fill({});
         g_lastValueLine.fill({});
     }
@@ -1930,14 +2063,21 @@ void pushZonesForVisibleSlots()
             g_dev->send(uf8::buildChannelStripType(static_cast<uint8_t>(s), csType));
         }
 
-        // Top-zone label (FF 66 .. 04) — UF8 manual p.174 calls this
-        // "soft-key label", reserved for the per-strip top soft-key text.
-        // Cleared here; the upcoming top-soft-key feature will populate
-        // it. The plug-in parameter label+value remains on the V-Pot via
-        // the Value Line below.
-        if (!g_lastSlotLabel[s].empty()) {
-            g_lastSlotLabel[s].clear();
-            g_dev->send(uf8::buildPluginSlotName(static_cast<uint8_t>(s), ""));
+        // Top-zone label (FF 66 .. 04) — UF8 manual p.174 "soft-key
+        // label". Pulls from the active soft-key bank for the focused
+        // domain. Empty cells (kNoSlot positions in the bank table)
+        // render as "" — top zone goes blank for those strips.
+        {
+            const auto domSk = (focused.domain == uf8::Domain::BusComp)
+                ? uf8::Domain::BusComp : uf8::Domain::ChannelStrip;
+            const int bankSk = std::clamp(g_softKeyBank.load(),
+                0, softkey::maxBankFor(domSk));
+            const auto vSk = softkey::viewFor(domSk, bankSk);
+            std::string label = vSk.labels[s];
+            if (label != g_lastSlotLabel[s]) {
+                g_lastSlotLabel[s] = label;
+                g_dev->send(uf8::buildPluginSlotName(static_cast<uint8_t>(s), label));
+            }
         }
 
         // Channel Number Zone — the tiny digit top-left of each strip's
@@ -2447,6 +2587,7 @@ int g_lastAutoMode = -2;          // -1 = no track, 0..5 = REAPER auto modes
 bool g_lastAnyArmed = false;
 bool g_lastForcePan = false;
 bool g_lastFlip = false;
+int  g_lastSoftKeyBank = -1;
 bool g_lastShiftHeld = false;
 EncoderMode g_lastEncoderMode = EncoderMode::Nav;
 bool g_globalLedsInit = false;
@@ -2516,11 +2657,12 @@ void pushUf8GlobalLeds()
     const bool flip            = g_flip.load();
     const bool shiftHeld       = g_shiftHeld.load();
     const EncoderMode encMode  = g_encoderMode.load();
+    const int  softKeyBank     = g_softKeyBank.load();
 
     if (g_globalLedsInit && autoMode == g_lastAutoMode &&
         anyArmed == g_lastAnyArmed && forcePan == g_lastForcePan &&
         flip == g_lastFlip && shiftHeld == g_lastShiftHeld &&
-        encMode == g_lastEncoderMode) {
+        encMode == g_lastEncoderMode && softKeyBank == g_lastSoftKeyBank) {
         return;
     }
 
@@ -2550,6 +2692,19 @@ void pushUf8GlobalLeds()
     if (shiftHeld != g_lastShiftHeld || !g_globalLedsInit) {
         sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Fine, shiftHeld));
         g_lastShiftHeld = shiftHeld;
+    }
+
+    // Soft-key bank LEDs — exactly one of V-POT / Soft 1..5 is lit
+    // matching g_softKeyBank (0..5). Single dirty-check rewrites all 6
+    // since the user expects a clean radio-button look on every change.
+    if (softKeyBank != g_lastSoftKeyBank || !g_globalLedsInit) {
+        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::VPotBank, softKeyBank == 0));
+        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Soft1,    softKeyBank == 1));
+        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Soft2,    softKeyBank == 2));
+        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Soft3,    softKeyBank == 3));
+        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Soft4,    softKeyBank == 4));
+        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Soft5,    softKeyBank == 5));
+        g_lastSoftKeyBank = softKeyBank;
     }
 
     // Channel-encoder mode LEDs — exactly one of Nav/Nudge/Focus is bright,
@@ -2732,6 +2887,10 @@ extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(
         if (std::strcmp(m, "Nudge") == 0)      g_encoderMode.store(EncoderMode::Nudge);
         else if (std::strcmp(m, "Focus") == 0) g_encoderMode.store(EncoderMode::Focus);
         else                                   g_encoderMode.store(EncoderMode::Nav);
+    }
+    if (const char* sb = GetExtState("ReaSixty", "softKeyBank"); sb && *sb) {
+        const int v = std::atoi(sb);
+        if (v >= 0 && v <= softkey::kCsMaxBank) g_softKeyBank.store(v);
     }
 
     // Register as a full control-surface class. The user adds a
