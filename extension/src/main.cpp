@@ -2908,43 +2908,12 @@ void onTimer()
             g_uc1_surface->pushCsVu(dbInL, dbInR, dbOutL, dbOutR);
         }
     }
-    // UF8 GR — drive from the focused track's CS plug-in via REAPER's
-    // PreSonus-VST3 host hook (TrackFX_GetNamedConfigParm with parmname
-    // "GainReduction_dB"). Same source the UC1's Comp GR strip uses;
-    // SSL Native CS2's value is combined Comp + Gate, so the UF8 arc
-    // shows the full Dynamics-section GR exactly like SSL360 does in
-    // PM mode.
-    //
-    // Map: 0 dB → 0x22 (no GR), 20 dB → 0x64 (max). Larger byte =
-    // more GR per the protocol notes (cells empirically 0x22..0x64
-    // during a CS compressor ramp).
-    if (g_uc1_surface) {
-        if (auto* tr = static_cast<MediaTrack*>(g_uc1_surface->focusedTrack())) {
-            uc1::UC1Bindings b = uc1::lookupBindingsOnTrack(tr);
-            if (b.channelMap && b.channelFxIdx >= 0) {
-                char buf[64];
-                if (TrackFX_GetNamedConfigParm(tr, b.channelFxIdx,
-                                               "GainReduction_dB",
-                                               buf, sizeof(buf))) {
-                    float gr = static_cast<float>(std::atof(buf));
-                    if (gr < 0) gr = -gr;       // sign convention varies
-                    if (gr > 20.f) gr = 20.f;
-                    g_uf8GrByte = static_cast<uint8_t>(
-                        0x22 + std::lround(gr * ((0x64 - 0x22) / 20.0f)));
-                } else {
-                    g_uf8GrByte = 0x22;
-                }
-            } else {
-                g_uf8GrByte = 0x22;
-            }
-        } else {
-            g_uf8GrByte = 0x22;
-        }
-    }
-    if (g_dev && g_dev->isOpen() && g_uf8GrByte != g_lastUf8GrByte) {
-        g_lastUf8GrByte = g_uf8GrByte;
-        g_dev->send(uf8::buildGrByte(g_uf8GrByte));
-    }
+    // UF8 GR — wireup pulled (2026-04-28): the FF 66 11 0F frame I
+    // routed through is actually the Comp Threshold parameter-readout
+    // zone, NOT the GR meter (user observed flicker on Comp Thr value).
+    // protocol-notes.md's "GR meter per strip" claim for that opcode
+    // was wrong. Re-decode needed to find the actual UF8 GR-display
+    // frame before re-wiring. Leaving g_uf8GrByte unset / no send.
     if (g_uc1_surface) g_uc1_surface->poll();
 
     // Once-per-second UC1 wire stats — only print if something is
