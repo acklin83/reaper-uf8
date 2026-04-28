@@ -114,6 +114,12 @@ std::atomic<bool> g_pageDirty{false};
 // automatic plug-in-param mode. Same invalidation path as a page change.
 std::atomic<bool> g_forcePan{false};
 
+// FLIP mode (button 0x54): swap fader and V-Pot. Fader drives the
+// focused plug-in parameter; V-Pot drives track volume. Display zones
+// follow the swap so the user sees param value above the fader and
+// "Vol  -X.YdB" in the Value Line. Persisted across REAPER sessions.
+std::atomic<bool> g_flip{false};
+
 // Per-strip cache for the SEL-follows-DAW-Colour LED state. Avoids
 // sending FF 38/39 every tick — only on actual changes. Value encodes
 // 0xFF for "bright" / 0x00 for "dim" / 0xFE as "unset".
@@ -328,6 +334,11 @@ void emitMouseScroll(int32_t) {}   // non-macOS: TBD
 std::mutex                  g_inQueueMutex;
 std::vector<PendingInput>   g_inQueue;
 
+// Forward declarations for helpers defined later in the file but
+// referenced from drainInputQueue's FLIP-mode path.
+uint16_t linearVolumeToPb(double linear);
+double   uiVolLinear(MediaTrack* tr);
+
 void queueInput(PendingInput e)
 {
     std::lock_guard<std::mutex> lk(g_inQueueMutex);
@@ -442,6 +453,7 @@ void drainInputQueue()
                 // the focused domain (CS / BC) AND we're not in global Pan
                 // mode, drive the focused parameter on that strip's track.
                 // Otherwise fall back to track pan.
+                //
                 const auto focused = uf8::getFocusedParam();
                 auto mm = uf8::lookupPluginOnTrack(tr, focused.domain);
                 const bool forcePan = g_forcePan.load();
@@ -476,6 +488,7 @@ void drainInputQueue()
                 // V-pot push: with a plug-in of the focused domain present
                 // (and not in global Pan mode), reset the focused param to
                 // its midpoint. Otherwise, re-center pan.
+                //
                 const auto focused = uf8::getFocusedParam();
                 auto mm = uf8::lookupPluginOnTrack(tr, focused.domain);
                 const bool forcePan = g_forcePan.load();
@@ -484,12 +497,28 @@ void drainInputQueue()
                     : nullptr;
                 if (slPtr) {
                     if (isBinarySlot(*slPtr)) {
-                        // Binary toggle: V-Pot push flips 0↔1 (matches
-                        // the UC1 button-press semantics for these
-                        // params — EQ In, Dyn In, S/C Listen, etc.).
+                        // V-Pot push cycles to next discrete step. For a
+                        // 2-state toggle (EQ In, Dyn In, S/C Listen) this
+                        // collapses to 0↔1. For a multi-step enumeration
+                        // (4K G EQ Colour: Black/Pink — VST3 reports 2
+                        // steps but plain 0↔1 was hitting an unused 3rd
+                        // value, hence the user's "3 push" complaint),
+                        // step-size cycling lands on each defined value.
+                        double step = 0.0, smallstep = 0.0, largestep = 0.0;
+                        bool istoggle = false;
+                        const bool haveSteps = TrackFX_GetParameterStepSizes(
+                            tr, mm.fxIndex, slPtr->vst3Param,
+                            &step, &smallstep, &largestep, &istoggle);
                         const double cur = TrackFX_GetParamNormalized(
                             tr, mm.fxIndex, slPtr->vst3Param);
-                        const double next = (cur < 0.5) ? 1.0 : 0.0;
+                        double next;
+                        if (!haveSteps || istoggle || step <= 0.0 || step >= 1.0) {
+                            next = (cur < 0.5) ? 1.0 : 0.0;
+                        } else {
+                            next = cur + step;
+                            if (next > 1.0 + step * 0.5) next = 0.0;
+                            if (next > 1.0) next = 1.0;
+                        }
                         TrackFX_SetParamNormalized(tr, mm.fxIndex,
                             slPtr->vst3Param, next);
                     } else {
@@ -642,10 +671,28 @@ void sendLedFrames(uf8::LedColourFrames frames)
     g_dev->send(std::move(frames.ff39));
 }
 
+// Forward declarations for helpers defined further down (used by
+// sendSelRenderTrigger to restore the AutoTrim LED after the cap33
+// trigger sequence, and by drainInputQueue's FLIP path which routes
+// fader pb14 → focused-param normalised position).
+void pushAutoModeLeds(int mode);
+int  autoModeToLedIndex(int mode);
+uint16_t linearVolumeToPb(double linear);
+extern int g_lastAutoMode;
+
 // Cell 0x24 sits outside the per-strip LED range. cap33 shows SSL360
 // firing a fixed off→on toggle on this cell at every selection event,
 // always before the selected-strip bitmask. Replicate the exact 4-frame
 // sequence — values are constant (no track-colour involved).
+//
+// Quirk: cell 0x24 ALSO happens to be the AutoTrim LED in MCU mode
+// (`0x3F 0xF0` = AutoTrim's bright-orange). cap33 was recorded with the
+// captured track in REAPER mode 0 (Trim/Read), so SSL360 lighting the
+// AutoTrim LED looked indistinguishable from a "render trigger" pulse.
+// In our extension, this fires on every SEL change regardless of auto
+// mode, leaving TRIM pinned on next to whatever auto-LED is the actual
+// active mode. Re-assert the correct AutoTrim state at the end of the
+// sequence so the user sees only the LED that matches the track's mode.
 void sendSelRenderTrigger()
 {
     if (!g_dev) return;
@@ -653,6 +700,11 @@ void sendSelRenderTrigger()
     g_dev->send({0xFF, 0x39, 0x04, 0x24, 0x00, 0x12, 0xF0, 0x63});
     g_dev->send({0xFF, 0x38, 0x04, 0x24, 0x00, 0x3F, 0xF0, 0x8F});
     g_dev->send({0xFF, 0x39, 0x04, 0x24, 0x00, 0x00, 0xF0, 0x51});
+    // Restore AutoTrim to the value driven by the current REAPER auto
+    // mode (lit only when mode == 0/Trim/Read).
+    const bool trimActive = (autoModeToLedIndex(g_lastAutoMode) == 2);
+    sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::AutoTrim,
+                                         trimActive));
 }
 
 // Push the selected-strip bitmask. cap33: SSL360 sends this after the
@@ -918,7 +970,16 @@ void onUf8Input(const uint8_t* data, size_t len)
         const uint8_t cmd = data[i + 1];
         size_t frameSize = 0;
         switch (cmd) {
-            case 0x04: frameSize = 7; break;   // poll (02 9d 01 a4) — ignore
+            // FF 04 02 XX 01 XX = 6 bytes total. Two payload variants
+            // (02 9d 01 a4 / 02 94 01 9b) cycle alternately. Previous
+            // frameSize=7 was wrong: it skipped past the actual end of
+            // the poll frame, swallowing whatever FF byte came next —
+            // which is exactly how bundled "FF 04 ... FF 21 03 ..."
+            // and "FF 04 ... FF 20 02 ..." packets lost their touch /
+            // fader events. Symptom: motor stays engaged because the
+            // firmware sees its FF 21 03 echoes never come back from
+            // host (we never receive the events to echo them).
+            case 0x04: frameSize = 6; break;   // poll
             case 0x21: frameSize = 7; break;   // fader position
             case 0x22: frameSize = 7; break;   // button
             case 0x20: frameSize = 6; break;   // fader touch (capacitive)
@@ -1014,25 +1075,37 @@ void onUf8Input(const uint8_t* data, size_t len)
                 g_shiftHeld.store(pressed);
                 handledNatively = true;
             } else if (id == 0x73) {
-                if (pressed) g_encoderMode.store(EncoderMode::Nav);
+                if (pressed) {
+                    g_encoderMode.store(EncoderMode::Nav);
+                    SetExtState("ReaSixty", "encoderMode", "Nav", true);
+                }
                 handledNatively = true;
             } else if (id == 0x74) {
-                if (pressed) g_encoderMode.store(EncoderMode::Nudge);
+                if (pressed) {
+                    g_encoderMode.store(EncoderMode::Nudge);
+                    SetExtState("ReaSixty", "encoderMode", "Nudge", true);
+                }
                 handledNatively = true;
             } else if (id == 0x75) {
-                if (pressed) g_encoderMode.store(EncoderMode::Focus);
+                if (pressed) {
+                    g_encoderMode.store(EncoderMode::Focus);
+                    SetExtState("ReaSixty", "encoderMode", "Focus", true);
+                }
                 handledNatively = true;
             } else if (id == 0x76) {
                 // Channel Encoder Push — UF8 default is "return to
                 // CHANNEL mode" (the track-selection default). We map it
                 // to the same: flip the encoder back into Nav mode.
-                if (pressed) g_encoderMode.store(EncoderMode::Nav);
+                if (pressed) {
+                    g_encoderMode.store(EncoderMode::Nav);
+                    SetExtState("ReaSixty", "encoderMode", "Nav", true);
+                }
                 handledNatively = true;
             } else if (id >= 0x58 && id <= 0x5D) {
-                // Automation keys. REAPER modes: 0 Trim, 1 Read,
-                // 2 Touch, 3 Write, 4 Latch. UF8 Off/Trim both map to
-                // Trim (REAPER has no separate "Off"); can be disambig
-                // later via the Phase-2 settings page.
+                // Automation keys. REAPER modes: 0 Trim/Read (default),
+                // 1 Read, 2 Touch, 3 Write, 4 Latch, 5 Latch Preview.
+                // UF8 Off and Trim both map to Trim/Read (REAPER has no
+                // separate "Off" mode).
                 static constexpr int kModeById[6] = {
                     /*0x58 Off  */ 0,
                     /*0x59 Read */ 1,
@@ -1042,8 +1115,14 @@ void onUf8Input(const uint8_t* data, size_t len)
                     /*0x5D Touc */ 2,
                 };
                 if (pressed) {
+                    const int target = kModeById[id - 0x58];
                     queueInput({PendingInput::AutomationMode, 0,
-                                static_cast<double>(kModeById[id - 0x58])});
+                                static_cast<double>(target)});
+                    // Light the target Auto LED immediately. Without this,
+                    // the firmware briefly flashes its default (TRIM) over
+                    // the held button while we wait for REAPER to apply
+                    // the mode change and the next tick to read it back.
+                    pushAutoModeLeds(target);
                 }
                 handledNatively = true;
             } else if (id == 0x7A || id == 0x7B || id == 0x7C
@@ -1068,14 +1147,27 @@ void onUf8Input(const uint8_t* data, size_t len)
                     }
                 }
                 handledNatively = true;
+            } else if (id == 0x54) {
+                // FLIP button: swap fader ↔ V-Pot mapping for every strip.
+                // Toggle and persist; pageDirty forces a fresh re-render
+                // of value-line / motor / V-Pot bar with swapped sources.
+                if (pressed) {
+                    const bool next = !g_flip.load();
+                    g_flip.store(next);
+                    g_pageDirty.store(true);
+                    SetExtState("ReaSixty", "flip", next ? "1" : "0", true);
+                }
+                handledNatively = true;
             } else if (id == 0x6E) {
                 // PAN button: toggle "force all V-Pots to Pan" regardless
                 // of SSL-plug-in presence on each track. Invalidates the
                 // per-strip caches so the Value Line / V-Pot bar switch
                 // to pan-mode rendering on the next tick.
                 if (pressed) {
-                    g_forcePan.store(!g_forcePan.load());
+                    const bool next = !g_forcePan.load();
+                    g_forcePan.store(next);
                     g_pageDirty.store(true);
+                    SetExtState("ReaSixty", "forcePan", next ? "1" : "0", true);
                 }
                 handledNatively = true;
             } else if (id >= 0x68 && id <= 0x6D) {
@@ -1087,6 +1179,7 @@ void onUf8Input(const uint8_t* data, size_t len)
                 if (pressed && g_forcePan.load()) {
                     g_forcePan.store(false);
                     g_pageDirty.store(true);
+                    SetExtState("ReaSixty", "forcePan", "0", true);
                 }
                 handledNatively = true;
             } else if (id == 0x52 || id == 0x53) {
@@ -1201,6 +1294,16 @@ void onUf8Input(const uint8_t* data, size_t len)
             const uint8_t strip = data[i + 3];
             const uint8_t state = data[i + 4];
             if (strip < 8) {
+                // Diag log — same path as f73201c. Append-mode, one line
+                // per touch event so we can correlate with FF 1B keepalive
+                // and FF 1D motor commands logged from the worker thread.
+                if (FILE* lg = std::fopen("/tmp/reaper_uf8_motor.log", "a")) {
+                    const auto t = std::chrono::system_clock::now().time_since_epoch();
+                    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t).count();
+                    std::fprintf(lg, "[%lld] TOUCH strip=%u state=%u\n",
+                                 static_cast<long long>(ms), strip, state);
+                    std::fclose(lg);
+                }
                 // UF8 in PM mode does not auto-release the fader motor
                 // on capacitive touch (that behaviour is only present in
                 // DAW/MCU mode), so we send the motor-limp command
@@ -1214,7 +1317,13 @@ void onUf8Input(const uint8_t* data, size_t len)
                     g_touchLastPress[strip] = std::chrono::steady_clock::now();
                     g_touchReleasePending[strip].store(false);
                     if (!g_touchReported[strip].exchange(true)) {
-                        if (g_dev) g_dev->send(uf8::buildMotorEnable(strip, false));
+                        // Priority-send so motor-limp jumps any LED /
+                        // value-line bursts in the queue. Critical: if
+                        // the limp lands behind a 16-frame batch, the
+                        // motor stays engaged for ~25 ms during which
+                        // the user can't move the fader (touch echoes
+                        // also lag, so firmware never updates target).
+                        if (g_dev) g_dev->sendPriority(uf8::buildMotorEnable(strip, false));
                     }
                 } else {
                     g_touchReleasePending[strip].store(true);
@@ -1347,12 +1456,16 @@ void onMidiFromReaper(std::span<const uint8_t> bytes)
         return;
     }
 
-    // Fader pitch-bend: E<ch> <LSB> <MSB>  (3 bytes, channel 0..7 = strip)
+    // MCU pitch-bend (E<ch> LSB MSB) was previously forwarded as
+    // FF 1E motor-drive — but pushZonesForVisibleSlots already streams
+    // motor targets natively via uiVolLinear() and gates on
+    // g_touchReported, while this MIDI path did NOT. Result: any user
+    // who left an MCU surface configured against our virtual MIDI port
+    // (legacy CSI setup) had REAPER's volume-echo pitchbend re-engaging
+    // the motor mid-touch — fader felt locked because every motor-limp
+    // we sent was undone microseconds later by the next pitchbend.
+    // Drop the forward; native motor echo handles the same job correctly.
     if (bytes.size() == 3 && (bytes[0] & 0xF0) == 0xE0) {
-        const uint8_t strip = bytes[0] & 0x07;
-        if (strip < 8) {
-            g_dev->send(uf8::buildFaderPosition(strip, bytes[1], bytes[2]));
-        }
         return;
     }
 }
@@ -1566,47 +1679,45 @@ const uf8::LinkSlot* slotForStrip(MediaTrack* tr,
     return slot;
 }
 
-// V-Pot bar 16-bit LE encoding decoded from cap37 (HF Gain ±20 dB
-// sweep on 4K E) and cap38 (HF Freq sweep):
+// V-Pot bar 16-bit LE encoding from cap37 (HF Gain ±20 dB on 4K E)
+// and cap38 (HF Freq sweep). Mode register is paired 0x08 per strip
+// (bipolar centre-out render in firmware).
 //
-//   Bipolar (Gain, Pan, Trim, Fader):
-//     byte[0] = signed 8-bit, two's complement around centre
-//       0x00       = centre (with byte[1] = 0x80 marker)
-//       0x01..0x7F = positive (right of centre, increasing)
-//       0x80..0xFF = negative (0x80 max-neg, 0xFF just-below-centre)
-//     byte[1] = 0x80 only when byte[0]==0x00, else 0x00.
-//     cap37 max sweep observed: byte0 +0x64 / -0x9c (≈ ±100).
+//   Bipolar (Gain, Pan, Trim):
+//     byte0 = signed 8-bit two's complement, range [-100..+100]
+//       0x00 → centre   (REQUIRES byte1 = 0x80 anchor)
+//       0x64 → +full    (cap37 +20 dB max)
+//       0x9C → -full    (cap37 -20 dB max, = -100 signed)
+//     byte1 = 0x80 ONLY when byte0 = 0x00, else 0x00.
 //
 //   Unipolar (Freq, Q, Threshold):
-//     byte[0] = 0x01..0x62 linear (cap38 observed range), byte[1] = 0x00.
-//     SSL maps the slider's full sweep to that ~98-step range.
+//     byte0 = 0x01..0x62 linear (cap38 full sweep), byte1 = 0x00.
 //
-// Mode register `FF 66 09 0D` is init-only (set to 0x02 active /
-// 0x03 empty on first push), never updated again — re-asserting it
-// per tick triggers the firmware's transition animation.
-
-// Mode 0x02 (cap15 PM cycle) + unsigned byte0 with 0x80 = centre:
-//   0x00 = far left, 0x80 = LCD centre, 0xFF = far right.
-//   byte[1] = 0x00 always. SSL360's mode 0x08 + signed bytes from
-//   cap37 was a different render mode that doesn't match what we want.
+// Wire order matters: cap37 sends position (FF 66 11 0F) FIRST,
+// then mode (FF 66 09 0D) ~55 µs later. Sending mode-then-position
+// with mismatched encoding renders a wrong-direction bar.
 uint16_t vpotPosFromBipolar(double v)
 {
     if (v < -1.0) v = -1.0;
     if (v >  1.0) v =  1.0;
-    int byte0 = 128 + static_cast<int>(std::round(v * 127.0));
-    if (byte0 < 0)   byte0 = 0;
-    if (byte0 > 255) byte0 = 255;
-    return static_cast<uint16_t>(byte0);
+    int b0 = static_cast<int>(std::round(v * 100.0));
+    if (b0 == 0) return 0x8000;  // centre anchor: byte0=0x00, byte1=0x80
+    if (b0 < -100) b0 = -100;
+    if (b0 >  100) b0 =  100;
+    return static_cast<uint16_t>(static_cast<uint8_t>(static_cast<int8_t>(b0)));
 }
 
+// Mode 0x01 unipolar: byte0 = 0..0x64 (0..100), byte1 = 0x00.
+// cap15 t=11.052/13.206/14.795 mode-register `01 01 01 01 03 03 03 03`
+// with positions `00 00`/`32 00`/`64 00` cover 0%/50%/100%.
 uint16_t vpotPosFromUnipolar(double v)
 {
     if (v < 0.0) v = 0.0;
     if (v > 1.0) v = 1.0;
-    int byte0 = static_cast<int>(std::round(v * 255.0));
-    if (byte0 < 0)   byte0 = 0;
-    if (byte0 > 255) byte0 = 255;
-    return static_cast<uint16_t>(byte0);
+    int b0 = static_cast<int>(std::round(v * 100.0));
+    if (b0 < 0)   b0 = 0;
+    if (b0 > 100) b0 = 100;
+    return static_cast<uint16_t>(b0 & 0xFF);
 }
 
 uint16_t vpotPosFromNormalized(double v) { return vpotPosFromUnipolar(v); }
@@ -1805,6 +1916,11 @@ void pushZonesForVisibleSlots()
             }
         }
 
+        // FLIP active on this strip = global flip + a usable plug-in
+        // slot. Without a slot there's no parameter to flip onto the
+        // fader, so the strip falls back to normal mode silently.
+        const bool flipActive = g_flip.load() && slot && fxIdx >= 0;
+
         // V-Pot Readout Bar position. Binary toggle slots render as
         // full (0xFF) or empty (0x00) — no in-between gradient; their
         // V-Pot push toggles the param (handled in PanCenter). Other
@@ -1812,7 +1928,13 @@ void pushZonesForVisibleSlots()
         // normalised position. The mode register (FF 66 09 0D, set
         // below) stays at 0x01 so the firmware draws a single line
         // instead of the linear-fill animation mode 0x02 produces.
-        if (slot && fxIdx >= 0) {
+        if (flipActive) {
+            // FLIP: V-Pot reads track volume. Map pb14 → 0..100 unipolar.
+            const double volLinFlip = uiVolLinear(tr);
+            const uint16_t pbVol = linearVolumeToPb(volLinFlip);
+            vpotBar[s] = vpotPosFromUnipolar(
+                static_cast<double>(pbVol) / 16383.0);
+        } else if (slot && fxIdx >= 0) {
             const double norm = TrackFX_GetParamNormalized(tr, fxIdx, slot->vst3Param);
             const double visual = slot->inverted ? 1.0 - norm : norm;
             if (isBinarySlot(*slot)) {
@@ -1848,11 +1970,44 @@ void pushZonesForVisibleSlots()
             }
         }
 
-        // O/PdB Fader Readout — track volume in dB. GetTrackUIVolPan
-        // returns the UI-displayed value (reflects playback automation),
-        // which is what we want on the UF8 display.
+        // O/PdB Fader Readout — normally track volume in dB. In FLIP
+        // mode this zone shows the focused plug-in parameter's
+        // formatted value (truncated to 6 chars to fit the zone), so
+        // the fader has its own readout matching what it now drives.
         const double volLin = uiVolLinear(tr);
-        std::string dbStr = formatDbReadout(volLin);
+        std::string dbStr;
+        if (flipActive) {
+            char paramBuf[64] = {0};
+            const double norm = TrackFX_GetParamNormalized(tr, fxIdx, slot->vst3Param);
+            TrackFX_FormatParamValueNormalized(tr, fxIdx, slot->vst3Param,
+                                               norm, paramBuf, sizeof(paramBuf));
+            std::string s2(paramBuf);
+            // Squash UTF-8 ∞ then non-printable, trim leading spaces — same
+            // sanitisation as the value-line path so the LCD stays clean.
+            for (size_t p = 0; p + 2 < s2.size(); ) {
+                if (static_cast<unsigned char>(s2[p])     == 0xE2 &&
+                    static_cast<unsigned char>(s2[p + 1]) == 0x88 &&
+                    static_cast<unsigned char>(s2[p + 2]) == 0x9E) {
+                    s2.replace(p, 3, "INF"); p += 3;
+                } else ++p;
+            }
+            for (auto& c : s2) {
+                const unsigned char u = static_cast<unsigned char>(c);
+                if (u < 0x20 || u > 0x7E) c = '-';
+            }
+            while (!s2.empty() && s2.front() == ' ') s2.erase(0, 1);
+            // Drop space between number and unit so "16.00 KHz" → "16.00KHz".
+            for (size_t p = s2.size(); p > 1; --p) {
+                if (s2[p - 1] != ' ') continue;
+                const char prev = s2[p - 2];
+                if ((prev >= '0' && prev <= '9') || prev == '.') s2.erase(p - 1, 1);
+                break;
+            }
+            if (s2.size() > 6) s2.resize(6);
+            dbStr = s2;
+        } else {
+            dbStr = formatDbReadout(volLin);
+        }
         if (dbStr != g_lastFaderDb[s]) {
             g_lastFaderDb[s] = dbStr;
             g_dev->send(uf8::buildFaderDbReadout(static_cast<uint8_t>(s), dbStr));
@@ -1868,8 +2023,23 @@ void pushZonesForVisibleSlots()
         // for. commitDebouncedTouchReleases sends the authoritative
         // position multiple times right after motor-enable, so we lose
         // nothing by staying silent during touch.
+        //
+        // In FLIP mode the fader target is the focused parameter's
+        // normalised position (0..1) scaled to pb14, so the motor
+        // travels to where the plug-in param actually is.
         if (!g_touchReported[s].load()) {
-            const uint16_t pb = linearVolumeToPb(volLin);
+            uint16_t pb;
+            if (flipActive) {
+                const double norm = TrackFX_GetParamNormalized(
+                    tr, fxIdx, slot->vst3Param);
+                const double v = slot->inverted ? 1.0 - norm : norm;
+                int p14 = static_cast<int>(std::round(v * 16383.0));
+                if (p14 < 0)     p14 = 0;
+                if (p14 > 16383) p14 = 16383;
+                pb = static_cast<uint16_t>(p14);
+            } else {
+                pb = linearVolumeToPb(volLin);
+            }
             if (!g_faderPbInit || pb != g_lastFaderPb[s]) {
                 g_lastFaderPb[s] = pb;
                 const uint8_t lsb = static_cast<uint8_t>(pb & 0x7F);
@@ -1880,23 +2050,48 @@ void pushZonesForVisibleSlots()
 
         // Value Line — for SSL plug-ins: slot name + formatted param value
         // ("HF Freq    8.00kHz"). Otherwise: track volume ("Vol   -6.0dB").
+        // In FLIP mode the fader is driving the parameter, so we show
+        // track volume here — the data the V-Pot is now driving.
         std::string valLine;
-        if (slot && fxIdx >= 0) {
+        if (flipActive) {
+            valLine = composeValueLine("Vol", formatDbReadout(volLin));
+        } else if (slot && fxIdx >= 0) {
             char paramBuf[64] = {0};
             const double norm = TrackFX_GetParamNormalized(tr, fxIdx, slot->vst3Param);
             TrackFX_FormatParamValueNormalized(tr, fxIdx, slot->vst3Param,
                                                norm, paramBuf, sizeof(paramBuf));
             std::string valStr(paramBuf);
-            // SSL plug-ins format corner values like "-∞ dB" with UTF-8
-            // multi-byte runes that the UF8 LCD can't render (and which
-            // glitch the display). Squash anything non-printable-ASCII
-            // to '-' so the character count and cursor position stay
-            // correct. Trim leading pad spaces while we're at it.
+            // Replace UTF-8 ∞ (E2 88 9E) with "INF" before the non-ASCII
+            // squash — Comp Ratio at max returns "∞:1", which would
+            // otherwise become "---:1" hieroglyphs on the LCD.
+            for (size_t p = 0; p + 2 < valStr.size(); ) {
+                if (static_cast<unsigned char>(valStr[p])     == 0xE2 &&
+                    static_cast<unsigned char>(valStr[p + 1]) == 0x88 &&
+                    static_cast<unsigned char>(valStr[p + 2]) == 0x9E) {
+                    valStr.replace(p, 3, "INF");
+                    p += 3;
+                } else {
+                    ++p;
+                }
+            }
+            // Squash any remaining non-printable-ASCII so character count
+            // and cursor positions stay correct on the LCD.
             for (auto& c : valStr) {
                 const unsigned char u = static_cast<unsigned char>(c);
                 if (u < 0x20 || u > 0x7E) c = '-';
             }
             while (!valStr.empty() && valStr.front() == ' ') valStr.erase(0, 1);
+            // Non-numeric value (e.g. "OUT Hz" when LP/HP filter is bypassed,
+            // "Off Hz") — drop the unit suffix so the LCD reads just "OUT".
+            if (!valStr.empty()) {
+                const char first = valStr.front();
+                const bool numeric = (first >= '0' && first <= '9')
+                                  || first == '-' || first == '+' || first == '.';
+                if (!numeric) {
+                    const size_t sp = valStr.find(' ');
+                    if (sp != std::string::npos) valStr.erase(sp);
+                }
+            }
             // Strip the space between numeric value and unit suffix so
             // "16.00 KHz" → "16.00KHz" (saves one char so the leading
             // digit doesn't get clipped by the LCD value zone). Match
@@ -1927,18 +2122,16 @@ void pushZonesForVisibleSlots()
     }
     g_faderPbInit = true;
 
-    // V-Pot Readout Bar mode register `FF 66 09 0D <8 bytes>`. Per
-    // cap37: mode 0x08 = bipolar centre-out render. Mode 0x03 =
-    // disabled / no bar. We push only when state changes, deduped
-    // against g_lastVPotMode.
+    // V-Pot Readout Bar — per cap37, SSL360 sends position (FF 66 11 0F)
+    // FIRST, then mode (FF 66 09 0D) ~55 µs later. Reverse order with
+    // mismatched encoding makes the firmware render the bar wrong.
     //
-    // Per-strip mode:
-    //   0x08 if the strip has a renderable bar (plugin slot that's
-    //        not a binary toggle, OR pan fallback for tracks without
-    //        an SSL plugin)
-    //   0x03 if the strip has no track in the bank, OR the focused
-    //        slot is a binary param (button toggle — user wants text
-    //        only, no bar)
+    // Mode register is init-/transition-only (sent when going inactive
+    // → active, never re-asserted per tick). Per-strip mode:
+    //   0x08 = bipolar centre-out (Gain/Pan/Trim — cap37 mode register)
+    //   0x01 = unipolar L→R full sweep (Freq/Q/Threshold — cap15 mode
+    //          register `01 01 01 01 03 03 03 03` with byte0=0..0x64)
+    //   0x03 = empty / disabled (no track in bank, or binary toggle)
     std::array<uint8_t, 8> vpotMode{};
     {
         const int trackCount = CountTracks(nullptr);
@@ -1952,10 +2145,17 @@ void pushZonesForVisibleSlots()
             MediaTrack* tr = GetTrack(nullptr, realSlot);
             int fxIdx = -1;
             const uf8::LinkSlot* slot = slotForStrip(tr, focused, &fxIdx);
-            if (slot && isBinarySlot(*slot)) {
+            const bool flipHere = g_flip.load() && slot && fxIdx >= 0;
+            if (flipHere) {
+                vpotMode[s] = 0x01;  // FLIP: V-Pot = volume (unipolar)
+            } else if (!slot) {
+                vpotMode[s] = 0x08;  // pan fallback — bipolar centre
+            } else if (isBinarySlot(*slot)) {
                 vpotMode[s] = 0x03;  // binary — no bar
-            } else {
+            } else if (isBipolarSlot(*slot)) {
                 vpotMode[s] = 0x08;  // bipolar centre-out
+            } else {
+                vpotMode[s] = 0x01;  // unipolar L→R
             }
         }
     }
@@ -1964,6 +2164,15 @@ void pushZonesForVisibleSlots()
         for (uint8_t s = 0; s < 8; ++s) {
             if (vpotMode[s] != g_lastVPotMode[s]) { modeChanged = true; break; }
         }
+    }
+    bool barChanged = false;
+    for (uint8_t s = 0; s < 8; ++s) {
+        if (vpotBar[s] != g_lastVPotBar[s]) { barChanged = true; break; }
+    }
+    // Position FIRST per cap37 ordering.
+    if (barChanged) {
+        g_lastVPotBar = vpotBar;
+        g_dev->send(uf8::buildVPotReadoutBar(vpotBar));
     }
     if (modeChanged) {
         g_lastVPotMode = vpotMode;
@@ -1974,14 +2183,6 @@ void pushZonesForVisibleSlots()
         mf.push_back(cks);
         g_dev->send(std::move(mf));
         g_vpotBarInit = true;
-    }
-    bool barChanged = false;
-    for (uint8_t s = 0; s < 8; ++s) {
-        if (vpotBar[s] != g_lastVPotBar[s]) { barChanged = true; break; }
-    }
-    if (barChanged) {
-        g_lastVPotBar = vpotBar;
-        g_dev->send(uf8::buildVPotReadoutBar(vpotBar));
     }
 }
 
@@ -2148,7 +2349,53 @@ void pushSelColourBar()
 // get to it.
 int g_lastAutoMode = -2;          // -1 = no track, 0..5 = REAPER auto modes
 bool g_lastAnyArmed = false;
+bool g_lastForcePan = false;
+bool g_lastFlip = false;
+bool g_lastShiftHeld = false;
+EncoderMode g_lastEncoderMode = EncoderMode::Nav;
 bool g_globalLedsInit = false;
+
+// Map REAPER's automation-mode integer to a position in kAutoLeds.
+//   0 = Trim/Read (REAPER's per-track default; reads automation, no
+//                  punch-in writing) → light the dedicated Trim LED.
+//   1 = Read     → AutoRead.
+//   2 = Touch    → AutoTouch.
+//   3 = Write    → AutoWrite.
+//   4 = Latch / 5 = Latch Preview → AutoLatch.
+constexpr uf8::Uf8GlobalLed kAutoLeds[5] = {
+    uf8::Uf8GlobalLed::AutoRead,
+    uf8::Uf8GlobalLed::AutoWrite,
+    uf8::Uf8GlobalLed::AutoTrim,
+    uf8::Uf8GlobalLed::AutoLatch,
+    uf8::Uf8GlobalLed::AutoTouch,
+};
+int autoModeToLedIndex(int mode)
+{
+    switch (mode) {
+        case 0:         return 2;   // Trim/Read → Trim LED
+        case 1:         return 0;   // Read
+        case 2:         return 4;   // Touch
+        case 3:         return 1;   // Write
+        case 4: case 5: return 3;   // Latch / Latch Preview
+        default:        return -1;  // No selection — clear all
+    }
+}
+
+// Push the 5-button Auto LED state for `mode`. Used both by the periodic
+// LED refresh in pushUf8GlobalLeds and by the press handler — pre-empting
+// the firmware's auto-button "transition flash" through TRIM that would
+// otherwise be visible during the ~33 ms gap before our next tick reads
+// the new mode back from REAPER.
+void pushAutoModeLeds(int mode)
+{
+    if (!g_dev || !g_dev->isOpen()) return;
+    const int active = autoModeToLedIndex(mode);
+    for (int i = 0; i < 5; ++i) {
+        sendLedFrames(uf8::buildUf8GlobalLed(kAutoLeds[i], i == active));
+    }
+    g_lastAutoMode = mode;
+}
+
 void pushUf8GlobalLeds()
 {
     if (!g_dev || !g_dev->isOpen()) return;
@@ -2169,40 +2416,56 @@ void pushUf8GlobalLeds()
         }
     }
 
-    if (g_globalLedsInit && autoMode == g_lastAutoMode && anyArmed == g_lastAnyArmed) {
+    const bool forcePan        = g_forcePan.load();
+    const bool flip            = g_flip.load();
+    const bool shiftHeld       = g_shiftHeld.load();
+    const EncoderMode encMode  = g_encoderMode.load();
+
+    if (g_globalLedsInit && autoMode == g_lastAutoMode &&
+        anyArmed == g_lastAnyArmed && forcePan == g_lastForcePan &&
+        flip == g_lastFlip && shiftHeld == g_lastShiftHeld &&
+        encMode == g_lastEncoderMode) {
         return;
     }
 
     if (autoMode != g_lastAutoMode || !g_globalLedsInit) {
-        // Map REAPER auto-mode to a single Auto* LED. Off (-1, no
-        // selection) clears all five.
-        const auto modeFor = [](int m) -> int {
-            // Returns enum index into kAutoLeds, or -1 for none.
-            switch (m) {
-                case 0: case 1: return 0;  // Read
-                case 2:         return 4;  // Touch
-                case 3:         return 1;  // Write
-                case 4: case 5: return 3;  // Latch (incl. Preview)
-                default:        return -1;
-            }
-        };
-        constexpr uf8::Uf8GlobalLed kAutoLeds[5] = {
-            uf8::Uf8GlobalLed::AutoRead,
-            uf8::Uf8GlobalLed::AutoWrite,
-            uf8::Uf8GlobalLed::AutoTrim,
-            uf8::Uf8GlobalLed::AutoLatch,
-            uf8::Uf8GlobalLed::AutoTouch,
-        };
-        const int active = modeFor(autoMode);
-        for (int i = 0; i < 5; ++i) {
-            sendLedFrames(uf8::buildUf8GlobalLed(kAutoLeds[i], i == active));
-        }
-        g_lastAutoMode = autoMode;
+        pushAutoModeLeds(autoMode);
     }
 
     if (anyArmed != g_lastAnyArmed || !g_globalLedsInit) {
         sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Rec, anyArmed));
         g_lastAnyArmed = anyArmed;
+    }
+
+    // Pan LED tracks the global "force all V-Pots to Pan" toggle so the
+    // hardware shows the active mode at a glance.
+    if (forcePan != g_lastForcePan || !g_globalLedsInit) {
+        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Pan, forcePan));
+        g_lastForcePan = forcePan;
+    }
+
+    // FLIP LED indicates fader↔V-Pot swap is active.
+    if (flip != g_lastFlip || !g_globalLedsInit) {
+        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Flip, flip));
+        g_lastFlip = flip;
+    }
+
+    // Shift/Fine LED — momentary, follows the held state of 0x6F.
+    if (shiftHeld != g_lastShiftHeld || !g_globalLedsInit) {
+        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Fine, shiftHeld));
+        g_lastShiftHeld = shiftHeld;
+    }
+
+    // Channel-encoder mode LEDs — exactly one of Nav/Nudge/Focus is bright,
+    // matching the active EncoderMode. Encoder push (0x76) returns to Nav.
+    if (encMode != g_lastEncoderMode || !g_globalLedsInit) {
+        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Nav,
+                                             encMode == EncoderMode::Nav));
+        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Nudge,
+                                             encMode == EncoderMode::Nudge));
+        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Focus,
+                                             encMode == EncoderMode::Focus));
+        g_lastEncoderMode = encMode;
     }
 
     g_globalLedsInit = true;
@@ -2227,18 +2490,24 @@ void onTimer()
         g_uc1_surface->invalidateCache();
         g_uc1_surface->refresh();
     }
-    // UF8 init refire: same race as UC1 — the open-time
-    // g_bankDirty.store(true) is consumed by the first onTimer tick
-    // before REAPER has finished loading the project (CountTracks==0
-    // → loop pushes blank/off LEDs and bankDirty clears, leaving SEL
-    // LEDs in their firmware-default white state and no selected
-    // strip lit). Re-arm bankDirty here once tracks are present so
-    // the bank-refresh branch fires with real track state.
-    static bool g_uf8InitDone = false;
-    if (!g_uf8InitDone && g_dev && g_dev->isOpen() && CountTracks(nullptr) > 0) {
+    // UF8 init / project-load refire: when track count goes from 0
+    // (no project, or project-load mid-flight) to >0 (project ready),
+    // re-arm bank state and global-LED dedup. Without this:
+    //  - the open-time g_bankDirty.store(true) gets consumed by the
+    //    first onTimer tick before REAPER has finished loading, the
+    //    loop pushes blank/off LEDs, and bankDirty clears leaving SEL
+    //    LEDs in firmware-default white state.
+    //  - on subsequent project loads, dedup keeps Pan/Shift/Nav LEDs
+    //    in their pre-load committed state, but the firmware may have
+    //    cleared them — invalidating g_globalLedsInit forces re-push.
+    static int g_lastTrackCountForReinit = 0;
+    const int currentTrackCount = CountTracks(nullptr);
+    if (g_dev && g_dev->isOpen() &&
+        currentTrackCount > 0 && g_lastTrackCountForReinit == 0) {
         g_bankDirty.store(true);
-        g_uf8InitDone = true;
+        g_globalLedsInit = false;
     }
+    g_lastTrackCountForReinit = currentTrackCount;
     drainInputQueue();
     commitDebouncedTouchReleases();
     if (g_sync) g_sync->refresh(reaperColorForVisibleSlot);
@@ -2350,6 +2619,23 @@ extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(
 
     if (rec->caller_version != REAPER_PLUGIN_VERSION) return 0;
     if (REAPERAPI_LoadAPI(rec->GetFunc) != 0) return 0;
+
+    // Restore persisted UI mode flags (Pan override, encoder mode) so
+    // they survive REAPER restarts. ExtState is global per-extension —
+    // persistAcrossSessions=true writes through to reaper-extstate.ini.
+    if (const char* v = GetExtState("ReaSixty", "forcePan");
+        v && v[0] == '1') {
+        g_forcePan.store(true);
+    }
+    // Don't restore FLIP state — start with FLIP off so the user has
+    // a known-good baseline. Re-enable persistence once the FLIP code
+    // paths are fully de-risked.
+    SetExtState("ReaSixty", "flip", "0", true);
+    if (const char* m = GetExtState("ReaSixty", "encoderMode"); m && *m) {
+        if (std::strcmp(m, "Nudge") == 0)      g_encoderMode.store(EncoderMode::Nudge);
+        else if (std::strcmp(m, "Focus") == 0) g_encoderMode.store(EncoderMode::Focus);
+        else                                   g_encoderMode.store(EncoderMode::Nav);
+    }
 
     // Register as a full control-surface class. The user adds a
     // "Rea-Sixty" entry in Preferences → Control/OSC/Web; REAPER then

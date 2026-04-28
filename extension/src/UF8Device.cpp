@@ -7,7 +7,7 @@
 #include <condition_variable>
 #include <cstring>
 #include <mutex>
-#include <queue>
+#include <deque>
 #include <thread>
 
 #include "Protocol.h"
@@ -30,7 +30,7 @@ constexpr size_t   kInBufSize = 64;
 struct UF8Device::PendingSend {
     std::mutex              mu;
     std::condition_variable cv;
-    std::queue<std::vector<uint8_t>> q;
+    std::deque<std::vector<uint8_t>> q;
 };
 
 UF8Device::UF8Device()
@@ -217,7 +217,16 @@ void UF8Device::send(std::vector<uint8_t> frame)
 {
     {
         std::lock_guard<std::mutex> lk(pending_->mu);
-        pending_->q.push(std::move(frame));
+        pending_->q.push_back(std::move(frame));
+    }
+    pending_->cv.notify_one();
+}
+
+void UF8Device::sendPriority(std::vector<uint8_t> frame)
+{
+    {
+        std::lock_guard<std::mutex> lk(pending_->mu);
+        pending_->q.push_front(std::move(frame));
     }
     pending_->cv.notify_one();
 }
@@ -240,7 +249,13 @@ void UF8Device::workerLoop_()
     uint8_t hb2[64] = {0xff, 0x66, 0x21, 0x0a};  hb2[63] = 0x91;
     uint8_t hb3[13] = {0xff, 0x66, 0x09, 0x15, 0, 0, 0, 0, 0, 0, 0, 0, 0x84};
     uint8_t hb4[13] = {0xff, 0x66, 0x09, 0x16, 0, 0, 0, 0, 0, 0, 0, 0, 0x85};
+    // FF 5B 02 00 00 5D = primary liveness, 50 Hz in cap32 (the most-
+    // frequent OUT frame). UC1 uses the same family as its liveness;
+    // the f73201c motor-fix worked without it but firmware appears to
+    // have degraded behaviour without this stream — adding it 2026-04-28.
+    uint8_t hb5[6]  = {0xff, 0x5b, 0x02, 0x00, 0x00, 0x5d};
     auto lastHeartbeat = std::chrono::steady_clock::now();
+    auto lastHb5      = std::chrono::steady_clock::now();
 
     // Plugin-Mixer keepalive: FF 1B 01 <counter 0-3> <chk>. Captured in
     // cap32 (2026-04-25) firing every ~150 ms while SSL 360° is in PM
@@ -254,16 +269,20 @@ void UF8Device::workerLoop_()
     uint8_t pmCounter = 0;
 
     while (!shuttingDown_) {
-        // Drain pending sends.
-        std::vector<uint8_t> frame;
+        // Drain pending sends — pull up to N frames per iteration so a
+        // burst of state pushes (VU, SEL colour, zones) doesn't stall
+        // latency-sensitive frames like motor-limp behind them. The
+        // worker still wakes on cv.notify_one() from send().
+        std::vector<std::vector<uint8_t>> batch;
         {
             std::unique_lock<std::mutex> lk(pending_->mu);
             pending_->cv.wait_for(lk, std::chrono::milliseconds(20),
                 [&] { return !pending_->q.empty() || shuttingDown_; });
             if (shuttingDown_) break;
-            if (!pending_->q.empty()) {
-                frame = std::move(pending_->q.front());
-                pending_->q.pop();
+            constexpr size_t kMaxBatch = 16;
+            while (!pending_->q.empty() && batch.size() < kMaxBatch) {
+                batch.push_back(std::move(pending_->q.front()));
+                pending_->q.pop_front();
             }
         }
 
@@ -277,6 +296,14 @@ void UF8Device::workerLoop_()
             libusb_bulk_transfer(handle_, kEpOut, hb4, sizeof(hb4), &t, 100);
             lastHeartbeat = now;
         }
+        // FF 5B liveness — cap32 sends this at 50 Hz throughout. UC1
+        // uses the same family as primary-liveness; UF8 firmware appears
+        // to also expect it.
+        if (now - lastHb5 >= std::chrono::milliseconds(20)) {
+            int t = 0;
+            libusb_bulk_transfer(handle_, kEpOut, hb5, sizeof(hb5), &t, 100);
+            lastHb5 = now;
+        }
 
         // PM keepalive every 150 ms (counter cycles 0..3).
         if (now - lastPmKeepalive >= kPmKeepaliveInterval) {
@@ -288,7 +315,7 @@ void UF8Device::workerLoop_()
             lastPmKeepalive = now;
         }
 
-        if (!frame.empty()) {
+        for (auto& frame : batch) {
             int transferred = 0;
             int rc = libusb_bulk_transfer(handle_, kEpOut,
                                           frame.data(),
@@ -297,6 +324,24 @@ void UF8Device::workerLoop_()
             if (rc < 0) {
                 lastError_ = std::string("bulk OUT failed: ") + libusb_error_name(rc);
                 // Keep running; transient errors shouldn't kill the extension.
+            }
+            // Diag: log motor (FF 1D) and fader-pos (FF 1E) frames.
+            if (frame.size() >= 5 && frame[0] == 0xFF
+                && (frame[1] == 0x1D || frame[1] == 0x1E)) {
+                if (FILE* lg = std::fopen("/tmp/reaper_uf8_motor.log", "a")) {
+                    const auto t = std::chrono::system_clock::now().time_since_epoch();
+                    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t).count();
+                    if (frame[1] == 0x1D) {
+                        std::fprintf(lg, "[%lld] FF 1D 02 strip=%u en=%u rc=%d t=%d\n",
+                                     static_cast<long long>(ms), frame[3], frame[4], rc, transferred);
+                    } else {
+                        const bool flag = (frame[4] & 0x80) != 0;
+                        std::fprintf(lg, "[%lld] FF 1E 03 strip=%u lsb=%02x msb=%02x echo=%d rc=%d t=%d\n",
+                                     static_cast<long long>(ms), frame[3], frame[4], frame[5],
+                                     flag ? 1 : 0, rc, transferred);
+                    }
+                    std::fclose(lg);
+                }
             }
         }
 
