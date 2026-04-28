@@ -2118,16 +2118,15 @@ void pushZonesForVisibleSlots()
             const int8_t ledState = ledOn ? 1 : 0;
             if (ledState != g_lastTopSoftKey[s]) {
                 g_lastTopSoftKey[s] = ledState;
-                // LED colour follows the strip's REAPER track colour —
-                // matches SEL LED philosophy. Settings UI later will let
-                // users override per-strip / per-bank.
-                const uint32_t rgb = static_cast<uint32_t>(GetTrackColor(tr))
-                    & 0x00FFFFFFu;
-                const uf8::LedColour col = (rgb == 0)
-                    ? uf8::ledColourWhite()
-                    : uf8::ledColourForTrackRgb(rgb);
+                // SSL-mode default: all top-soft-key LEDs render in
+                // white. Bright (FF FF / 00 F0) on the strip whose
+                // bank position holds the focused param, dim (11 F1)
+                // on the rest. White has the highest dim brightness
+                // of any palette colour — the un-focused strips stay
+                // visibly lit instead of fading into ambiguity. User-
+                // defined per-strip colours land with the Settings UI.
                 sendLedFrames(uf8::buildTopSoftKeyLed(
-                    static_cast<uint8_t>(s), ledOn, col));
+                    static_cast<uint8_t>(s), ledOn, uf8::ledColourWhite()));
             }
             if (label != g_lastSlotLabel[s]) {
                 g_lastSlotLabel[s] = label;
