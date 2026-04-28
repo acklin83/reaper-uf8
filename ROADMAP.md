@@ -145,28 +145,32 @@ Supersedes the earlier Phase 3 design (Electron / SwiftUI standalone). Now that 
 Source notes (to be consolidated into a single canonical spec during 2.7a):
 - `docs/plan-settings-ui.md` — original tab structure and layout
 - `docs/bindings.md` — concrete JSON binding format, Learn-mode flow, builtin action catalogue
+- `docs/ssl-360-settings-inventory.md` — structural reference of every SSL 360° page + gap analysis (no SSL chrome / visuals — categories only)
 - Memory `uf8-softkey-banks.md` — UF8 PM-mode CS6 / BC2 bank tables, kNoSlot positions
 
 Settings tabs:
 
 | Tab | Source of truth | Purpose |
 |---|---|---|
-| Device | plan-settings-ui §"Device" | LED brightness, scribble brightness, meter ballistic, SEL-follows-color |
-| Bindings | bindings.md | Per-strip, transport, global buttons, soft-keys per layer, Learn mode |
-| Soft-Key Banks | uf8-softkey-banks.md | CS6 / BC2 bank tables with kNoSlot positions wirable to raw VST3 / REAPER actions |
-| Modes | ROADMAP 2.5 | Folder Mode, Show-Only-Selected, Send/Receive, Generic FX |
+| Device | plan-settings-ui §"Device" + SSL HOME equivalent | LED + scribble brightness, meter ballistic, SEL-follows-color, **Identify Unit** (LCD-flash), **Drag-to-Reorder** for multi-UF8 setups, **Export Diagnostic Report** (.zip with logs + version), serial-number display |
+| Bindings | bindings.md | Per-strip, transport, global buttons, soft-keys per layer, **3 Quick Keys**, **2 Foot-switches** (UF8 jacks), Learn mode |
+| Soft-Key Banks | uf8-softkey-banks.md | CS 6-bank / BC 2-bank tables with kNoSlot positions wirable to raw VST3 / REAPER actions |
+| Modes | ROADMAP 2.5 + SSL ADVANCED | Folder Mode, Show-Only-Selected, Send/Receive, Generic FX, **Always Fine Pan / Always Fine Sends** (V-Pot behaviour), **Show Auto State** on scribble |
 | Selection Sets | ROADMAP 2.5b | 8 GUID-keyed track-selection slots per project |
-| About | — | Version, build hash, repo / ReaPack links |
+| About | — | Version, build hash, REAPER + ReaImGui versions, repo / ReaPack links, log-file location |
 
 ### 2.7a — Spec consolidation + Device + About
 
-- Merge plan-settings-ui.md and bindings.md into a single `docs/settings-spec.md`. Resolve disagreements (multi-tab vs flat scroll → multi-tab wins, that's the implementation).
-- Implement Device tab against existing UF8/UC1 globals.
+- Merge plan-settings-ui.md and bindings.md into a single `docs/settings-spec.md` (incorporating the gap analysis from ssl-360-settings-inventory.md). Resolve disagreements (multi-tab vs flat scroll → multi-tab wins, that's the implementation).
+- Implement Device tab: brightness sliders, meter ballistic selector, SEL-follows-color toggle, connected-units list with Identify (LCD-flash via existing UF8/UC1 frame protocol) and Drag-to-Reorder.
+- Implement Export Diagnostic Report — single button → `~/Desktop/rea_sixty_diag_<date>.zip` with build hash, REAPER version, recent extension log, USB device tree.
 - Implement About tab — cheap.
 
 ### 2.7b — Bindings tab + JSON persistence
 
 - Per-strip / transport / global-button / soft-key editor matching bindings.md §"Config UI Sketch".
+- 3 Quick Keys section (defaulted to layer switches; user-rebindable).
+- 2 Foot-switch bindings — same model as buttons, depends on UF8 foot-switch USB event decode (capture work). If the protocol slot isn't decoded yet, ship the UI with a "not yet detected" placeholder rather than blocking the whole tab.
 - JSON read/write to `~/.../REAPER/rea_sixty/bindings.json` with mtime watch + reload.
 - Learn-mode arming via ExtState handshake.
 
@@ -179,6 +183,7 @@ Settings tabs:
 ### 2.7d — Modes + Selection Sets tabs
 
 - Lands alongside the matching Phase 2.5 feature code, not before — these tabs configure features that don't exist yet.
+- V-Pot Behaviour subsection (always-on, doesn't depend on Phase 2.5): Always Fine Pan, Always Fine Sends, Show Auto State on scribble (reads `GetTrackAutomationMode()`).
 
 ### 2.7e — Polish
 
@@ -188,6 +193,16 @@ Settings tabs:
 - Reset-to-defaults action.
 
 **Milestone complete when:** A non-developer user can remap any UF8/UC1 control via the Settings tab, save, reload across REAPER restarts, and see the change reflected on the hardware without restarting REAPER.
+
+### Explicitly skipped from SSL 360°
+
+These exist in SSL's settings but don't apply to Rea-Sixty's architecture:
+
+- **3-DAW Layer tabs** — REAPER-only by architectural decision (architecture-decision.md). Each Rea-Sixty install drives one DAW; layer switching at the surface level happens via REAPER actions
+- **Transport Master selection** — single REAPER instance, single transport
+- **DAW Profile XML compatibility** — we ship JSON; one-time SSL XML import only, already a Non-Goal
+- **In-app firmware update** — SSL still ships firmware blobs; users keep SSL 360° installed for that one task. Tracked in Phase 4
+- **LCD/Software Messages catalogue page** — we log to file, not modal popups; About tab links to log location instead
 
 ## Phase 4+ — Community
 
