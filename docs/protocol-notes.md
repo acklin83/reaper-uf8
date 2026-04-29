@@ -102,6 +102,30 @@ Global buttons (fixed IDs):
 
 Note: the UF8 firmware re-uses some MCU-standard IDs for non-MCU functions. The top soft-key range `0x18..0x1F` is MCU-SELECT in DAW/MCU mode but is the per-strip parameter-page key in PM mode — do not forward it blindly as MCU SELECT.
 
+### `31 60 FF 20 02 <strip> <state> CKSUM` (5-byte payload, 8-byte frame) — fader touch event
+Decoded 2026-04-29 from cap47.
+- `20 02` — fader-touch command type
+- `strip` = `0..7` (0 = Fader 1, 7 = Fader 8)
+- `state` = `0x01` touched, `0x00` released
+
+Checksum follows the standard sum-of-payload rule. Examples:
+- Fader 1 touch ON:  `31 60 FF 20 02 00 01 23` — payload `20+02+00+01 = 0x23` ✓
+- Fader 1 touch OFF: `31 60 FF 20 02 00 00 22` — payload `20+02+00+00 = 0x22` ✓
+- Fader 8 touch ON:  `31 60 FF 20 02 07 01 2A` — payload `20+02+07+01 = 0x2A` ✓
+
+### `31 60 FF 21 03 <strip> <pos_lo> <pos_hi> CKSUM` (6-byte payload, 9-byte frame) — fader position
+Decoded 2026-04-29 from cap47.
+- `21 03` — fader-position command type
+- `strip` = `0..7`
+- `pos_lo` / `pos_hi` — 16-bit position, **little-endian** (LSB first)
+
+During a manual slow drag of fader 1 we observed the LE value sweep smoothly, e.g. `BC 5F → A3 5F → 6C 5F → 37 5F → 08 5F → BB 5E → 5E 5E → FB 5D` = 0x5FBC, 0x5FA3, 0x5F6C, … decreasing monotonically (~10 ms cadence during active movement).
+
+Position is NOT capped at 0x4000 / 14-bit. Full 16-bit range is used; observed values from ~0x37xx to ~0x62xx during partial-throw movement, so range is at least 0x0000…0xFFFF. Confirm extremes with a future top-and-bottom sweep capture.
+
+### `31 60 FF 21 03 <strip> <pos_lo> <pos_hi> FF 33 02 00 <flag> CKSUM` (12-byte payload, 15-byte frame) — fader position with secondary tag
+Position frames sometimes have a `FF 33 02 00 <flag>` segment appended in the same URB (single bulk transfer carries two stacked frames). Observed 10× during the slow-drag of cap47, mostly clustered in the steepest movement region. `<flag>` alternates `0x00` ↔ `0x01` between consecutive tagged frames. Hypothesis: a secondary touch sensor (capacitive vs. mechanical) or a "moved past detent" flag — needs a follow-up capture isolating the trigger to confirm.
+
 ## Color palette (16 indices, 0x00-0x0F hypothesis)
 
 | Index | Color | Source |
