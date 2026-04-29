@@ -25,6 +25,26 @@ namespace {
 // Pick an order that makes sense hands-on: essentials first, then EQ,
 // then dynamics.
 
+// linkIdx convention:
+//   0..46  — SSL 360 Link's own VST3 param indices (authoritative virtual
+//            strip). See docs/ssl-native-params/VST3__SSL_360_Link_(SSL).md.
+//  100+    — extension-defined synthetic IDs for params NOT in SSL 360 Link
+//            (External S/C, routing toggles, Legacy Cut/Solo, Width Mode,
+//            Auto Make-up, etc.). Must stay stable across plug-in tables so
+//            cross-plugin focused-param chase keeps working.
+namespace ext {
+    constexpr int ExternalSC      = 100;
+    constexpr int FiltersToInput  = 101;
+    constexpr int DynamicsPreEq   = 102;
+    constexpr int FiltersToSC     = 103;
+    constexpr int EqToSC          = 104;
+    constexpr int FiltersIn       = 108;
+    constexpr int WidthMode       = 109;
+    constexpr int WidthFreq       = 110;
+    constexpr int AutoMakeup      = 111;
+    constexpr int AutoMakeupOff   = 112;
+}
+
 // Native SSL Channel Strip 2 (VST3: "SSL Native Channel Strip 2 (SSL)")
 constexpr LinkSlot kCs2Slots[] = {
     {  0, "Bypass",             "Bypass",           "BYP",    0,  false },
@@ -68,6 +88,23 @@ constexpr LinkSlot kCs2Slots[] = {
     { 32, "GateHold",           "Gate Hold",        "HOLD",  29,  false },
     { 34, "GateAttack",         "Gate F.Atk",    "F.ATK", 28,  false },
     { 33, "GateExpander",       "Gate/Exp",    "G/E",   27,  false },
+    // Routing / topology
+    { ext::ExternalSC,     "ExternalSC",     "External S/C",   "EXT",    1,  false },
+    {  5, "Phase",                            "Polarity",       "POL",    3,  false },
+    { ext::FiltersIn,      "FiltersIn",      "Filters In",     "FILT",  46,  false },
+    { ext::FiltersToInput, "FiltersToInput", "Filt To In",   "F-IN",  33,  false },
+    { ext::FiltersToSC,    "FiltersToSC",    "Filt To S/C",  "F-SC",  35,  false },
+    { ext::EqToSC,         "EqToSC",         "EQ To S/C",      "EQ-SC", 36,  false },
+    { ext::DynamicsPreEq,  "DynamicsPreEq",  "Dyn Pre-EQ",     "D-EQ",  34,  false },
+    // Compressor extension
+    { ext::AutoMakeup,     "AutoMakeup",     "Auto Make-up",   "A.MU",  49,  false },
+    { ext::AutoMakeupOff,  "AutoMakeupOff",  "A.M-up Off",     "A.MO",  50,  false },
+    // Output stage
+    {  2, "Width",                            "Width",          "WID",   40,  false },
+    { ext::WidthMode,      "WidthMode",      "Width Mode",     "W.MOD", 47,  false },
+    { ext::WidthFreq,      "WidthFreq",      "Width Freq",     "W.FRQ", 48,  false },
+    {  3, "Pan",                              "Pan",            "PAN",   41,  false },
+    { 46, "GroupSense",                       "GroupSense",     "GRP",   45,  false },
 };
 
 // 4K E — shares all CS-family slots except CompPeak; adds EQ Colour in
@@ -105,6 +142,24 @@ constexpr LinkSlot k4kESlots[] = {
     { 31, "GateRelease",        "Gate Rel",     "REL",   44,  false },
     { 34, "GateAttack",         "Gate F.Atk",    "F.ATK", 45,  false },
     { 33, "GateExpander",       "Gate/Exp",    "G/E",   46,  false },
+    // Routing / topology
+    { ext::ExternalSC,     "ExternalSC",     "External S/C",   "EXT",    1,  false },
+    {  5, "Phase",                            "Polarity",       "POL",    5,  false },
+    { ext::FiltersIn,      "FiltersIn",      "Filters In",     "FILT",  13,  false },
+    { ext::FiltersToInput, "FiltersToInput", "Filt To In",   "F-IN",  16,  false },
+    { ext::FiltersToSC,    "FiltersToSC",    "Filt To S/C",  "F-SC",  17,  false },
+    { ext::EqToSC,         "EqToSC",         "EQ To S/C",      "EQ-SC", 20,  false },
+    { ext::DynamicsPreEq,  "DynamicsPreEq",  "Dyn Pre-EQ",     "D-EQ",  34,  false },
+    // Compressor extension
+    { ext::AutoMakeup,     "AutoMakeup",     "Auto Make-up",   "A.MU",  40,  false },
+    { ext::AutoMakeupOff,  "AutoMakeupOff",  "A.M-up Off",     "A.MO",  41,  false },
+    // Output stage
+    {  2, "Width",                            "Width",          "WID",    9,  false },
+    { ext::WidthMode,      "WidthMode",      "Width Mode",     "W.MOD", 10,  false },
+    { ext::WidthFreq,      "WidthFreq",      "Width Freq",     "W.FRQ", 11,  false },
+    {  3, "Pan",                              "Pan",            "PAN",   12,  false },
+    // Misc (no Legacy Cut/Solo/SoloSafe on 4K E)
+    { 46, "GroupSense",                       "GroupSense",     "GRP",   48,  false },
 };
 
 // 4K B — no EQ Type toggle, no Fast-Attack / Gate-Hold / Gate-Attack /
@@ -139,6 +194,23 @@ constexpr LinkSlot k4kBSlots[] = {
     { 29, "GateRange",          "Gate Range",       "RNG",   34,  false },
     { 31, "GateRelease",        "Gate Rel",     "REL",   36,  false },
     { 33, "GateExpander",       "Gate/Exp",    "G/E",   37,  false },
+    // Routing / topology
+    { ext::ExternalSC,     "ExternalSC",     "External S/C",   "EXT",    1,  false },
+    {  5, "Phase",                            "Polarity",       "POL",    5,  false },
+    { ext::FiltersIn,      "FiltersIn",      "Filters In",     "FILT",  44,  false },
+    { ext::FiltersToInput, "FiltersToInput", "Filt To In",   "F-IN",  12,  false },
+    { ext::FiltersToSC,    "FiltersToSC",    "Filt To S/C",  "F-SC",  13,  false },
+    { ext::EqToSC,         "EqToSC",         "EQ To S/C",      "EQ-SC", 15,  false },
+    { ext::DynamicsPreEq,  "DynamicsPreEq",  "Dyn Pre-EQ",     "D-EQ",  29,  false },
+    // Compressor extension
+    { ext::AutoMakeup,     "AutoMakeup",     "Auto Make-up",   "A.MU",  47,  false },
+    { ext::AutoMakeupOff,  "AutoMakeupOff",  "A.M-up Off",     "A.MO",  48,  false },
+    // Output stage
+    {  2, "Width",                            "Width",          "WID",    8,  false },
+    { ext::WidthMode,      "WidthMode",      "Width Mode",     "W.MOD", 45,  false },
+    { ext::WidthFreq,      "WidthFreq",      "Width Freq",     "W.FRQ", 46,  false },
+    {  3, "Pan",                              "Pan",            "PAN",    9,  false },
+    { 46, "GroupSense",                       "GroupSense",     "GRP",   42,  false },
 };
 
 // 4K G — full-featured G-series strip.
@@ -175,6 +247,24 @@ constexpr LinkSlot k4kGSlots[] = {
     { 31, "GateRelease",        "Gate Rel",     "REL",   48,  false },
     { 34, "GateAttack",         "Gate F.Atk",    "F.ATK", 49,  false },
     { 33, "GateExpander",       "Gate/Exp",    "G/E",   50,  false },
+    // Routing / topology
+    { ext::ExternalSC,     "ExternalSC",     "External S/C",   "EXT",    1,  false },
+    {  5, "Phase",                            "Polarity",       "POL",   11,  false },
+    { ext::FiltersIn,      "FiltersIn",      "Filters In",     "FILT",  19,  false },
+    { ext::FiltersToInput, "FiltersToInput", "Filt To In",   "F-IN",   2,  false },
+    { ext::FiltersToSC,    "FiltersToSC",    "Filt To S/C",  "F-SC",   3,  false },
+    { ext::EqToSC,         "EqToSC",         "EQ To S/C",      "EQ-SC",  4,  false },
+    { ext::DynamicsPreEq,  "DynamicsPreEq",  "Dyn Pre-EQ",     "D-EQ",   5,  false },
+    // Compressor extension
+    { ext::AutoMakeup,     "AutoMakeup",     "Auto Make-up",   "A.MU",  44,  false },
+    { ext::AutoMakeupOff,  "AutoMakeupOff",  "A.M-up Off",     "A.MO",  45,  false },
+    // Output stage
+    {  2, "Width",                            "Width",          "WID",   15,  false },
+    { ext::WidthMode,      "WidthMode",      "Width Mode",     "W.MOD", 16,  false },
+    { ext::WidthFreq,      "WidthFreq",      "Width Freq",     "W.FRQ", 17,  false },
+    {  3, "Pan",                              "Pan",            "PAN",   18,  false },
+    // Misc (no Legacy Cut/Solo/SoloSafe on 4K G)
+    { 46, "GroupSense",                       "GroupSense",     "GRP",   52,  false },
 };
 
 // Bus Compressor 2 — virtual strip has 7 slots (idx 1..7) plus a Bypass
