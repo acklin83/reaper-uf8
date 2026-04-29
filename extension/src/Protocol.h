@@ -272,13 +272,11 @@ std::vector<uint8_t> buildLcdBrightness(uint8_t level);
 std::array<std::vector<uint8_t>, 2> buildVuMeter(const std::array<uint8_t, 16>& levels);
 
 // GR meter (single byte, focused-strip's CS dynamics):
-//   FF 66 09 15 <gr_byte> 00x7 CKSUM     (13 bytes)
-// Decoded 2026-04-28 from dual_35_cs_gr_ramp — byte ramps 0x02..0x18
-// across a slow CS GR sweep. Larger byte = more GR; UF8 renders the
-// on-screen GR arc from this single byte. Earlier protocol-notes had
-// FF 66 11 0F labelled as "GR meter per strip" — that was wrong; that
-// opcode is actually the Comp Threshold param-readout zone.
-std::vector<uint8_t> buildGrByte(uint8_t grByte);
+// FF 66 09 15 <s1>..<s8> CKSUM (13 bytes) — eight per-strip GR bytes,
+// not a single-byte frame as earlier notes suggested. The 50 Hz heartbeat
+// in UF8Device shares this opcode, so the per-strip bytes are stamped
+// directly into the heartbeat (UF8Device::setGrBytes) rather than emitted
+// as a separate frame; emitting both would race and flicker.
 
 // Selected-strip 16-bit bitmask. Fires on selection change.
 //   FF 66 03 06 <lo> <hi> CKSUM    (7 bytes)

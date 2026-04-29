@@ -1515,11 +1515,8 @@ void onUf8Input(const uint8_t* data, size_t len)
                     g_touchReleasePending[strip].store(false);
                     if (!g_touchReported[strip].exchange(true)) {
                         // Priority-send so motor-limp jumps any LED /
-                        // value-line bursts in the queue. Critical: if
-                        // the limp lands behind a 16-frame batch, the
-                        // motor stays engaged for ~25 ms during which
-                        // the user can't move the fader (touch echoes
-                        // also lag, so firmware never updates target).
+                        // value-line bursts in the queue. Same path as
+                        // f73201c — single FF 1D 02 strip 00.
                         if (g_dev) g_dev->sendPriority(uf8::buildMotorEnable(strip, false));
                     }
                 } else {
@@ -1695,6 +1692,7 @@ uint32_t reaperColorForVisibleSlot(int slot)
 std::string sslPluginShortName(MediaTrack* tr)
 {
     if (!tr) return {};
+    if (!ValidatePtr2(nullptr, tr, "MediaTrack*")) return {};
     const int fxCount = TrackFX_GetCount(tr);
     char buf[256];
     for (int fx = 0; fx < fxCount; ++fx) {
@@ -2480,7 +2478,7 @@ void commitDebouncedTouchReleases()
 
         if (!g_dev) continue;
         MediaTrack* tr = g_slotTrack[s];
-        if (!tr) continue;
+        if (!tr || !ValidatePtr2(nullptr, tr, "MediaTrack*")) continue;
 
         // Snap REAPER to the user's last raw fader position (regardless
         // of the >=4-LSB deadband) so REAPER reflects where the fader
@@ -2521,16 +2519,18 @@ void commitDebouncedTouchReleases()
     }
 }
 
-// Linear peak (0..1) → UF8 VU byte (0..31). -60 dBFS → 0, 0 dBFS → 31.
-// Uniform log-scale mapping across 60 dB. Matches the visible behaviour
-// on SSL's VU strips closely enough for Phase 1.
+// Linear peak (0..1) → UF8 VU byte (0..31). -55 dBFS → 0, 0 dBFS → 31.
+// The cutoff is intentionally above -60 dB: REAPER's track-peak ballistics
+// have a slow decay tail that drifts through -60..-55 even on silent
+// tracks, which would otherwise flicker the bottom LED. Snapping anything
+// below -55 to 0 gives a clean noise-floor.
 uint8_t peakToVuByte(double peak)
 {
     if (peak <= 0.0) return 0;
     const double dbfs = 20.0 * std::log10(peak);
-    if (dbfs >= 0.0)  return 0x1F;
-    if (dbfs <= -60.0) return 0x00;
-    const double f = (dbfs + 60.0) / 60.0;  // 0..1
+    if (dbfs >= 0.0)   return 0x1F;
+    if (dbfs <= -55.0) return 0x00;
+    const double f = (dbfs + 55.0) / 55.0;
     const int byte = static_cast<int>(f * 31.0 + 0.5);
     return static_cast<uint8_t>(std::clamp(byte, 0, 0x1F));
 }
@@ -2539,11 +2539,12 @@ std::array<uint8_t, 16> g_lastVuLevels{};
 bool g_vuInit = false;
 std::chrono::steady_clock::time_point g_lastVuPushTime{};
 
-// UF8 GR byte. Source is undefined until a plugin-GR probe is wired —
-// keep at 0 so the display doesn't show stale SSL-360°-left state. When
-// a GR provider exists it can call pushUf8Gr(byte) to update.
-uint8_t g_uf8GrByte = 0;
-uint8_t g_lastUf8GrByte = 0xFE;  // sentinel "unset"
+// UF8 GR bytes — one per visible strip. Carried by the FF 66 09 15
+// heartbeat at offsets 4..11 (strip 1 → byte 4, strip 8 → byte 11).
+// Byte 0x00 = no LEDs lit (true rest); ramps up monotonically to ~0x18
+// at full GR. Only the strip that hosts the focused CS plug-in carries
+// nonzero values; other strips stay at 0x00 (cleared each tick).
+std::array<uint8_t, 8> g_uf8GrBytes{};
 
 void pushVuMeter()
 {
@@ -2552,19 +2553,36 @@ void pushVuMeter()
     const int trackCount = CountTracks(nullptr);
     const int bankOffset = g_bankOffset.load();
     std::array<uint8_t, 16> levels{};
+
+    // Byte-level hysteresis per strip × channel. REAPER's peak ballistics
+    // produce 1-byte drift on continuous audio (block boundaries don't
+    // align with the cycle), which flickers the LED at the boundary
+    // between two byte values. Up moves go through immediately; a drop
+    // is only accepted if the new byte is at least 2 below the held byte.
+    static std::array<uint8_t, 16> s_held{};
+    auto stepByte = [](uint8_t& held, uint8_t raw) {
+        if (raw > held) held = raw;
+        else if (held - raw >= 2) held = raw;
+        // else: hold previous
+        return held;
+    };
+
     for (int s = 0; s < 8; ++s) {
         const int idx = s + bankOffset;
-        if (idx >= trackCount) continue;
-        MediaTrack* tr = GetTrack(nullptr, idx);
-        if (!tr) continue;
-        // Left = channel 0, right = channel 1. REAPER's peak is the
-        // channel's post-fader tap; pre-fader VU isn't exposed via this
-        // call, so "in" and "out" end up mirroring each other for mono
-        // fader moves. Good enough until a JSFX probe exposes pre-fader.
-        const double pl = Track_GetPeakInfo(tr, 0);
-        const double pr = Track_GetPeakInfo(tr, 1);
-        levels[s * 2 + 0] = peakToVuByte(pl);     // "input"
-        levels[s * 2 + 1] = peakToVuByte(pr);     // "output"
+        uint8_t rawL = 0, rawR = 0;
+        if (idx < trackCount) {
+            if (MediaTrack* tr = GetTrack(nullptr, idx)) {
+                // Left = channel 0, right = channel 1. REAPER's peak is
+                // the channel's post-fader tap; pre-fader VU isn't
+                // exposed via this call, so "in" and "out" end up
+                // mirroring each other for mono fader moves. Good
+                // enough until a JSFX probe exposes pre-fader.
+                rawL = peakToVuByte(Track_GetPeakInfo(tr, 0));
+                rawR = peakToVuByte(Track_GetPeakInfo(tr, 1));
+            }
+        }
+        levels[s * 2 + 0] = stepByte(s_held[s * 2 + 0], rawL);  // "input"
+        levels[s * 2 + 1] = stepByte(s_held[s * 2 + 1], rawR);  // "output"
     }
     // Throttle: peak bytes are 0..31, so a single audio sample drift can
     // toggle one byte every tick → 30 Hz of OUT frames during playback,
@@ -2919,10 +2937,19 @@ void onTimer()
             // enough to absorb sample-block variability.
             static double s_holdInL  = -120.0, s_holdInR  = -120.0;
             static double s_holdOutL = -120.0, s_holdOutR = -120.0;
-            constexpr double kDecayPerTick = 0.85;  // 30 Hz, τ ≈ 150 ms
+            // Linear-dB rate-limited fall. Original "0.85 of distance-from-
+            // floor" formula (commit 2026-04-28) decayed exponentially in
+            // linear-distance-from-floor space — h=-3 fell to h=-59 in 5
+            // ticks, fighting REAPER's internal peak ballistics and producing
+            // multi-LED flicker on the UC1 VU strip. Linear-dB at 1.5 dB/tick
+            // ≈ 45 dB/sec gives full-scale fall in ~1.3 s — standard VU look.
+            constexpr double kDbPerTick = 1.5;
             auto holdPeak = [&](double& hold, double raw) {
                 if (raw > hold) hold = raw;
-                else            hold = -120.0 + (hold + 120.0) * kDecayPerTick;
+                else {
+                    const double next = hold - kDbPerTick;
+                    hold = (next > raw) ? next : raw;
+                }
             };
 
             float dbInL = -120.f;
@@ -2959,49 +2986,58 @@ void onTimer()
         }
     }
     // UF8 GR — driven from the focused track's CS plug-in via
-    // TrackFX_GetNamedConfigParm("GainReduction_dB"). buildGrByte uses
-    // FF 66 09 15 (dual_35 2026-04-28). Mapping calibration:
-    //   byte 0x02 = 0 dB GR (rest position)
-    //   byte 0x18 = ~10 dB GR (was 20 dB, but user reports meter shows
-    //               too low — steepen by 2× to give 1.4 byte/dB)
-    // Plus a deadband at the bottom: SSL Native CS2's GainReduction_dB
-    // envelope-follower decays slowly after compression stops, drifting
-    // through fractional 0.1..0.4 dB residue. Without a deadband those
-    // values flicker the byte between 0x02 and 0x03 (= "bottom LED
-    // flickers after GR has occurred", user-observed). Snap to 0 when
-    // |gr| < 0.5 dB.
-    if (g_uc1_surface) {
-        if (auto* tr = static_cast<MediaTrack*>(g_uc1_surface->focusedTrack())) {
-            uc1::UC1Bindings b = uc1::lookupBindingsOnTrack(tr);
-            if (b.channelMap && b.channelFxIdx >= 0) {
-                char buf[64];
-                if (TrackFX_GetNamedConfigParm(tr, b.channelFxIdx,
-                                               "GainReduction_dB",
-                                               buf, sizeof(buf))) {
-                    float gr = static_cast<float>(std::atof(buf));
-                    if (gr < 0) gr = -gr;
-                    if (gr < 0.5f) gr = 0.f;          // deadband
-                    if (gr > 10.f) gr = 10.f;
-                    g_uf8GrByte = static_cast<uint8_t>(
-                        0x02 + std::lround(gr * ((0x18 - 0x02) / 10.0f)));
-                } else {
-                    g_uf8GrByte = 0x02;
+    // TrackFX_GetNamedConfigParm("GainReduction_dB"). The frame
+    // FF 66 09 15 <s1>..<s8> <chk> carries one GR byte per visible
+    // strip — earlier mistake was treating bytes 5..11 as zero-padding,
+    // so all GR rendered onto strip 1 only. Now: locate the focused
+    // track inside the visible bank and stamp its strip's byte.
+    // Calibration: byte 0x00 = rest (no LEDs), byte ~0x18 ≈ 10 dB GR
+    // (1.4 byte/dB slope, retained from earlier visual tuning).
+    // Ballistics: up immediately, down 1 byte/tick — Plugin's
+    // GainReduction_dB tracks the signal envelope tightly so the raw
+    // byte swings several positions per audio beat without rate-limit.
+    {
+        std::array<uint8_t, 8> targetBytes{};  // all zero by default
+        int focStrip = -1;
+        if (g_uc1_surface) {
+            if (auto* tr = static_cast<MediaTrack*>(g_uc1_surface->focusedTrack())) {
+                if (!ValidatePtr2(nullptr, tr, "MediaTrack*")) tr = nullptr;
+                const int trackCount = CountTracks(nullptr);
+                const int bankOffset = g_bankOffset.load();
+                int focIdx = -1;
+                if (tr) for (int i = 0; i < trackCount; ++i) {
+                    if (GetTrack(nullptr, i) == tr) { focIdx = i; break; }
                 }
-            } else {
-                g_uf8GrByte = 0x02;
+                if (focIdx >= bankOffset && focIdx < bankOffset + 8) {
+                    focStrip = focIdx - bankOffset;
+                    uc1::UC1Bindings b = uc1::lookupBindingsOnTrack(tr);
+                    if (b.channelMap && b.channelFxIdx >= 0) {
+                        char buf[64];
+                        if (TrackFX_GetNamedConfigParm(tr, b.channelFxIdx,
+                                                       "GainReduction_dB",
+                                                       buf, sizeof(buf))) {
+                            float gr = static_cast<float>(std::atof(buf));
+                            if (gr < 0) gr = -gr;
+                            if (gr > 10.f) gr = 10.f;
+                            const uint8_t newByte = static_cast<uint8_t>(
+                                std::lround(gr * (0x18 / 10.0f)));
+                            uint8_t& held = g_uf8GrBytes[focStrip];
+                            if (newByte > held) held = newByte;
+                            else if (held > newByte) --held;
+                            targetBytes[focStrip] = held;
+                        }
+                    }
+                }
             }
-        } else {
-            g_uf8GrByte = 0x02;
         }
-    }
-    // The UF8 firmware expects this frame as a continuous stream — same
-    // pattern as the BC mechanical-needle at ~30 Hz (dual_35 capture
-    // shows SSL360 re-emits FF 66 09 15 about every 33 ms even when
-    // the GR value is unchanged). Without the stream the on-screen GR
-    // arc fades / stops rendering between updates. Send every tick.
-    if (g_dev && g_dev->isOpen()) {
-        g_lastUf8GrByte = g_uf8GrByte;
-        g_dev->send(uf8::buildGrByte(g_uf8GrByte));
+        // Clear holders for non-focused strips so a previously-focused
+        // strip doesn't keep displaying its last GR after focus moves.
+        for (int s = 0; s < 8; ++s) {
+            if (s != focStrip) g_uf8GrBytes[s] = 0;
+        }
+        if (g_dev && g_dev->isOpen()) {
+            g_dev->setGrBytes(targetBytes);
+        }
     }
     if (g_uc1_surface) g_uc1_surface->poll();
 

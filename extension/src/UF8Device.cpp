@@ -247,7 +247,10 @@ void UF8Device::workerLoop_()
     //            keeps UF8 in Plugin-Mixer-Layer display mode.
     uint8_t hb1[64] = {0xff, 0x66, 0x21, 0x09};  hb1[63] = 0x90;
     uint8_t hb2[64] = {0xff, 0x66, 0x21, 0x0a};  hb2[63] = 0x91;
-    uint8_t hb3[13] = {0xff, 0x66, 0x09, 0x15, 0, 0, 0, 0, 0, 0, 0, 0, 0x84};
+    // hb3 carries live per-strip GR bytes. Without this the static all-
+    // zeros heartbeat raced our buildGrByte writes (same FF 66 09 15
+    // opcode), flickering the bottom GR LED.
+    uint8_t hb3[13] = {0xff, 0x66, 0x09, 0x15, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     uint8_t hb4[13] = {0xff, 0x66, 0x09, 0x16, 0, 0, 0, 0, 0, 0, 0, 0, 0x85};
     // FF 5B 02 00 00 5D = primary liveness, 50 Hz in cap32 (the most-
     // frequent OUT frame). UC1 uses the same family as its liveness;
@@ -292,6 +295,13 @@ void UF8Device::workerLoop_()
             int t = 0;
             libusb_bulk_transfer(handle_, kEpOut, hb1, sizeof(hb1), &t, 100);
             libusb_bulk_transfer(handle_, kEpOut, hb2, sizeof(hb2), &t, 100);
+            // Stamp live per-strip GR bytes into hb3 + recompute checksum.
+            const uint64_t packed = grBytes_.load(std::memory_order_relaxed);
+            for (int i = 0; i < 8; ++i)
+                hb3[4 + i] = static_cast<uint8_t>((packed >> (i * 8)) & 0xFF);
+            uint32_t sum = 0;
+            for (int k = 1; k < 12; ++k) sum += hb3[k];
+            hb3[12] = static_cast<uint8_t>(sum & 0xFF);
             libusb_bulk_transfer(handle_, kEpOut, hb3, sizeof(hb3), &t, 100);
             libusb_bulk_transfer(handle_, kEpOut, hb4, sizeof(hb4), &t, 100);
             lastHeartbeat = now;

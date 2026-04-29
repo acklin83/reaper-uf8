@@ -297,6 +297,13 @@ UC1Bindings lookupBindingsOnTrack(void* trackRaw)
     MediaTrack* tr = static_cast<MediaTrack*>(trackRaw);
     if (!tr) return result;
 
+    // Crash 2026-04-29 (SetSurfaceSolo during LoadProjectFromContext):
+    // REAPER frees old project's MediaTrack* before notifying surfaces,
+    // so a cached focusedTrack pointer becomes dangling. ValidatePtr2
+    // returns false for freed tracks; bail out instead of crashing in
+    // TrackFX_GetCount.
+    if (!ValidatePtr2(nullptr, tr, "MediaTrack*")) return result;
+
     const int n = TrackFX_GetCount(tr);
     char buf[256];
     for (int i = 0; i < n; ++i) {

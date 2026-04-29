@@ -8,6 +8,7 @@
 // is producer-side (thread-safe, enqueues into a lock-free ring buffer).
 //
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <functional>
@@ -57,6 +58,16 @@ public:
     void setButtonHandler(ButtonHandler h) { buttonHandler_ = std::move(h); }
     void setRawInputHandler(RawInputHandler h) { rawInputHandler_ = std::move(h); }
 
+    // Per-strip GR bytes carried in the FF 66 09 15 heartbeat frame.
+    // 13-byte heartbeat: FF 66 09 15 <s1>..<s8> <chk>. Worker stamps
+    // these into hb3 every 20 ms cycle.
+    void setGrBytes(const std::array<uint8_t, 8>& bytes) {
+        uint64_t packed = 0;
+        for (int i = 0; i < 8; ++i)
+            packed |= static_cast<uint64_t>(bytes[i]) << (i * 8);
+        grBytes_.store(packed, std::memory_order_relaxed);
+    }
+
     const std::string& lastError() const { return lastError_; }
 
 private:
@@ -67,6 +78,7 @@ private:
     libusb_context*       ctx_      = nullptr;
     libusb_device_handle* handle_   = nullptr;
     std::atomic<bool>     shuttingDown_{false};
+    std::atomic<uint64_t> grBytes_{0};
     std::thread           worker_;
     std::string           lastError_;
     ButtonHandler         buttonHandler_;
