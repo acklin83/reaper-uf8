@@ -730,6 +730,20 @@ uint16_t linearVolumeToPb(double linear)
     return static_cast<uint16_t>(pb + 0.5);
 }
 
+// Native UF8 IN fader format is 16-bit little-endian raw position
+// (NOT 14-bit MCU pitch-bend — cap47 confirmed full 8-bit LSB+MSB
+// usage). Treating it as 14-bit and masking off bit 7 lost two bits
+// of resolution and produced non-monotonic REAPER volume during
+// smooth physical drags.
+double pos16ToLinearVolume(uint16_t pos16)
+{
+    if (pos16 == 0) return 0.0;
+    const double topSlider = DB2SLIDER(kUf8FaderTopDb);
+    const double slider    = static_cast<double>(pos16) / 65535.0 * topSlider;
+    const double db        = SLIDER2DB(slider);
+    return std::pow(10.0, db / 20.0);
+}
+
 // Parse a UF8 vendor-USB IN report and, when it's an input event, convert
 // to the equivalent MCU MIDI message and push it back up to REAPER via the
 // virtual MIDI source. The UF8 firmware packs events into this EP 0x81 IN
@@ -1090,13 +1104,13 @@ reaper_csurf_reg_t g_csurfReg = {
 std::array<std::atomic<uint8_t>, 8> g_lastMsbOut{};
 std::array<std::atomic<uint8_t>, 8> g_lastLsbOut{};
 
-// Latest raw fader position (pb14) seen during a touch — recorded
-// regardless of deadband, so commitDebouncedTouchReleases can snap
-// REAPER to where the user's hand actually left the fader. Without
-// this the motor jerks back to pre-touch on release because the
-// >=4-LSB deadband swallowed the tiny finger-induced shift.
-std::array<std::atomic<uint16_t>, 8> g_lastTouchPb{};
-std::array<std::atomic<bool>, 8>     g_lastTouchPbValid{};
+// Latest raw fader position (16-bit LE, native UF8 IN format) seen during
+// a touch — recorded regardless of deadband, so commitDebouncedTouchReleases
+// can snap REAPER to where the user's hand actually left the fader. Without
+// this the motor jerks back to pre-touch on release because the deadband
+// swallowed the tiny finger-induced shift.
+std::array<std::atomic<uint16_t>, 8> g_lastTouchPos16{};
+std::array<std::atomic<bool>, 8>     g_lastTouchPos16Valid{};
 
 // Last fader motor position we actually wrote to the UF8 — lets the timer
 // dedup motor-echo pushes, and lets the touch-release handler prime the
@@ -1166,41 +1180,51 @@ void onUf8Input(const uint8_t* data, size_t len)
 
         // Dispatch by command.
         if (cmd == 0x21 && data[i + 2] == 0x03) {
-            // Fader position: FF 21 03 strip A B cksum
-            // A = MCU LSB (high bit is a flag, masked), B = MCU MSB.
-            // Native route: push into the input queue as an absolute volume
-            // (coalesced by strip) — the timer will apply it to the track.
-            // We only queue while the user is actively touching the fader,
-            // so REAPER's motor echo doesn't feed back.
+            // Fader position: FF 21 03 strip <lsb> <msb> cksum
+            // 16-bit little-endian raw position (cap47 2026-04-29 — full
+            // 8-bit LSB+MSB, NOT 14-bit MCU pitch-bend). We only queue
+            // while the user is actively touching the fader, so REAPER's
+            // motor echo doesn't feed back.
             const uint8_t strip = data[i + 3];
             if (strip < 8 && g_touchReported[strip].load()) {
-                const uint8_t lsb = data[i + 4] & 0x7F;
-                const uint8_t msb = data[i + 5] & 0x7F;
-                const uint16_t pb14 = static_cast<uint16_t>(lsb | (msb << 7));
+                const uint8_t lsb = data[i + 4];
+                const uint8_t msb = data[i + 5];
+                const uint16_t pos16 = static_cast<uint16_t>(lsb | (msb << 8));
                 // Always record the raw position so the touch-release
                 // commit can snap REAPER to where the fader physically
                 // ended up, even if every frame this touch was sub-deadband.
-                g_lastTouchPb[strip].store(pb14);
-                g_lastTouchPbValid[strip].store(true);
-                // Echo the position back to UF8 with bit 7 of LSB SET.
-                // SSL360 does this throughout every touch (cap32 OUT
-                // frames at 0.497..1.748). The firmware uses these
-                // echoes to update its motor-target buffer WITHOUT
+                g_lastTouchPos16[strip].store(pos16);
+                g_lastTouchPos16Valid[strip].store(true);
+                // Echo the position back to UF8 as a 14-bit MCU FF 1E
+                // frame with bit 7 of LSB SET. SSL360 does this throughout
+                // every touch (cap32 OUT 0.497..1.748). The firmware uses
+                // these echoes to update its motor-target buffer WITHOUT
                 // engaging the motor. When the touch ends the firmware
-                // implicitly re-engages on this target — no jerk
-                // because the target is exactly where the user's hand
-                // left the fader. Without these echoes the firmware
-                // re-engages to the pre-touch target = the jerk.
+                // implicitly re-engages on this target — no jerk because
+                // the target is exactly where the user's hand left the
+                // fader. Without these echoes the firmware re-engages to
+                // the pre-touch target = the jerk.
+                //
+                // OUT format stays 14-bit MCU (top 14 bits of pos16): the
+                // firmware's FF 1E target uses the MCU pitch-bend layout
+                // and the bit-7-of-LSB flag relies on the LSB top bit
+                // being free, which only holds in 14-bit MCU framing.
+                const uint16_t pb14   = static_cast<uint16_t>(pos16 >> 2);
+                const uint8_t  outLsb = static_cast<uint8_t>(pb14 & 0x7F);
+                const uint8_t  outMsb = static_cast<uint8_t>((pb14 >> 7) & 0x7F);
                 if (g_dev) {
-                    g_dev->send(uf8::buildFaderPosition(strip, lsb | 0x80, msb));
+                    g_dev->send(uf8::buildFaderPosition(strip, outLsb | 0x80, outMsb));
                 }
-                const uint8_t prevMsb = g_lastMsbOut[strip].load();
-                const uint8_t prevLsb = g_lastLsbOut[strip].load();
-                const int lsbDelta = std::abs(int(lsb) - int(prevLsb));
-                if (msb != prevMsb || lsbDelta >= 4) {
+                // Deadband: ignore sub-16/65535 ≈ 0.024% jitter so REAPER
+                // isn't spammed with envelope-noise volume changes. (Old
+                // 14-bit code used delta ≥ 4 / 16383, same threshold.)
+                const uint16_t prev    = static_cast<uint16_t>(
+                    g_lastMsbOut[strip].load() << 8 | g_lastLsbOut[strip].load());
+                const int      delta16 = std::abs(int(pos16) - int(prev));
+                if (delta16 >= 16) {
                     g_lastMsbOut[strip].store(msb);
                     g_lastLsbOut[strip].store(lsb);
-                    queueInput({PendingInput::VolumeAbs, strip, pbToLinearVolume(pb14)});
+                    queueInput({PendingInput::VolumeAbs, strip, pos16ToLinearVolume(pos16)});
                 }
             }
         } else if (cmd == 0x22 && data[i + 2] == 0x03) {
@@ -2481,27 +2505,28 @@ void commitDebouncedTouchReleases()
         if (!tr || !ValidatePtr2(nullptr, tr, "MediaTrack*")) continue;
 
         // Snap REAPER to the user's last raw fader position (regardless
-        // of the >=4-LSB deadband) so REAPER reflects where the fader
-        // ended up. In FLIP mode the fader drives the focused param
-        // instead of track volume, so the snap goes to the param.
-        if (g_lastTouchPbValid[s].load()) {
-            const uint16_t touchPb = g_lastTouchPb[s].load();
+        // of the deadband) so REAPER reflects where the fader ended up.
+        // In FLIP mode the fader drives the focused param instead of
+        // track volume, so the snap goes to the param. Position is the
+        // 16-bit-LE raw IN value (cap47 — not 14-bit MCU pitch-bend).
+        if (g_lastTouchPos16Valid[s].load()) {
+            const uint16_t touchPos16 = g_lastTouchPos16[s].load();
             const auto focusedT = uf8::getFocusedParam();
             auto mmT = uf8::lookupPluginOnTrack(tr, focusedT.domain);
             const uf8::LinkSlot* slT = (!g_forcePan.load() && mmT.map)
                 ? uf8::findSlotByLinkIdx(*mmT.map, focusedT.slotIdx)
                 : nullptr;
             if (g_flip.load() && slT) {
-                double normT = static_cast<double>(touchPb) / 16383.0;
+                double normT = static_cast<double>(touchPos16) / 65535.0;
                 if (slT->inverted) normT = 1.0 - normT;
                 if (normT < 0.0) normT = 0.0;
                 if (normT > 1.0) normT = 1.0;
                 TrackFX_SetParamNormalized(tr, mmT.fxIndex,
                     slT->vst3Param, normT);
             } else {
-                CSurf_OnVolumeChange(tr, pbToLinearVolume(touchPb), false);
+                CSurf_OnVolumeChange(tr, pos16ToLinearVolume(touchPos16), false);
             }
-            g_lastTouchPbValid[s].store(false);
+            g_lastTouchPos16Valid[s].store(false);
         }
 
         // Re-engage the motor. The firmware's target buffer is ALREADY
