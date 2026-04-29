@@ -444,6 +444,13 @@ uint16_t linearVolumeToPb(double linear);
 double   pbToLinearVolume(uint16_t pb14);
 double   uiVolLinear(MediaTrack* tr);
 
+// Hardware fader top — the actual highest pb14 the UF8 firmware emits.
+// Defined here so drainInputQueue can normalise FLIP-mode fader values
+// against the real hardware range, not the 14-bit protocol max (16383).
+// Full rationale + calibration in the kUf8FaderTopDb / pbToLinearVolume
+// block further down. Kept in sync with that block.
+constexpr uint16_t kUf8FaderPbMax = 15583;
+
 void queueInput(PendingInput e)
 {
     std::lock_guard<std::mutex> lk(g_inQueueMutex);
@@ -555,10 +562,14 @@ void drainInputQueue()
                 break;
             case PendingInput::VolumeAbs: {
                 // FLIP: fader drives the focused plug-in parameter on this
-                // strip's track instead of track volume. We need the fader
-                // position in normalised [0..1] form — reverse the linear
-                // volume back through linearVolumeToPb to recover the pb14
-                // the user moved to (the round-trip is exact at pb14 res).
+                // strip's track instead of track volume. Read the raw
+                // pb14 straight from the touch buffer — bypass the volume
+                // calibration (generic params want a clean 0..1 sweep,
+                // not REAPER's slider law) and divide by kUf8FaderPbMax
+                // (15583, the actual hardware top — see fader-top probe
+                // 2026-04-29) so norm reaches 1.0 at mechanical top.
+                // 16383 here would cap norm at 0.951, leaving e.g. Pan
+                // 5% short of full R.
                 const auto focusedF = uf8::getFocusedParam();
                 auto mmF = uf8::lookupPluginOnTrack(tr, focusedF.domain);
                 const bool forcePanF = g_forcePan.load();
@@ -567,7 +578,8 @@ void drainInputQueue()
                     : nullptr;
                 if (g_flip.load() && slF) {
                     const uint16_t pbF = linearVolumeToPb(e.value);
-                    double normF = static_cast<double>(pbF) / 16383.0;
+                    double normF = static_cast<double>(pbF) /
+                                   static_cast<double>(kUf8FaderPbMax);
                     if (slF->inverted) normF = 1.0 - normF;
                     if (normF < 0.0) normF = 0.0;
                     if (normF > 1.0) normF = 1.0;
@@ -696,23 +708,76 @@ void drainInputQueue()
     }
 }
 
-// UF8 fader-top dB value. The MCU-compatible top on UF8 is +10 dB
-// (different from REAPER's default slider top of +12 dB). Mapping pb14
-// through REAPER's slider law directly puts the UF8 0-dB tick ≈ +2.25 dB
-// hotter in REAPER; scaling to DB2SLIDER(+10) fixes the round-trip so
-// physical 0-dB on the UF8 matches 0-dB in REAPER.
-constexpr double kUf8FaderTopDb = 10.0;
+// UF8 fader calibration. Two layers:
+//
+//   1. Hardware facts (probed 2026-04-29): the fader emits pb14 ≈ 15583
+//      at mechanical top, not the protocol max 16383 — there's a ~5%
+//      deadband at the top of travel.
+//
+//   2. Curve mismatch: REAPER's default slider law is not the same as
+//      UF8's printed scale. Even after stretching (1) to put +12 at
+//      mechanical top, intermediate marks land 2–14 dB hot (e.g. UF8 "0"
+//      read +4.07, UF8 "-30" read -21). The user's calibration table
+//      below maps from REAPER-current-reading → UF8-printed dB so the
+//      printed marks line up with REAPER's volume display.
+constexpr double   kUf8FaderTopDb  = 12.0;
+// kUf8FaderPbMax is forward-declared earlier (used by drainInputQueue).
 
-// Convert a 14-bit MCU pitch-bend value (0..16383) to a linear REAPER
-// volume (1.0 == 0 dB) via REAPER's own slider curve, scaled so pb14
-// = 16383 maps to kUf8FaderTopDb.
+// Calibration sample: with kUf8FaderTopDb=12 and kUf8FaderPbMax=15583
+// the bare slider-law mapping placed each UF8 mark at this much in
+// REAPER. We piecewise-linear interpolate to push the printed marks
+// onto their stated dB values.
+//
+// Sorted descending in current_db so the lookup walks from the top.
+struct FaderCalPoint { double current_db; double target_db; };
+constexpr FaderCalPoint kFaderCal[] = {
+    {  +12.00,  +12.0 },   // mechanical top (slider already at top)
+    {   +8.40,   +6.0 },
+    {   +4.07,    0.0 },
+    {   +0.74,   -5.0 },
+    {   -5.65,  -10.0 },
+    {  -13.70,  -20.0 },
+    {  -21.00,  -30.0 },
+    {  -32.00,  -40.0 },
+    {  -46.00,  -60.0 },
+    { -150.00, -150.0 },   // silence floor
+};
+
+double interpFaderCal(double x, bool current_to_target)
+{
+    const auto& tab = kFaderCal;
+    constexpr size_t n = std::size(kFaderCal);
+
+    auto getX = [&](size_t i) {
+        return current_to_target ? tab[i].current_db : tab[i].target_db;
+    };
+    auto getY = [&](size_t i) {
+        return current_to_target ? tab[i].target_db  : tab[i].current_db;
+    };
+
+    if (x >= getX(0))     return getY(0);
+    if (x <= getX(n - 1)) return getY(n - 1);
+    for (size_t i = 1; i < n; ++i) {
+        if (x >= getX(i)) {
+            const double t = (x - getX(i)) / (getX(i - 1) - getX(i));
+            return getY(i) + t * (getY(i - 1) - getY(i));
+        }
+    }
+    return getY(n - 1);
+}
+
+// Convert a 14-bit pb value to linear REAPER volume. Two stages:
+//   pb14 → REAPER's slider-law dB (the "raw" reading) → calibrated dB.
 double pbToLinearVolume(uint16_t pb14)
 {
     if (pb14 == 0) return 0.0;
+    if (pb14 > kUf8FaderPbMax) pb14 = kUf8FaderPbMax;
     const double topSlider = DB2SLIDER(kUf8FaderTopDb);
-    const double slider    = static_cast<double>(pb14) / 16383.0 * topSlider;
-    const double db        = SLIDER2DB(slider);
-    return std::pow(10.0, db / 20.0);
+    const double slider    = static_cast<double>(pb14) /
+                             static_cast<double>(kUf8FaderPbMax) * topSlider;
+    const double db_raw    = SLIDER2DB(slider);
+    const double db_cal    = interpFaderCal(db_raw, /*current_to_target=*/true);
+    return std::pow(10.0, db_cal / 20.0);
 }
 
 // Inverse of pbToLinearVolume. Used to echo REAPER volume back onto the
@@ -720,13 +785,14 @@ double pbToLinearVolume(uint16_t pb14)
 uint16_t linearVolumeToPb(double linear)
 {
     if (!(linear > 0.0)) return 0;                  // catches 0 and NaN
-    const double db        = 20.0 * std::log10(linear);
-    const double slider    = DB2SLIDER(db);
+    const double db_target = 20.0 * std::log10(linear);
+    const double db_raw    = interpFaderCal(db_target, /*current_to_target=*/false);
+    const double slider    = DB2SLIDER(db_raw);
     const double topSlider = DB2SLIDER(kUf8FaderTopDb);
     if (!(topSlider > 0.0)) return 0;
-    double pb = slider / topSlider * 16383.0;
-    if (pb < 0)       pb = 0;
-    if (pb > 16383.0) pb = 16383.0;
+    double pb = slider / topSlider * static_cast<double>(kUf8FaderPbMax);
+    if (pb < 0)                                pb = 0;
+    if (pb > static_cast<double>(kUf8FaderPbMax)) pb = kUf8FaderPbMax;
     return static_cast<uint16_t>(pb + 0.5);
 }
 
@@ -2267,9 +2333,13 @@ void pushZonesForVisibleSlots()
                 const double norm = TrackFX_GetParamNormalized(
                     tr, fxIdx, slot->vst3Param);
                 const double v = slot->inverted ? 1.0 - norm : norm;
-                int p14 = static_cast<int>(std::round(v * 16383.0));
-                if (p14 < 0)     p14 = 0;
-                if (p14 > 16383) p14 = 16383;
+                // Scale to the actual hardware fader top (kUf8FaderPbMax)
+                // so a fully-right param parks the motor at mechanical top
+                // exactly. 16383 here would aim past the hardware deadband.
+                int p14 = static_cast<int>(std::round(
+                    v * static_cast<double>(kUf8FaderPbMax)));
+                if (p14 < 0)              p14 = 0;
+                if (p14 > kUf8FaderPbMax) p14 = kUf8FaderPbMax;
                 pb = static_cast<uint16_t>(p14);
             } else {
                 pb = linearVolumeToPb(volLin);
@@ -2492,7 +2562,8 @@ void commitDebouncedTouchReleases()
                 ? uf8::findSlotByLinkIdx(*mmT.map, focusedT.slotIdx)
                 : nullptr;
             if (g_flip.load() && slT) {
-                double normT = static_cast<double>(touchPb) / 16383.0;
+                double normT = static_cast<double>(touchPb) /
+                               static_cast<double>(kUf8FaderPbMax);
                 if (slT->inverted) normT = 1.0 - normT;
                 if (normT < 0.0) normT = 0.0;
                 if (normT > 1.0) normT = 1.0;
