@@ -1501,18 +1501,21 @@ void onUf8Input(const uint8_t* data, size_t len)
                 }
                 handledNatively = true;
             } else if (id == 0x50) {
-                // Plugin button — toggles "UF8 faders drive plug-in faders"
-                // mode. State + LED-feedback land here; actual fader-routing
-                // wireup is a follow-up phase.
+                // Plugin button — toggles "UF8 faders drive SSL strip
+                // fader" mode. With it on, the fader steers the CS
+                // plug-in's Fader Level (linkIdx 35) and the V-Pot's
+                // Pan-fallback steers the plug-in's Pan (linkIdx 3);
+                // off restores REAPER track volume + track pan.
+                // pageDirty kicks the per-strip caches so motor / O-PdB
+                // / Value Line re-render in the new mode immediately
+                // — without it the fader stays parked at the previous
+                // mode's pb14 until the next external change.
                 if (pressed) {
                     const bool next = !g_pluginFaderMode.load();
                     g_pluginFaderMode.store(next);
+                    g_pageDirty.store(true);
                     SetExtState("ReaSixty", "pluginFaderMode",
                                 next ? "1" : "0", true);
-                    char line[64];
-                    std::snprintf(line, sizeof(line),
-                        "Plugin button: faderMode=%d\n", next ? 1 : 0);
-                    ShowConsoleMsg(line);
                 }
                 handledNatively = true;
             } else if (id == 0x6E) {
