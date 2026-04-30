@@ -133,6 +133,12 @@ enum class LedClass : uint8_t {
     Sel  = 2,
 };
 
+// Three-state global-LED brightness. Some UF8 buttons (Page Left/Right,
+// Send/Plugin row) need both colour-pair (FF 38/39 04) and legacy mono
+// (FF 3B 03) frames sent together — verified via cap48/cap49/cap50
+// captures 2026-04-30.
+enum class GlobalLedState : uint8_t { Off, Dim, Bright };
+
 // 4 bytes drive a coloured LED in DAW-Colour mode: bright pair (when lit)
 // + dim pair (when un-lit). All four come from cap31/cap33 byte tables.
 struct LedColour {
@@ -165,6 +171,12 @@ LedColour ledColourClassDefault(LedClass cls);
 struct LedColourFrames {
     std::vector<uint8_t> ff38;
     std::vector<uint8_t> ff39;
+    // Optional FF 3B 03 mono frame appended after the colour-pair —
+    // populated for global LEDs whose def has `legacy = true` (Page L/R,
+    // Send/Plugin row). cap48/cap49 show SSL360 sending both families
+    // together; the colour-pair sets baseline + dim/off-state colour, the
+    // legacy frame triggers the actual on/off transition.
+    std::vector<uint8_t> legacy;
 };
 
 LedColourFrames buildLedColourPair(uint8_t strip, LedClass cls, bool on,
@@ -206,6 +218,7 @@ enum class Uf8GlobalLed : uint8_t {
 };
 
 LedColourFrames buildUf8GlobalLed(Uf8GlobalLed btn, bool on);
+LedColourFrames buildUf8GlobalLed(Uf8GlobalLed btn, GlobalLedState state);
 
 // Selected-strip bitmask. cap33 shows SSL360 sending this on every
 // selection change in PM Layer + DAW Colour mode — it's what tells the

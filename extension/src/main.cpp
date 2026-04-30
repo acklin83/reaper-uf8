@@ -917,8 +917,9 @@ uf8::LedClass toUf8LedClass(LedClass cls)
 void sendLedFrames(uf8::LedColourFrames frames)
 {
     if (!g_dev) return;
-    if (!frames.ff38.empty()) g_dev->send(std::move(frames.ff38));
-    if (!frames.ff39.empty()) g_dev->send(std::move(frames.ff39));
+    if (!frames.ff38.empty())   g_dev->send(std::move(frames.ff38));
+    if (!frames.ff39.empty())   g_dev->send(std::move(frames.ff39));
+    if (!frames.legacy.empty()) g_dev->send(std::move(frames.legacy));
 }
 
 // Forward declarations for helpers defined further down (used by
@@ -3002,12 +3003,18 @@ void pushUf8GlobalLeds()
         }
     }
 
-    // Page Left LED — bright always while extension is active. The
-    // PM-mode soft-key bank navigation wraps around so there is always
-    // a "previous bank" to go to. Cell 0x2D (probe 2026-04-30).
+    // Page Left / Page Right LEDs — bright always while extension is
+    // active. The PM-mode soft-key bank navigation wraps around so there
+    // is always a "previous" / "next" bank to go to. Cells confirmed
+    // via cap48 2026-04-30: PL 0x2D, PR 0x2C. Both are 3-state legacy
+    // LEDs; buildUf8GlobalLed handles the colour-pair + FF 3B 03 combo.
     if (g_lastPageLeftLit != 1 || !g_globalLedsInit) {
         sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::PageLeft, true));
         g_lastPageLeftLit = 1;
+    }
+    if (g_lastPageRightLit != 1 || !g_globalLedsInit) {
+        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::PageRight, true));
+        g_lastPageRightLit = 1;
     }
 
     // Channel-encoder mode LEDs — exactly one of Nav/Nudge/Focus is bright,
