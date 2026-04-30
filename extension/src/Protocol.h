@@ -191,12 +191,14 @@ LedColourFrames buildTopSoftKeyLed(uint8_t strip, TopSoftKeyState state,
 // for plain-white buttons; coloured ones reuse their bright pair as the
 // dim value with both FF38/FF39 set to a "dim variant".
 enum class Uf8GlobalLed : uint8_t {
-    Layer1, Layer2,
+    Layer1, Layer2, Layer3,
+    Quick1, Quick2, Quick3,
+    Channel, Btn360,
     SendPlugin1, SendPlugin2, SendPlugin3, SendPlugin4,
     SendPlugin5, SendPlugin6, SendPlugin7, SendPlugin8,
     Plugin,
     PageLeft, PageRight, Flip,
-    AutoRead, AutoWrite, AutoTrim, AutoLatch, AutoTouch,
+    AutoOff, AutoRead, AutoWrite, AutoTrim, AutoLatch, AutoTouch,
     VPotBank, Soft1, Soft2, Soft3, Soft4, Soft5,
     Pan, Fine, Norm, Rec, Auto, Nav, Nudge, Focus,
     BankLeft, BankRight,

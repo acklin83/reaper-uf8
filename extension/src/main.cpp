@@ -154,7 +154,11 @@ namespace softkey {
         // BYPASS uses linkIdx 0 — the plug-in's own Bypass param (NOT
         // REAPER's TrackFX_Enabled). Ø is a track-meta TrackPhase action,
         // dispatched specially in the soft-key handler.
-        { 0,  4, 5, uf8::ext::Pre, uf8::ext::MicDrive, kNoSlot, uf8::ext::ImpedanceIn, uf8::ext::Impedance },
+        // PHASE (pos 2) is intentionally kNoSlot in the bank — the
+        // press handler still queues TrackPhase as a track-meta action
+        // (REAPER's B_PHASE), so the soft-key works even though no
+        // plug-in param is wired. LED stays dark, label still "PHASE".
+        { 0,  4, kNoSlot, uf8::ext::Pre, uf8::ext::MicDrive, kNoSlot, uf8::ext::ImpedanceIn, uf8::ext::Impedance },
         // Bank 1: WIDTH, _, _, A/B, HIGH PASS, LOW PASS, EQ, EQ TYPE
         { 2, kNoSlot, kNoSlot, kNoSlot,  7,  6, 15, 14 },
         // Bank 2: LF FREQ, LF GAIN, LF TYPE, _, LMF FREQ, LMF GAIN, LMF Q, _
@@ -167,12 +171,12 @@ namespace softkey {
         { 31, 30, 29, 32, 34, 33, kNoSlot, 37 },
     };
     constexpr const char* kCsLabels[6][kStrips] = {
-        { "BYPASS", "IN TRIM", "PHASE",   "PRE",      "MIC/DRV", "",         "IMP IN",  "IMP" },
-        { "WIDTH",  "",        "",        "A/B",      "HPF",     "LPF",      "EQ",      "EQ TYPE" },
-        { "LF FREQ","LF GAIN", "LF TYPE", "",         "LMF FREQ","LMF GAIN", "LMF Q",   "" },
-        { "HMF FREQ","HMF GAIN","HMF Q",  "",         "",        "HF FREQ",  "HF GAIN", "HF TYPE" },
-        { "DYNAMICS","COMP MIX","COMP RAT","COMP THR","COMP REL","COMP ATK", "PK/RMS",  "" },
-        { "GATE REL","GATE THR","GATE RNG","GATE HLD","GATE ATK","GATE/EXP", "HQ MODE", "OUT TRIM" },
+        { "BYPASS",  "IN TRIM",   "PHASE",      "PRE",      "MIC/DRV",   "",          "IMP IN",  "IMP" },
+        { "WIDTH",   "",          "",           "A/B",      "HPF",       "LPF",       "EQ",      "EQ TYPE" },
+        { "LF FREQ", "LF GAIN",   "LF TYPE",    "",         "LMF FREQ",  "LMF GAIN",  "LMF Q",   "" },
+        { "HMF FREQ","HMF GAIN",  "HMF Q",      "",         "",          "HF FREQ",   "HF GAIN", "HF TYPE" },
+        { "DYNAMICS","COMP MIX",  "COMP RATIO", "COMP THR", "COMP REL",  "COMP F.ATK","PEAK/RMS","" },
+        { "GATE REL","GATE THR",  "GATE RANGE", "GATE HOLD","GATE F.ATK","GATE/EXP",  "HQ MODE", "OUT TRIM" },
     };
 
     // BC-mode banks (6 × 8). Banks 2..5 are intentionally empty per SSL
@@ -913,8 +917,8 @@ uf8::LedClass toUf8LedClass(LedClass cls)
 void sendLedFrames(uf8::LedColourFrames frames)
 {
     if (!g_dev) return;
-    g_dev->send(std::move(frames.ff38));
-    g_dev->send(std::move(frames.ff39));
+    if (!frames.ff38.empty()) g_dev->send(std::move(frames.ff38));
+    if (!frames.ff39.empty()) g_dev->send(std::move(frames.ff39));
 }
 
 // Forward declarations for helpers defined further down (used by
@@ -1374,23 +1378,24 @@ void onUf8Input(const uint8_t* data, size_t len)
             } else if (id == 0x7A || id == 0x7B || id == 0x7C
                     || id == 0x7D || id == 0x7E) {
                 // Zoom pad. 4 arrows zoom horizontally/vertically; the
-                // centre (0x7C) fits the project to window. These are
-                // wired to REAPER's built-in zoom actions via
-                // Main_OnCommand on press only (repeat-on-hold is not
-                // yet implemented — single press = single zoom step).
-                if (pressed) {
-                    int action = 0;
-                    switch (id) {
-                        case 0x7A: action = 40112; break;  // Zoom in vertical
-                        case 0x7E: action = 40111; break;  // Zoom out vertical
-                        case 0x7B: action = 1011;  break;  // Zoom out horizontal
-                        case 0x7D: action = 1012;  break;  // Zoom in horizontal
-                        case 0x7C: action = 40295; break;  // Zoom to project
-                    }
-                    if (action) {
-                        queueInput({PendingInput::MainAction, 0,
-                                    static_cast<double>(action)});
-                    }
+                // centre (0x7C) fits the project to window. Wired to
+                // REAPER's built-in zoom actions via Main_OnCommand on
+                // press only (repeat-on-hold not implemented — single
+                // press = single zoom step). LED lights momentarily
+                // while held as press feedback.
+                uf8::Uf8GlobalLed led = uf8::Uf8GlobalLed::ZoomCenter;
+                int action = 0;
+                switch (id) {
+                    case 0x7A: led = uf8::Uf8GlobalLed::ZoomUp;     action = 40112; break;
+                    case 0x7E: led = uf8::Uf8GlobalLed::ZoomDown;   action = 40111; break;
+                    case 0x7B: led = uf8::Uf8GlobalLed::ZoomLeft;   action = 1011;  break;
+                    case 0x7D: led = uf8::Uf8GlobalLed::ZoomRight;  action = 1012;  break;
+                    case 0x7C: led = uf8::Uf8GlobalLed::ZoomCenter; action = 40295; break;
+                }
+                sendLedFrames(uf8::buildUf8GlobalLed(led, pressed));
+                if (pressed && action) {
+                    queueInput({PendingInput::MainAction, 0,
+                                static_cast<double>(action)});
                 }
                 handledNatively = true;
             } else if (id == 0x54) {
@@ -1508,6 +1513,11 @@ void onUf8Input(const uint8_t* data, size_t len)
                 // so the bank start can go from 0 up to max(0, tracks-1).
                 // Allowing up to tracks-1 means the last bank can end
                 // with empty slots rather than snapping short of the end.
+                // LED lights momentarily while held as press feedback.
+                const auto led = (id == 0x79)
+                    ? uf8::Uf8GlobalLed::BankRight
+                    : uf8::Uf8GlobalLed::BankLeft;
+                sendLedFrames(uf8::buildUf8GlobalLed(led, pressed));
                 if (pressed) {
                     const int delta      = (id == 0x79) ? 8 : -8;
                     const int trackCount = CountTracks(nullptr);
@@ -1888,7 +1898,8 @@ bool isBinarySlot(const uf8::LinkSlot& s)
         || id == "Listen"          || id == "HighEqBell"
         || id == "LowEqBell"       || id == "CompFastAttack"
         || id == "CompPeak"        || id == "GateExpander"
-        || id == "GateAttack"      || id == "EqType";
+        || id == "GateAttack"      || id == "EqType"
+        || id == "Pre"             || id == "ImpedanceIn";
 }
 
 // Is this slot a bipolar param with a meaningful centre detent (0 dB
@@ -2215,14 +2226,22 @@ void pushZonesForVisibleSlots()
             const int bankSk = std::clamp(g_softKeyBank.load(),
                 0, softkey::maxBankFor(domSk));
             const auto vSk = softkey::viewFor(domSk, bankSk);
-            // Pad to 12 chars with trailing spaces so shorter labels
-            // (and the empty kNoSlot label) actively overwrite any
-            // longer residue left in the LCD zone from the previous
-            // bank. An empty payload (`FF 66 02 04 <strip>`) flips the
-            // strip into "slot empty" mode and darkens the colour bar —
+            // Pad to 12 chars centred (leading + trailing spaces) so
+            //  - shorter / empty labels actively overwrite any longer
+            //    residue left in the LCD zone from the previous bank;
+            //  - the firmware doesn't left-justify our padded output
+            //    (which broke centring after the original space-pad
+            //    fix that only added trailing spaces).
+            // An empty payload (`FF 66 02 04 <strip>`) would flip the
+            // strip into "slot empty" mode and darken the colour bar —
             // not what we want; we just want the label cleared.
             std::string label(vSk.labels[s]);
-            if (label.size() < 12) label.resize(12, ' ');
+            if (label.size() < 12) {
+                const size_t pad = 12 - label.size();
+                const size_t lead = pad / 2;
+                label = std::string(lead, ' ') + label
+                      + std::string(pad - lead, ' ');
+            }
             const int slotLink = vSk.linkIdx[s];
             uf8::TopSoftKeyState tssk;
             int8_t ledCacheKey;
@@ -2789,6 +2808,7 @@ EncoderMode g_lastEncoderMode = EncoderMode::Nav;
 int  g_lastPageLeftLit  = -1;     // -1 = unknown / 0 = off / 1 = on
 int  g_lastPageRightLit = -1;
 int  g_lastPluginLit    = -1;     // -1 = unknown / 0 = dim / 1 = bright (mode)
+int  g_lastDomainLed    = -1;     // -1 = unknown, 0 = CS, 1 = BC
 bool g_globalLedsInit = false;
 
 // Map REAPER's automation-mode integer to a position in kAutoLeds.
@@ -2857,15 +2877,16 @@ void pushUf8GlobalLeds()
     const bool shiftHeld       = g_shiftHeld.load();
     const EncoderMode encMode  = g_encoderMode.load();
     const int  softKeyBank     = g_softKeyBank.load();
+    const int  domainLed       = (uf8::getFocusedParam().domain == uf8::Domain::BusComp)
+                                     ? 1 : 0;
 
-    // Page ← / Page → LEDs are masked: cells 0x5D / 0x5C in our LED
-    // table collide with Soft 2 / Soft 3. SSL UC1 hardware shares
-    // those physical LEDs across both button rows (multiplexed by
-    // operating mode in firmware). Driving them as independent Page
-    // indicators stomps on whichever Soft-bank LED the user expects
-    // to be the only-lit selector — surface bug "2 buttons selected"
-    // (2026-04-28). Until we identify a separate cell or a mode
-    // switch, leave Page LEDs unmanaged.
+    // Page Left LED — confirmed via probe 2026-04-30 to live at cell
+    // 0x2D (NOT 0x5D as cap35/36 originally suggested — that earlier
+    // assumption is what caused the "2 buttons selected" surface bug
+    // in 2026-04-28; 0x5D actually lights Soft 2). Page navigates the
+    // soft-key bank with wrap-around so the LED stays lit always while
+    // the extension is active. Page Right LED still unwired — its
+    // real cell hasn't been discovered (0x5C is suspect).
 
     // Plugin button: dim while extension is active, "bright" (= our
     // function's on=true bytes) when push-mode is on. cap44 only ever
@@ -2877,7 +2898,7 @@ void pushUf8GlobalLeds()
         anyArmed == g_lastAnyArmed && forcePan == g_lastForcePan &&
         flip == g_lastFlip && shiftHeld == g_lastShiftHeld &&
         encMode == g_lastEncoderMode && softKeyBank == g_lastSoftKeyBank &&
-        pluginLit == g_lastPluginLit) {
+        pluginLit == g_lastPluginLit && domainLed == g_lastDomainLed) {
         return;
     }
 
@@ -2936,6 +2957,57 @@ void pushUf8GlobalLeds()
         sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Plugin,
                                              pluginLit == 1));
         g_lastPluginLit = pluginLit;
+    }
+
+    // Quick 1 / Quick 2 LEDs — radio group reflecting the focused-param
+    // domain. Quick 1 bright = ChannelStrip, Quick 2 bright = BusComp.
+    // Quick 3 (= I/O meter toggle, not yet wired) stays init-dim.
+    // Cells confirmed via probe 2026-04-30: Q1 0x3C, Q2 0x3B, Q3 0x3A.
+    if (domainLed != g_lastDomainLed || !g_globalLedsInit) {
+        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Quick1, domainLed == 0));
+        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Quick2, domainLed == 1));
+        if (!g_globalLedsInit) {
+            sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Quick3, false));
+        }
+        g_lastDomainLed = domainLed;
+    }
+
+    // Init-dim LEDs whose state we don't drive yet — without these,
+    // anything left bright by the probe action (or by SSL360 before
+    // Rea-Sixty took the device) lingers across reloads.
+    if (!g_globalLedsInit) {
+        for (auto led : {
+            uf8::Uf8GlobalLed::Layer1, uf8::Uf8GlobalLed::Layer2,
+            uf8::Uf8GlobalLed::Layer3, uf8::Uf8GlobalLed::Btn360,
+            uf8::Uf8GlobalLed::Channel,
+            uf8::Uf8GlobalLed::AutoOff,
+            uf8::Uf8GlobalLed::BankLeft, uf8::Uf8GlobalLed::BankRight,
+            uf8::Uf8GlobalLed::ZoomUp, uf8::Uf8GlobalLed::ZoomDown,
+            uf8::Uf8GlobalLed::ZoomLeft, uf8::Uf8GlobalLed::ZoomRight,
+            uf8::Uf8GlobalLed::ZoomCenter,
+        }) {
+            sendLedFrames(uf8::buildUf8GlobalLed(led, false));
+        }
+        // Send/Plugin 1..8 use the FF 3B 03 legacy mono path. Those
+        // LEDs are 2-state (ON/OFF only — no dim intermediate); we
+        // ship them ON at startup so the row is visible. Settings UI
+        // will let users assign actions and switch unbound buttons OFF.
+        for (auto led : {
+            uf8::Uf8GlobalLed::SendPlugin1, uf8::Uf8GlobalLed::SendPlugin2,
+            uf8::Uf8GlobalLed::SendPlugin3, uf8::Uf8GlobalLed::SendPlugin4,
+            uf8::Uf8GlobalLed::SendPlugin5, uf8::Uf8GlobalLed::SendPlugin6,
+            uf8::Uf8GlobalLed::SendPlugin7, uf8::Uf8GlobalLed::SendPlugin8,
+        }) {
+            sendLedFrames(uf8::buildUf8GlobalLed(led, true));
+        }
+    }
+
+    // Page Left LED — bright always while extension is active. The
+    // PM-mode soft-key bank navigation wraps around so there is always
+    // a "previous bank" to go to. Cell 0x2D (probe 2026-04-30).
+    if (g_lastPageLeftLit != 1 || !g_globalLedsInit) {
+        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::PageLeft, true));
+        g_lastPageLeftLit = 1;
     }
 
     // Channel-encoder mode LEDs — exactly one of Nav/Nudge/Focus is bright,
@@ -3197,6 +3269,127 @@ custom_action_register_t g_actionBrightnessDown{
 int g_cmdBrightnessUp = 0;
 int g_cmdBrightnessDown = 0;
 
+// LED-cell discovery probe — for buttons whose LED cell hasn't been
+// captured yet. Each call dims the previous candidate cell, lights
+// the next bright-white, and logs the cell ID. User runs the action
+// repeatedly while watching the hardware to discover the mapping.
+//
+// Round 4: 0x30..0x37 produced ZERO visible LEDs in round 3 even
+// though cap35/36 originally placed Send/Plugin there — the original
+// decode was wrong (same fate as Layer 1/2 / Page Left). Same outcome
+// for 0x64..0x77. Send/Plugin + Page Right must live in cells we
+// haven't touched yet, or use a different frame family. Sweep the
+// remaining never-probed gaps first; if still nothing, the LEDs are
+// likely on `FF 3B 03 <id>` (legacy mono path) instead of FF 38/39 04.
+constexpr uint8_t kProbeCells[] = {
+    // Tiny gap above the per-strip top-soft-keys
+    0x20, 0x21,
+    // Wide unexplored range above 0x77
+    0x78, 0x79, 0x7A, 0x7B, 0x7C, 0x7D, 0x7E, 0x7F,
+    0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87,
+    0x88, 0x89, 0x8A, 0x8B, 0x8C, 0x8D, 0x8E, 0x8F,
+    0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97,
+    0x98, 0x99, 0x9A, 0x9B, 0x9C, 0x9D, 0x9E, 0x9F,
+    0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7,
+    0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF,
+};
+constexpr size_t kProbeCellCount = sizeof(kProbeCells) / sizeof(kProbeCells[0]);
+int g_probeCellIndex = -1;  // -1 = nothing lit yet
+
+uint8_t probeChecksum(std::span<const uint8_t> payload)
+{
+    unsigned sum = 0;
+    for (auto b : payload) sum += b;
+    return static_cast<uint8_t>(sum & 0xFF);
+}
+
+void sendProbeFrame(uint8_t cmd, uint8_t cell, uint8_t a, uint8_t b)
+{
+    std::vector<uint8_t> frame{0xFF, cmd, 0x04, cell, 0x00, a, b};
+    std::span<const uint8_t> payload{frame.data() + 1, frame.size() - 1};
+    frame.push_back(probeChecksum(payload));
+    if (g_dev && g_dev->isOpen()) g_dev->send(frame);
+}
+
+void probeNextLedCell()
+{
+    if (!g_dev || !g_dev->isOpen()) {
+        ShowConsoleMsg("Rea-Sixty probe: UF8 not open\n");
+        return;
+    }
+    // Dim the previously-lit cell (if any) so only one lights at a time.
+    if (g_probeCellIndex >= 0) {
+        const uint8_t prev = kProbeCells[g_probeCellIndex];
+        sendProbeFrame(0x38, prev, 0x11, 0xF1);
+        sendProbeFrame(0x39, prev, 0x11, 0xF1);
+    }
+    g_probeCellIndex = (g_probeCellIndex + 1) % static_cast<int>(kProbeCellCount);
+    const uint8_t cell = kProbeCells[g_probeCellIndex];
+    // Bright white: FF 38 = FF FF, FF 39 = 00 F0 (matches standard LED on-state).
+    sendProbeFrame(0x38, cell, 0xFF, 0xFF);
+    sendProbeFrame(0x39, cell, 0x00, 0xF0);
+    char line[80];
+    std::snprintf(line, sizeof(line),
+        "Rea-Sixty probe: cell 0x%02X bright (idx %d/%zu)\n",
+        static_cast<unsigned>(cell), g_probeCellIndex + 1, kProbeCellCount);
+    ShowConsoleMsg(line);
+}
+
+custom_action_register_t g_actionProbeLed{
+    0, "REASIXTY_PROBE_LED", "Rea-Sixty: Probe next global LED cell",
+    nullptr,
+};
+int g_cmdProbeLed = 0;
+
+// Legacy mono-LED probe — same idea as the colour-pair probe above
+// but uses the `FF 3B 03 <id> 00 <state>` frame family that Plugin
+// (0x2F) is documented as a "2-state outlier" for. Send/Plugin row +
+// Page Right LEDs aren't reachable via FF 38/39 04 (verified via the
+// 2026-04-30 sweep of 0x18..0xAF), so this is the next family to try.
+constexpr uint8_t kLegacyProbeCells[] = {
+    // Suspects from cap35/36 Send/Plugin decode — cells already cleared
+    // empty under FF 38/39 04, may respond here.
+    0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37,
+    // 0x2C — symmetric to PageLeft 0x2D, top suspect for PageRight.
+    0x2C,
+    // Other cells that came up empty under the colour-pair probe.
+    0x28, 0x29, 0x2A, 0x38,
+    0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48,
+    0x50, 0x51,
+};
+constexpr size_t kLegacyProbeCellCount =
+    sizeof(kLegacyProbeCells) / sizeof(kLegacyProbeCells[0]);
+int g_legacyProbeCellIndex = -1;
+
+void probeNextLegacyLedCell()
+{
+    if (!g_dev || !g_dev->isOpen()) {
+        ShowConsoleMsg("Rea-Sixty legacy probe: UF8 not open\n");
+        return;
+    }
+    // Turn off the previously-lit cell (state 0x00).
+    if (g_legacyProbeCellIndex >= 0) {
+        g_dev->send(uf8::buildLedCommand(
+            kLegacyProbeCells[g_legacyProbeCellIndex], false));
+    }
+    g_legacyProbeCellIndex =
+        (g_legacyProbeCellIndex + 1) % static_cast<int>(kLegacyProbeCellCount);
+    const uint8_t cell = kLegacyProbeCells[g_legacyProbeCellIndex];
+    g_dev->send(uf8::buildLedCommand(cell, true));
+    char line[80];
+    std::snprintf(line, sizeof(line),
+        "Rea-Sixty legacy probe: id 0x%02X on (idx %d/%zu)\n",
+        static_cast<unsigned>(cell), g_legacyProbeCellIndex + 1,
+        kLegacyProbeCellCount);
+    ShowConsoleMsg(line);
+}
+
+custom_action_register_t g_actionProbeLegacyLed{
+    0, "REASIXTY_PROBE_LEGACY_LED",
+    "Rea-Sixty: Probe next legacy mono-LED id", nullptr,
+};
+int g_cmdProbeLegacyLed = 0;
+
 // hookcommand2 is the correct hook for custom_action dispatch per SDK
 // note at reaper_plugin.h:1086. hookcommand (v1) only catches actions
 // triggered via menu/keyboard, not custom_action registered entries.
@@ -3207,6 +3400,8 @@ bool hookCommand2(KbdSectionInfo* /*sec*/, int command,
     if (command == 0) return false;
     if (command == g_cmdBrightnessUp)   { brightnessUp();   return true; }
     if (command == g_cmdBrightnessDown) { brightnessDown(); return true; }
+    if (command == g_cmdProbeLed)       { probeNextLedCell();       return true; }
+    if (command == g_cmdProbeLegacyLed) { probeNextLegacyLedCell(); return true; }
     return false;
 }
 
@@ -3269,6 +3464,8 @@ extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(
     // when we register — stash it for dispatch in hookCommand.
     g_cmdBrightnessUp   = plugin_register("custom_action", &g_actionBrightnessUp);
     g_cmdBrightnessDown = plugin_register("custom_action", &g_actionBrightnessDown);
+    g_cmdProbeLed       = plugin_register("custom_action", &g_actionProbeLed);
+    g_cmdProbeLegacyLed = plugin_register("custom_action", &g_actionProbeLegacyLed);
     plugin_register("hookcommand2", reinterpret_cast<void*>(hookCommand2));
 
     return 1;

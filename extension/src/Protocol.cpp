@@ -560,22 +560,44 @@ struct Uf8GlobalLedDef {
     uint8_t cell;
     uint8_t aBright;
     uint8_t bBright;
+    bool    legacy = false;  // true → use FF 3B 03 mono frame (Send/Plugin row)
 };
 constexpr Uf8GlobalLedDef kUf8GlobalLedTable[] = {
-    /* Layer1       */ {0x39, 0xFF, 0xFF},
-    /* Layer2       */ {0x3A, 0xFF, 0xFF},
-    /* SendPlugin1  */ {0x37, 0xFF, 0xFF},
-    /* SendPlugin2  */ {0x36, 0xFF, 0xFF},
-    /* SendPlugin3  */ {0x35, 0xFF, 0xFF},
-    /* SendPlugin4  */ {0x34, 0xFF, 0xFF},
-    /* SendPlugin5  */ {0x33, 0xFF, 0xFF},
-    /* SendPlugin6  */ {0x32, 0xFF, 0xFF},
-    /* SendPlugin7  */ {0x31, 0xFF, 0xFF},
-    /* SendPlugin8  */ {0x30, 0xFF, 0xFF},
+    // Layer / Quick / 360 cells fully confirmed via probe 2026-04-30:
+    // physical button order along the row (left → right) is
+    //   360 (0x39)  Quick3 (0x3A)  Quick2 (0x3B)  Quick1 (0x3C)
+    //   Layer3 (0x3D)  Layer2 (0x3E)  Layer1 (0x3F)
+    // — descending button-position vs ascending cell-id. Earlier
+    // cap35/36 decoding put Layer 1/2 at 0x39/0x3A which turned out
+    // to be 360/Quick3.
+    /* Layer1       */ {0x3F, 0xFF, 0xFF},
+    /* Layer2       */ {0x3E, 0xFF, 0xFF},
+    /* Layer3       */ {0x3D, 0xFF, 0xFF},
+    /* Quick1       */ {0x3C, 0xFF, 0xFF},
+    /* Quick2       */ {0x3B, 0xFF, 0xFF},
+    /* Quick3       */ {0x3A, 0xFF, 0xFF},
+    /* Channel      */ {0x2E, 0xFF, 0xFF},
+    /* Btn360       */ {0x39, 0xFF, 0xFF},
+    // Send/Plugin 1..8 row uses the legacy mono-LED path (FF 3B 03 <id>
+    // 00 <state>) — verified via probe 2026-04-30. Cells 0x37 (SP1) →
+    // 0x30 (SP8), so id descends as button index ascends. The colour-pair
+    // FF 38/39 04 family does not address these LEDs at all.
+    /* SendPlugin1  */ {0x37, 0xFF, 0xFF, true},
+    /* SendPlugin2  */ {0x36, 0xFF, 0xFF, true},
+    /* SendPlugin3  */ {0x35, 0xFF, 0xFF, true},
+    /* SendPlugin4  */ {0x34, 0xFF, 0xFF, true},
+    /* SendPlugin5  */ {0x33, 0xFF, 0xFF, true},
+    /* SendPlugin6  */ {0x32, 0xFF, 0xFF, true},
+    /* SendPlugin7  */ {0x31, 0xFF, 0xFF, true},
+    /* SendPlugin8  */ {0x30, 0xFF, 0xFF, true},
     /* Plugin       */ {0x2F, 0xFF, 0xFF},
-    /* PageLeft     */ {0x5D, 0xFF, 0xFF},
-    /* PageRight    */ {0x5C, 0xFF, 0xFF},
+    /* PageLeft     */ {0x2D, 0xFF, 0xFF},   // confirmed via probe 2026-04-30
+    /* PageRight    */ {0x00, 0xFF, 0xFF},   // unknown — colour-pair + legacy
+                                              // sweeps both empty for 0x2C
+                                              // and surrounding cells. Driver
+                                              // suppresses writes for now.
     /* Flip         */ {0x2B, 0xFF, 0xFF},
+    /* AutoOff      */ {0x27, 0xFF, 0xFF},  // confirmed via probe 2026-04-30
     /* AutoRead     */ {0x26, 0xF0, 0xF0},  // green
     /* AutoWrite    */ {0x25, 0x0F, 0xF0},  // red
     /* AutoTrim     */ {0x24, 0x3F, 0xF0},  // orange
@@ -609,6 +631,13 @@ LedColourFrames buildUf8GlobalLed(Uf8GlobalLed btn, bool on)
 {
     const auto& def = kUf8GlobalLedTable[static_cast<size_t>(btn)];
     LedColourFrames out;
+    if (def.legacy) {
+        // Single-frame mono path. FF 39 stays empty so the dispatch
+        // helper can skip it — these LEDs only have ON/OFF, no DIM
+        // intermediate state.
+        out.ff38 = buildLedCommand(def.cell, on);
+        return out;
+    }
     if (on) {
         // Bright: FF 38 = colour, FF 39 = base 00 F0 (matches per-strip
         // ON pattern from cap31).

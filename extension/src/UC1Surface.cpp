@@ -672,13 +672,14 @@ void UC1Surface::handleButton_(const ButtonEvent& ev)
 
     const double cur = TrackFX_GetParamNormalized(tr, bindings.channelFxIdx, vst3Param);
 
-    // EQ Type on 4K E / 4K G is a 3-state "EQ Colour" cycle (Brown →
-    // Orange → Black → Brown), not a binary in/out. Normalised values
-    // are 0.0 / 0.5 / 1.0. CS 2's EQ Type and 4K B (no EQ Type) are
-    // binary or absent. Detect by plugin shortName.
+    // EQ Type on 4K E is a 3-state "EQ Colour" cycle (Brown → Black →
+    // Orange → Brown). 4K G's EQ Colour param exposes three normalised
+    // positions but only two distinct values (Pink at 0.0, Black at
+    // 0.5 / 1.0) — user-confirmed 2026-04-30 that 4K G should behave
+    // as a 2-way toggle, matching the UF8 V-Pot path. CS 2's EQ Type
+    // and 4K B (no EQ Type) are binary or absent.
     const bool is3StateEqColour = (ev.id == button::kEqType)
-        && (std::strcmp(bindings.channelMap->shortName, "4K E") == 0
-         || std::strcmp(bindings.channelMap->shortName, "4K G") == 0);
+        && std::strcmp(bindings.channelMap->shortName, "4K E") == 0;
 
     double next;
     if (is3StateEqColour) {
