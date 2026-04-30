@@ -43,4 +43,16 @@ int togglePluginHQ(MediaTrack* track);
 // `track`. Returns the number of plug-ins patched.
 int togglePluginAB(MediaTrack* track);
 
+// Read current toggle states from the FIRST SSL plug-in on `track`.
+// Outputs:
+//   ab = 1 when StateASelected="1" (A is active = default state)
+//        0 when StateASelected="0" (B is active = comparing)
+//       -1 if no SSL plug-in / parse failure
+//   hq = 1 when active slot's HighQuality value > 0.5
+//        0 when HighQuality value <= 0.5 (or absent — BC2 has no
+//          HighQuality, only Oversampling as a real param)
+//       -1 if no SSL plug-in / parse failure
+// One chunk read covers both flags; cheaper than two separate calls.
+void readPluginToggleStates(MediaTrack* track, int& ab, int& hq);
+
 } // namespace uf8

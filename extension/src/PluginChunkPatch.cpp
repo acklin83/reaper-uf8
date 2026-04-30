@@ -244,4 +244,97 @@ int applyToAllSsl(MediaTrack* tr, PatchFn patch) {
 int togglePluginHQ(MediaTrack* tr) { return applyToAllSsl(tr, patchHighQuality); }
 int togglePluginAB(MediaTrack* tr) { return applyToAllSsl(tr, patchStateASelected); }
 
+namespace {
+
+// Decode the first <VST "VST3: SSL ..."> block's binary blob into the
+// XML payload. Returns empty string on any failure.
+std::string firstSslXml(const std::string& chunk) {
+    constexpr std::string_view kVstMarker = "<VST \"VST3: SSL ";
+    const size_t headStart = chunk.find(kVstMarker);
+    if (headStart == std::string::npos) return {};
+    const size_t headEnd = chunk.find('\n', headStart);
+    if (headEnd == std::string::npos) return {};
+    const size_t bodyEnd = chunk.find("\n>\n", headEnd);
+    if (bodyEnd == std::string::npos) return {};
+
+    std::string bin;
+    {
+        size_t pos = headEnd + 1;
+        while (pos < bodyEnd) {
+            size_t eol = chunk.find('\n', pos);
+            if (eol == std::string::npos || eol > bodyEnd) eol = bodyEnd;
+            std::string_view line(chunk.data() + pos, eol - pos);
+            bool hasContent = false;
+            for (char c : line) {
+                if (c != ' ' && c != '\t' && c != '\r') { hasContent = true; break; }
+            }
+            if (hasContent) bin += b64Decode(line);
+            pos = eol + 1;
+        }
+    }
+    constexpr std::string_view kXmlStartMarker = "<?xml";
+    constexpr std::string_view kXmlEndMarker   = "</SSL_PLUGIN_STATE>";
+    const size_t xs = bin.find(kXmlStartMarker);
+    if (xs == std::string::npos) return {};
+    size_t xe = bin.find(kXmlEndMarker, xs);
+    if (xe == std::string::npos) return {};
+    xe += kXmlEndMarker.size();
+    return bin.substr(xs, xe - xs);
+}
+
+}  // namespace
+
+void readPluginToggleStates(MediaTrack* tr, int& ab, int& hq) {
+    ab = -1;
+    hq = -1;
+    if (!tr) return;
+    constexpr int kChunkBufSize = 1 << 20;
+    std::vector<char> buf(kChunkBufSize, 0);
+    if (!GetTrackStateChunk(tr, buf.data(), kChunkBufSize, false)) return;
+    std::string chunk(buf.data());
+    const std::string xml = firstSslXml(chunk);
+    if (xml.empty()) return;
+
+    // A/B
+    {
+        constexpr std::string_view k = "StateASelected=\"";
+        const size_t p = xml.find(k);
+        if (p != std::string::npos && p + k.size() < xml.size()) {
+            const char c = xml[p + k.size()];
+            if (c == '0' || c == '1') ab = (c - '0');
+        }
+    }
+
+    // HQ — read the active slot's HighQuality
+    if (ab >= 0) {
+        const char slotTag = (ab == 1) ? 'A' : 'B';
+        const std::string slotOpen = std::string("<") + slotTag;
+        const size_t slotStart = xml.find(slotOpen);
+        if (slotStart != std::string::npos) {
+            const char afterTag = (slotStart + 2 < xml.size()) ? xml[slotStart + 2] : '\0';
+            if (afterTag == ' ' || afterTag == '>') {
+                const size_t slotBodyStart = xml.find('>', slotStart);
+                const std::string slotClose = std::string("</") + slotTag + ">";
+                const size_t slotEnd = xml.find(slotClose, slotBodyStart);
+                if (slotBodyStart != std::string::npos && slotEnd != std::string::npos) {
+                    constexpr std::string_view kHq =
+                        "<PARAM_NON_AUTO id=\"HighQuality\" value=\"";
+                    const size_t hp = xml.find(kHq, slotBodyStart);
+                    if (hp != std::string::npos && hp < slotEnd) {
+                        const size_t valStart = hp + kHq.size();
+                        const size_t valEnd = xml.find('"', valStart);
+                        if (valEnd != std::string::npos) {
+                            const std::string v = xml.substr(valStart, valEnd - valStart);
+                            // string compare avoids strtod locale woes
+                            hq = (v == "1.0" || v == "1") ? 1 : 0;
+                        }
+                    } else {
+                        hq = 0;  // no HighQuality element (BC2 etc.) → off
+                    }
+                }
+            }
+        }
+    }
+}
+
 }  // namespace uf8

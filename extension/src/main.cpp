@@ -371,15 +371,13 @@ struct PendingInput {
                          // (not called inline from libusb thread):
                          // SetMediaTrackInfo_Value triggers REAPER UI updates
                          // that end in NSWindow setTitle — main-thread-only.
-        TrackPhaseStrip, // toggle B_PHASE on the strip's track (strip+bankOffset).
-                         // Used by V-Pot push in CS Bank 0 col 2 — per-strip,
-                         // unlike TrackPhase which always targets selected.
-        TogglePluginAB,  // flip StateASelected on strip's CS plug-in chunk.
-                         // V-Pot push, CS Bank 1 col 3.
-        TogglePluginHQ,  // flip <PARAM_NON_AUTO id="HighQuality"> on strip's
-                         // CS plug-in chunk. V-Pot push, CS Bank 5 col 6.
-                         // Both Toggle* go through SetTrackStateChunk →
-                         // brief plug-in state reload (sub-ms click possible).
+        TogglePluginAB,  // flip StateASelected on every SSL plug-in of the
+                         // selected track. CS Bank 1 col 3 soft-key.
+        TogglePluginHQ,  // flip <PARAM_NON_AUTO id="HighQuality"> on every
+                         // CS-family SSL plug-in of the selected track.
+                         // CS Bank 5 col 6 soft-key. Both Toggle* go through
+                         // SetTrackStateChunk → brief plug-in state reload
+                         // (sub-ms click possible).
     };
     Kind    kind;
     uint8_t strip;
@@ -571,6 +569,26 @@ void drainInputQueue()
             }
             continue;
         }
+        if (e.kind == PendingInput::TogglePluginAB) {
+            if (MediaTrack* tr = GetSelectedTrack(nullptr, 0)) {
+                const int n = uf8::togglePluginAB(tr);
+                if (FILE* lg = std::fopen("/tmp/reaper_uf8_vpot_push.log", "a")) {
+                    std::fprintf(lg, "  drain TogglePluginAB selected patched=%d\n", n);
+                    std::fclose(lg);
+                }
+            }
+            continue;
+        }
+        if (e.kind == PendingInput::TogglePluginHQ) {
+            if (MediaTrack* tr = GetSelectedTrack(nullptr, 0)) {
+                const int n = uf8::togglePluginHQ(tr);
+                if (FILE* lg = std::fopen("/tmp/reaper_uf8_vpot_push.log", "a")) {
+                    std::fprintf(lg, "  drain TogglePluginHQ selected patched=%d\n", n);
+                    std::fclose(lg);
+                }
+            }
+            continue;
+        }
         if (e.kind == PendingInput::PlayheadNudge) {
             g_nudgeAccum += e.value / kChannelEncoderScale;
             int step = 0;
@@ -627,18 +645,6 @@ void drainInputQueue()
             case PendingInput::SelectExclusive:
                 SetOnlyTrackSelected(tr);
                 followSelectedInMixer(tr);
-                break;
-            case PendingInput::TrackPhaseStrip: {
-                const double cur = GetMediaTrackInfo_Value(tr, "B_PHASE");
-                SetMediaTrackInfo_Value(tr, "B_PHASE",
-                    cur > 0.5 ? 0.0 : 1.0);
-                break;
-            }
-            case PendingInput::TogglePluginAB:
-                uf8::togglePluginAB(tr);
-                break;
-            case PendingInput::TogglePluginHQ:
-                uf8::togglePluginHQ(tr);
                 break;
             case PendingInput::VolumeAbs: {
                 // FLIP: fader drives the focused plug-in parameter on this
@@ -1646,31 +1652,12 @@ void onUf8Input(const uint8_t* data, size_t len)
                 }
                 handledNatively = true;
             } else if (id >= 0x08 && id <= 0x0F) {
-                // V-Pot push. Default: PanCenter (resets pan / focused-param
-                // to its neutral). Exceptions for the CS-bank columns whose
-                // soft-key labels have no plug-in param (kNoSlot in the
-                // bank tables) but DO have a meaningful per-strip action:
-                //   Bank 0 col 2  ("Ø Phase")  → REAPER B_PHASE toggle
-                //   Bank 1 col 3  ("A/B")      → SSL plug-in StateASelected
-                //   Bank 5 col 6  ("HQ MODE")  → SSL plug-in HighQuality
-                // The two Toggle* paths go through SetTrackStateChunk —
-                // brief plug-in state reload, sub-ms click possible during
-                // playback. Acceptable for HQ/A/B (toggled rarely).
-                // Per-strip target: strip + bankOffset, not selected.
+                // V-Pot push: reset focused param / pan to neutral. The
+                // toggle actions (Phase/A/B/HQ) live on the top soft-keys
+                // (0x18..0x1F), not here — see that branch below.
                 if (pressed) {
-                    const uint8_t strip = static_cast<uint8_t>(id - 0x08);
-                    const auto fp = uf8::getFocusedParam();
-                    const auto domain = (fp.domain == uf8::Domain::BusComp)
-                        ? uf8::Domain::BusComp : uf8::Domain::ChannelStrip;
-                    const int bank = std::clamp(g_softKeyBank.load(),
-                        0, softkey::maxBankFor(domain));
-                    PendingInput::Kind kind = PendingInput::PanCenter;
-                    if (domain == uf8::Domain::ChannelStrip) {
-                        if      (bank == 0 && strip == 2) kind = PendingInput::TrackPhaseStrip;
-                        else if (bank == 1 && strip == 3) kind = PendingInput::TogglePluginAB;
-                        else if (bank == 5 && strip == 6) kind = PendingInput::TogglePluginHQ;
-                    }
-                    queueInput({kind, strip, 0.0});
+                    queueInput({PendingInput::PanCenter,
+                                static_cast<uint8_t>(id - 0x08), 0.0});
                 }
                 handledNatively = true;
             } else if (id >= 0x20 && id <= 0x37) {
@@ -1696,11 +1683,17 @@ void onUf8Input(const uint8_t* data, size_t len)
                 // own Bypass param at linkIdx 0). Pressing them sets
                 // focus across the bus; V-Pot push toggles per-strip.
                 //
-                // Ø Phase has no plug-in param — operates on REAPER
-                // track meta (B_PHASE), so it's queued as TrackPhase.
+                // Three CS-bank columns have no plug-in param (kNoSlot)
+                // but DO map to a meaningful track / plug-in toggle —
+                // press fires the toggle directly on the SELECTED track:
+                //   Bank 0 col 2  ("Ø Phase")  → REAPER B_PHASE
+                //   Bank 1 col 3  ("A/B")      → SSL StateASelected
+                //                                (every SSL plug-in on track)
+                //   Bank 5 col 6  ("HQ MODE")  → SSL HighQuality
+                //                                (every CS-family plug-in)
                 // Other kNoSlot positions (PRE, MIC/DRIVE, IMPEDANCE,
-                // WIDTH, A/B, HQ MODE, EXT S/C) stay silent — Settings
-                // UI will wire them to user-defined actions.
+                // WIDTH, EXT S/C) stay silent — Settings UI will wire
+                // them to user-defined actions.
                 if (pressed) {
                     const int strip = id - 0x18;
                     const auto fp = uf8::getFocusedParam();
@@ -1709,11 +1702,17 @@ void onUf8Input(const uint8_t* data, size_t len)
                     const int bank = std::clamp(g_softKeyBank.load(),
                         0, softkey::maxBankFor(domain));
 
-                    if (bank == 0
-                        && domain == uf8::Domain::ChannelStrip
-                        && strip == 2) {
-                        queueInput({PendingInput::TrackPhase, 0, 0.0});
-                    } else {
+                    bool fired = false;
+                    if (domain == uf8::Domain::ChannelStrip) {
+                        if      (bank == 0 && strip == 2) {
+                            queueInput({PendingInput::TrackPhase,     0, 0.0}); fired = true;
+                        } else if (bank == 1 && strip == 3) {
+                            queueInput({PendingInput::TogglePluginAB, 0, 0.0}); fired = true;
+                        } else if (bank == 5 && strip == 6) {
+                            queueInput({PendingInput::TogglePluginHQ, 0, 0.0}); fired = true;
+                        }
+                    }
+                    if (!fired) {
                         const auto v = softkey::viewFor(domain, bank);
                         const int linkIdx = v.linkIdx[strip];
                         if (linkIdx != softkey::kNoSlot) {
@@ -2298,6 +2297,37 @@ void pushZonesForVisibleSlots()
         }
     }
 
+    // Toggle-cell LED states for the selected track. Computed once per
+    // tick: Phase via cheap GetMediaTrackInfo_Value, A/B + HQ via a
+    // single chunk read on the first SSL plug-in (only when the visible
+    // bank actually contains the toggle column — otherwise skip the
+    // chunk read so we don't pay 30Hz on tracks the user isn't focused
+    // on). Soft-key LED becomes "On" (bright) when the toggle is in
+    // its active state.
+    int phaseOn = 0;       // bright = REAPER B_PHASE inverted
+    int abComparing = 0;   // bright = StateASelected==0 (B active)
+    int hqOn = 0;          // bright = HighQuality > 0.5
+    {
+        const auto domSel = (focused.domain == uf8::Domain::BusComp)
+            ? uf8::Domain::BusComp : uf8::Domain::ChannelStrip;
+        const int bankSel = std::clamp(g_softKeyBank.load(),
+            0, softkey::maxBankFor(domSel));
+        if (domSel == uf8::Domain::ChannelStrip) {
+            if (MediaTrack* selTr = GetSelectedTrack(nullptr, 0)) {
+                if (bankSel == 0) {
+                    phaseOn = (GetMediaTrackInfo_Value(selTr, "B_PHASE") > 0.5)
+                              ? 1 : 0;
+                }
+                if (bankSel == 1 || bankSel == 5) {
+                    int ab = -1, hq = -1;
+                    uf8::readPluginToggleStates(selTr, ab, hq);
+                    abComparing = (ab == 0) ? 1 : 0;
+                    hqOn = (hq == 1) ? 1 : 0;
+                }
+            }
+        }
+    }
+
     for (int s = 0; s < 8; ++s) {
         const int realSlot = s + bankOffset;
         MediaTrack* tr = (realSlot < trackCount) ? GetTrack(nullptr, realSlot) : nullptr;
@@ -2402,9 +2432,25 @@ void pushZonesForVisibleSlots()
                       + std::string(pad - lead, ' ');
             }
             const int slotLink = vSk.linkIdx[s];
+            // Toggle-cell override: the three "soft-key fires action,
+            // not focus" columns light bright when the toggle is in its
+            // active state (Phase inverted / A/B in B / HQ on), dim
+            // otherwise. Cache key uses 4..6 so it stays distinct from
+            // the focus On/Dim values (1..2).
+            bool isToggleCell = false;
+            int  toggleOn = 0;
+            if (domSk == uf8::Domain::ChannelStrip) {
+                if      (bankSk == 0 && s == 2) { isToggleCell = true; toggleOn = phaseOn; }
+                else if (bankSk == 1 && s == 3) { isToggleCell = true; toggleOn = abComparing; }
+                else if (bankSk == 5 && s == 6) { isToggleCell = true; toggleOn = hqOn; }
+            }
             uf8::TopSoftKeyState tssk;
             int8_t ledCacheKey;
-            if (slotLink != softkey::kNoSlot && slotLink == focused.slotIdx) {
+            if (isToggleCell) {
+                tssk = toggleOn ? uf8::TopSoftKeyState::On
+                                : uf8::TopSoftKeyState::Dim;
+                ledCacheKey = static_cast<int8_t>(toggleOn ? 6 : 5);
+            } else if (slotLink != softkey::kNoSlot && slotLink == focused.slotIdx) {
                 tssk = uf8::TopSoftKeyState::On;         // bright = focused
                 ledCacheKey = 2;
             } else {
