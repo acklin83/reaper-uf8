@@ -61,6 +61,16 @@ namespace ext {
     constexpr int MicDrive        = 114;
     constexpr int ImpedanceIn     = 115;
     constexpr int Impedance       = 116;
+    // Synthetic toggles that don't map to any VST3 parameter — handled
+    // directly by main.cpp's render + V-Pot push paths. Soft-key press
+    // sets focus to one of these like any normal slot; per-strip render
+    // reads the state from REAPER (TrackPhase) or the SSL plug-in chunk
+    // (PluginAB / PluginHQ), and V-Pot push toggles it on that strip's
+    // track. No PluginMap entry for these — findSlotByLinkIdx returns
+    // nullptr, callers special-case the linkIdx instead.
+    constexpr int TrackPhase      = 117;  // REAPER B_PHASE
+    constexpr int PluginAB        = 118;  // SSL StateASelected
+    constexpr int PluginHQ        = 119;  // SSL HighQuality (PARAM_NON_AUTO)
 }
 
 struct LinkSlot {
