@@ -128,9 +128,8 @@ std::atomic<bool> g_pluginFaderMode{false};
 
 // Soft-Key Bank — which page of params is currently shown across the 8
 // top-soft-key labels (and selectable via the per-strip 0x18..0x1F
-// keys). Range depends on focused.domain:
-//   ChannelStrip: 0..5 (V-POT + Bank 1..5)
-//   BusComp:      0..1 (V-POT + Bank 1)
+// keys). Range is 0..5 (V-POT + Bank 1..5) for both domains; in BC
+// mode banks 2..5 are present-but-empty per SSL UF8 User Guide.
 // Layout from SSL UF8 User Guide p.180-181. Persisted across sessions.
 std::atomic<int>  g_softKeyBank{0};
 std::atomic<bool> g_softKeyDirty{false};
@@ -151,10 +150,10 @@ namespace softkey {
         { 0,  4, kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot },
         // Bank 1: WIDTH, _, _, A/B, HIGH PASS, LOW PASS, EQ, EQ TYPE
         { kNoSlot, kNoSlot, kNoSlot, kNoSlot,  7,  6, 15, 14 },
-        // Bank 2: LF FREQ, LF GAIN, LF TYPE, LMF FREQ, LMF GAIN, LMF Q, _, _
-        { 19, 20, 21, 17, 16, 18, kNoSlot, kNoSlot },
-        // Bank 3: HMF FREQ, HMF GAIN, HMF Q, _, HF FREQ, HF GAIN, HF TYPE, _
-        { 12, 11, 13, kNoSlot, 10,  9,  8, kNoSlot },
+        // Bank 2: LF FREQ, LF GAIN, LF TYPE, _, LMF FREQ, LMF GAIN, LMF Q, _
+        { 19, 20, 21, kNoSlot, 17, 16, 18, kNoSlot },
+        // Bank 3: HMF FREQ, HMF GAIN, HMF Q, _, _, HF FREQ, HF GAIN, HF TYPE
+        { 12, 11, 13, kNoSlot, kNoSlot, 10,  9,  8 },
         // Bank 4: DYNAMICS, COMP MIX, COMP RATIO, COMP THR, COMP REL, COMP ATK, PEAK/RMS, _
         { 22, 23, 26, 27, 28, 24, 25, kNoSlot },
         // Bank 5: GATE REL, GATE THR, GATE RNG, GATE HLD, GATE ATK, GATE/EXP, HQ MODE, OUT TRIM
@@ -163,28 +162,39 @@ namespace softkey {
     constexpr const char* kCsLabels[6][kStrips] = {
         { "BYPASS", "IN TRIM", "PHASE",   "PRE",      "MIC/DRV", "",         "IMP IN",  "IMP" },
         { "WIDTH",  "",        "",        "A/B",      "HPF",     "LPF",      "EQ",      "EQ TYPE" },
-        { "LF FREQ","LF GAIN", "LF TYPE", "LMF FREQ", "LMF GAIN","LMF Q",    "",        "" },
-        { "HMF FREQ","HMF GAIN","HMF Q",  "",         "HF FREQ", "HF GAIN",  "HF TYPE", "" },
+        { "LF FREQ","LF GAIN", "LF TYPE", "",         "LMF FREQ","LMF GAIN", "LMF Q",   "" },
+        { "HMF FREQ","HMF GAIN","HMF Q",  "",         "",        "HF FREQ",  "HF GAIN", "HF TYPE" },
         { "DYNAMICS","COMP MIX","COMP RAT","COMP THR","COMP REL","COMP ATK", "PK/RMS",  "" },
         { "GATE REL","GATE THR","GATE RNG","GATE HLD","GATE ATK","GATE/EXP", "HQ MODE", "OUT TRIM" },
     };
 
-    // BC-mode banks (2 × 8).
-    constexpr int kBcBanks[2][kStrips] = {
+    // BC-mode banks (6 × 8). Banks 2..5 are intentionally empty per SSL
+    // UF8 User Guide — bank navigation cycles through them symmetrically
+    // with CS mode even though BC has only two pages of params.
+    constexpr int kBcBanks[6][kStrips] = {
         // V-POT: THRESHOLD, ATTACK, RELEASE, RATIO, S/C HPF, MIX, EXTERNAL S/C, BUS COMP
         // BUS COMP at pos 7 = the BC plug-in's own CompBypass param
         // (linkIdx 0 in the BC 360 Link layout).
         { 1, 3, 4, 5, 6, 7, kNoSlot, 0 },
         // Bank 1: OUTPUT GAIN (= MakeupGain in BC2 map), rest empty
         { 2, kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot },
+        // Banks 2..5: empty per SSL spec
+        { kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot },
+        { kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot },
+        { kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot },
+        { kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot },
     };
-    constexpr const char* kBcLabels[2][kStrips] = {
+    constexpr const char* kBcLabels[6][kStrips] = {
         { "THR",    "ATTACK", "RELEASE","RATIO", "S/C HPF","MIX",  "EXT S/C","BUS COMP" },
         { "OUTGAIN","",       "",       "",      "",       "",     "",       "" },
+        { "",       "",       "",       "",      "",       "",     "",       "" },
+        { "",       "",       "",       "",      "",       "",     "",       "" },
+        { "",       "",       "",       "",      "",       "",     "",       "" },
+        { "",       "",       "",       "",      "",       "",     "",       "" },
     };
 
     constexpr int kCsMaxBank = 5;
-    constexpr int kBcMaxBank = 1;
+    constexpr int kBcMaxBank = 5;
 
     // Domain-aware bank max so the bank index can be clamped after a
     // domain switch (BC has fewer banks than CS).
@@ -1442,7 +1452,7 @@ void onUf8Input(const uint8_t* data, size_t len)
                 // Page ← (0x52) / Page → (0x53) → previous/next Soft-Key
                 // Bank. Walks g_softKeyBank in the same domain-aware way
                 // the dedicated bank selectors (0x68/0x69..0x6D) do —
-                // clamped to softkey::maxBankFor(domain) (CS = 5, BC = 1).
+                // clamped to softkey::maxBankFor(domain) (both = 5).
                 // User-requested default mapping; will be configurable
                 // via the Settings UI later.
                 if (pressed) {
