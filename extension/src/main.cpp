@@ -1431,6 +1431,28 @@ void onUf8Input(const uint8_t* data, size_t len)
                     SetExtState("ReaSixty", "forcePan", next ? "1" : "0", true);
                 }
                 handledNatively = true;
+            } else if (id == 0x70 || id == 0x71) {
+                // Quick 1 / Quick 2 in Plug-in Mixer Mode (per UF8 User
+                // Guide): Quick 1 = Channel Strip domain, Quick 2 = Bus
+                // Compressor domain. Switches which PluginMap (and thus
+                // which soft-key bank tables + V-Pot mode) drives the
+                // strips. In DAW mode these are Norm/Rec — we only
+                // rebind them in PM mode, so the MCU passthrough still
+                // works there.
+                if (pressed) {
+                    const auto target = (id == 0x70)
+                        ? uf8::Domain::ChannelStrip
+                        : uf8::Domain::BusComp;
+                    const auto fp = uf8::getFocusedParam();
+                    if (fp.domain != target) {
+                        // Slot 0 = Bypass for both domains (CS plug-in's
+                        // own Bypass on CS, BC plug-in's CompBypass on
+                        // BC). Bank-follow-focus snaps the soft-key bank
+                        // to V-POT (bank 0) on the next tick.
+                        uf8::setFocus({target, 0});
+                    }
+                }
+                handledNatively = true;
             } else if (id >= 0x68 && id <= 0x6D) {
                 // Soft-key bank selectors: 0x68 = V-POT bank, 0x69..0x6D
                 // = Bank 1..5. Switches which 8 param labels appear in
