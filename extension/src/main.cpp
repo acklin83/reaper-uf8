@@ -1506,10 +1506,6 @@ void onUf8Input(const uint8_t* data, size_t len)
                 // plug-in's Fader Level (linkIdx 35) and the V-Pot's
                 // Pan-fallback steers the plug-in's Pan (linkIdx 3);
                 // off restores REAPER track volume + track pan.
-                // pageDirty kicks the per-strip caches so motor / O-PdB
-                // / Value Line re-render in the new mode immediately
-                // — without it the fader stays parked at the previous
-                // mode's pb14 until the next external change.
                 if (pressed) {
                     const bool next = !g_pluginFaderMode.load();
                     g_pluginFaderMode.store(next);
@@ -2187,6 +2183,17 @@ void pushZonesForVisibleSlots()
         g_lastValueLine.fill({});
         g_lastTopSoftKey.fill(-1);
     }
+    if (pageChanged) {
+        // The Plugin / FLIP / forcePan / focus toggles all set pageDirty
+        // because they flip what the fader and V-Pot represent on each
+        // strip. Force a full re-push of motor pb14, O/PdB readout, and
+        // V-Pot bar — their dedup caches would otherwise pin the strip
+        // to the previous mode's source (e.g. fader stays at the SSL
+        // CS Fader position even after Plugin mode is toggled off).
+        g_lastFaderPb.fill(0xFFFF);
+        g_lastFaderDb.fill({});
+        g_lastVPotBar.fill(0xFFFF);
+    }
     if (bankChanged) {
         g_lastTrackName.fill({});
         g_lastSlotLabel.fill({});
@@ -2769,10 +2776,12 @@ void commitDebouncedTouchReleases()
         MediaTrack* tr = g_slotTrack[s];
         if (!tr || !ValidatePtr2(nullptr, tr, "MediaTrack*")) continue;
 
-        // Snap REAPER to the user's last raw fader position (regardless
-        // of the >=4-LSB deadband) so REAPER reflects where the fader
-        // ended up. In FLIP mode the fader drives the focused param
-        // instead of track volume, so the snap goes to the param.
+        // Snap REAPER (or the active plug-in target) to the user's last
+        // raw fader position (regardless of the >=4-LSB deadband). The
+        // fader drives:
+        //   - focused param  in FLIP mode (when the strip has a slot),
+        //   - SSL CS Fader   in Plugin-Fader mode,
+        //   - track volume   otherwise.
         if (g_lastTouchPbValid[s].load()) {
             const uint16_t touchPb = g_lastTouchPb[s].load();
             const auto focusedT = uf8::getFocusedParam();
@@ -2780,6 +2789,7 @@ void commitDebouncedTouchReleases()
             const uf8::LinkSlot* slT = (!g_forcePan.load() && mmT.map)
                 ? uf8::findSlotByLinkIdx(*mmT.map, focusedT.slotIdx)
                 : nullptr;
+            const auto csT = csFaderForTrack(tr);
             if (g_flip.load() && slT) {
                 double normT = static_cast<double>(touchPb) /
                                static_cast<double>(kUf8FaderPbMax);
@@ -2788,6 +2798,13 @@ void commitDebouncedTouchReleases()
                 if (normT > 1.0) normT = 1.0;
                 TrackFX_SetParamNormalized(tr, mmT.fxIndex,
                     slT->vst3Param, normT);
+            } else if (g_pluginFaderMode.load() && csT.vst3Param >= 0) {
+                double n = static_cast<double>(touchPb) /
+                           static_cast<double>(kUf8FaderPbMax);
+                if (n < 0.0) n = 0.0;
+                if (n > 1.0) n = 1.0;
+                TrackFX_SetParamNormalized(tr, csT.fxIndex,
+                    csT.vst3Param, n);
             } else {
                 CSurf_OnVolumeChange(tr, pbToLinearVolume(touchPb), false);
             }
@@ -2800,10 +2817,24 @@ void commitDebouncedTouchReleases()
         // handler in onUf8Input). So FF 1D 02 strip 01 engages the
         // motor at the correct target — no jerk to a stale pre-touch
         // value. Without this enable the firmware stays limp and
-        // ignores subsequent FF 1E motor-echo commands. SSL360 likely
-        // sends an equivalent re-engage too; cap32 just doesn't show
-        // one because the DAW had no fader activity between touches.
-        const uint16_t pb  = linearVolumeToPb(uiVolLinear(tr));
+        // ignores subsequent FF 1E motor-echo commands.
+        //
+        // For the cached pb, mirror the active fader source so the next
+        // dedup tick doesn't re-push a stale REAPER-volume position
+        // when Plugin mode is on.
+        uint16_t pb = linearVolumeToPb(uiVolLinear(tr));
+        if (g_pluginFaderMode.load()) {
+            const auto cs = csFaderForTrack(tr);
+            if (cs.vst3Param >= 0) {
+                const double norm = TrackFX_GetParamNormalized(
+                    tr, cs.fxIndex, cs.vst3Param);
+                int p14 = static_cast<int>(std::round(
+                    norm * static_cast<double>(kUf8FaderPbMax)));
+                if (p14 < 0) p14 = 0;
+                if (p14 > kUf8FaderPbMax) p14 = kUf8FaderPbMax;
+                pb = static_cast<uint16_t>(p14);
+            }
+        }
         g_dev->send(uf8::buildMotorEnable(s, true));
         g_lastFaderPb[s] = pb;
     }
