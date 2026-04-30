@@ -31,7 +31,9 @@ Frame: `FF 22 03 <button_id> 00 <state> <chk>` (state `0x01` press, `0x00` relea
 | ID | Name | ID | Name |
 |---|---|---|---|
 | `0x40` | Layer 1 | `0x41` | Layer 2 |
-| `0x42` | Layer 3 | `0x46` | 360 (Settings) |
+| `0x42` | Layer 3 | `0x43` | Quick 1 (PM: Channel Strip) |
+| `0x44` | Quick 2 (PM: Bus Comp) | `0x45` | Quick 3 (PM: I/O meter) |
+| `0x46` | 360 (Settings) | | |
 | `0x48` | Send/Plugin 1 | `0x49` | Send/Plugin 2 |
 | `0x4A` | Send/Plugin 3 | `0x4B` | Send/Plugin 4 |
 | `0x4C` | Send/Plugin 5 | `0x4D` | Send/Plugin 6 |

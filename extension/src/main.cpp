@@ -1431,6 +1431,28 @@ void onUf8Input(const uint8_t* data, size_t len)
                     SetExtState("ReaSixty", "forcePan", next ? "1" : "0", true);
                 }
                 handledNatively = true;
+            } else if (id == 0x43 || id == 0x44) {
+                // Quick 1 (0x43) / Quick 2 (0x44) — Selection Mode row
+                // above the channel encoder. In Plug-in Mixer Mode these
+                // are locked to domain switching per SSL UF8 User Guide:
+                //   Quick 1 → Channel Strip
+                //   Quick 2 → Bus Compressor
+                // (Quick 3 / 0x45 is reserved for the I/O meter toggle —
+                //  not wired yet.)
+                if (pressed) {
+                    const auto target = (id == 0x43)
+                        ? uf8::Domain::ChannelStrip
+                        : uf8::Domain::BusComp;
+                    const auto fp = uf8::getFocusedParam();
+                    if (fp.domain != target) {
+                        // Slot 0 = Bypass for both domains (CS plug-in's
+                        // own Bypass on CS, BC plug-in's CompBypass on
+                        // BC). Bank-follow-focus snaps the soft-key bank
+                        // to V-POT (bank 0) on the next tick.
+                        uf8::setFocus({target, 0});
+                    }
+                }
+                handledNatively = true;
             } else if (id >= 0x68 && id <= 0x6D) {
                 // Soft-key bank selectors: 0x68 = V-POT bank, 0x69..0x6D
                 // = Bank 1..5. Switches which 8 param labels appear in
