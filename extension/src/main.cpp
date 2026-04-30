@@ -719,7 +719,7 @@ void drainInputQueue()
                     if (next < 0.0) next = 0.0;
                     if (next > 1.0) next = 1.0;
                     TrackFX_SetParamNormalized(tr, mm.fxIndex, sl.vst3Param, next);
-                } else if (g_pluginFaderMode.load()) {
+                } else if (g_pluginFaderMode.load() && !forcePan) {
                     // Plugin mode + no focused slot → V-Pot drives the
                     // SSL strip's own Pan param (linkIdx 3) instead of
                     // REAPER track pan, so the plug-in remains the
@@ -801,10 +801,10 @@ void drainInputQueue()
                         TrackFX_SetParamNormalized(tr, mm.fxIndex,
                             slPtr->vst3Param, resetVal);
                     }
-                } else if (g_pluginFaderMode.load()) {
+                } else if (g_pluginFaderMode.load() && !forcePan) {
                     // Plugin mode → reset SSL strip's own Pan to centre
-                    // (norm 0.5 = C). Falls back to REAPER pan reset
-                    // when the track has no CS plug-in.
+                    // (norm 0.5 = C). forcePan overrides this so PAN
+                    // button always resets REAPER track pan instead.
                     const auto pn = csPanForTrack(tr);
                     if (pn.vst3Param >= 0) {
                         TrackFX_SetParamNormalized(tr, pn.fxIndex,
@@ -2408,12 +2408,24 @@ void pushZonesForVisibleSlots()
         // normalised position. The mode register (FF 66 09 0D, set
         // below) stays at 0x01 so the firmware draws a single line
         // instead of the linear-fill animation mode 0x02 produces.
+        // Decision order (top wins):
+        //   1. FLIP        → V-Pot mirrors track volume.
+        //   2. forcePan    → V-Pot is REAPER track pan, period. Overrides
+        //                    Plugin-mode and any focus, since the user
+        //                    just pressed PAN to *demand* REAPER pan.
+        //   3. focused slot resolves on this track → drive that param.
+        //   4. focused but unavailable here → blank (collapsed bar).
+        //   5. Plugin mode → SSL strip Pan (linkIdx 3).
+        //   6. default     → REAPER track pan.
         if (flipActive) {
             // FLIP: V-Pot reads track volume. Map pb14 → 0..100 unipolar.
             const double volLinFlip = uiVolLinear(tr);
             const uint16_t pbVol = linearVolumeToPb(volLinFlip);
             vpotBar[s] = vpotPosFromUnipolar(
                 static_cast<double>(pbVol) / 16383.0);
+        } else if (g_forcePan.load()) {
+            const double pan = GetMediaTrackInfo_Value(tr, "D_PAN");
+            vpotBar[s] = vpotPosFromPan(pan);
         } else if (slot && fxIdx >= 0) {
             const double norm = TrackFX_GetParamNormalized(tr, fxIdx, slot->vst3Param);
             const double visual = slot->inverted ? 1.0 - norm : norm;
@@ -2431,12 +2443,9 @@ void pushZonesForVisibleSlots()
         } else if (focused.slotIdx != -1) {
             // A param is focused but this strip's plug-in doesn't have
             // it (e.g. IMP IN focused while track hosts CS 2). Render
-            // the V-Pot blank so the user isn't misled into thinking
-            // the strip controls something — collapsed-bar sentinel.
+            // the V-Pot blank so the user isn't misled.
             vpotBar[s] = (uint16_t{0x00} | (uint16_t{0x80} << 8));
         } else if (g_pluginFaderMode.load()) {
-            // Plugin mode → V-Pot Pan-fallback reflects the SSL strip's
-            // own Pan param. Falls through to track pan if no CS plug-in.
             const auto pn = csPanForTrack(tr);
             if (pn.vst3Param >= 0) {
                 const double norm = TrackFX_GetParamNormalized(
@@ -2563,6 +2572,10 @@ void pushZonesForVisibleSlots()
         std::string valLine;
         if (flipActive) {
             valLine = composeValueLine("Vol", formatDbReadout(volLin));
+        } else if (g_forcePan.load()) {
+            // forcePan overrides Plugin mode + focus. Pure REAPER pan.
+            const double pan = GetMediaTrackInfo_Value(tr, "D_PAN");
+            valLine = composeValueLine("Pan", formatPanReadout(pan));
         } else if (slot && fxIdx >= 0) {
             char paramBuf[64] = {0};
             const double norm = TrackFX_GetParamNormalized(tr, fxIdx, slot->vst3Param);
