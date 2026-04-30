@@ -1694,12 +1694,25 @@ void onUf8Input(const uint8_t* data, size_t len)
             // (kills the motor-echo feedback loop), and release the motor
             // so the user's hand isn't fighting it.
             //
-            // Touch-mode automation recording would require the extension
-            // to register as an IReaperControlSurface and feed touch into
-            // REAPER's automation engine — that's a Phase-2 item. For now
-            // the touch state is purely local.
-            const uint8_t strip = data[i + 3];
-            const uint8_t state = data[i + 4];
+            // **CRITICAL** strip-byte indexing: the firmware reports touch
+            // events 1-indexed (strip 1 = leftmost fader, ..., strip 8 =
+            // rightmost). Position events (FF 21 03), V-Pot rotation
+            // (FF 24 02), and motor commands (FF 1D / FF 1E) all use
+            // 0-indexed (strip 0 = leftmost). Discovered 2026-04-30 from
+            // the Mac trace: touching PS1 produced touch=02 + position=01
+            // and our LIMP command went to PS2, leaving PS1 motor engaged
+            // — the "fader sperrt" symptom + the two-finger trick directly
+            // explained. Subtract 1 here so all internal state and outbound
+            // motor commands stay in 0-indexed land.
+            const uint8_t rawStrip = data[i + 3];
+            const uint8_t state    = data[i + 4];
+            // Out-of-range guard: rawStrip should be 1..8. Anything else
+            // is a malformed frame; skip it.
+            if (rawStrip == 0 || rawStrip > 8) {
+                i += frameSize;
+                continue;
+            }
+            const uint8_t strip = static_cast<uint8_t>(rawStrip - 1);
             if (strip < 8) {
                 // Diag log — same path as f73201c. Append-mode, one line
                 // per touch event so we can correlate with FF 1B keepalive
