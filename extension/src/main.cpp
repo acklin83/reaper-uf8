@@ -139,17 +139,24 @@ namespace softkey {
     constexpr size_t kStrips = 8;
 
     // CS-mode banks (6 × 8). Values are SSL 360 Link slot indices
-    // (linkIdx). kNoSlot = label shown but not focusable yet (raw VST3
-    // params not in the Link map: BYPASS, Ø, PRE, MIC/DRIVE, IMPEDANCE,
-    // WIDTH, A/B, HQ MODE — TBD via Settings UI later).
+    // (linkIdx); uf8::ext::* refers to extension-defined synthetic IDs in
+    // PluginMap.h for params not in the SSL 360 Link table.
+    //   - Ø Phase: linkIdx 5, but pressing the soft-key fires a REAPER
+    //     B_PHASE toggle (track-meta) instead of focusing the plug-in
+    //     param — handled inline at the soft-key dispatch.
+    //   - A/B, HQ Mode: no equivalent VST3 param on any of the native
+    //     plug-ins, so they stay kNoSlot. Settings UI may bind them to
+    //     user actions later.
+    //   - Pre / Mic-Drive / Imp In / Imp: only on 4K-series; CS2 strips
+    //     render blank when soft-key pressed (graceful no-op).
     constexpr int kCsBanks[6][kStrips] = {
         // V-POT: BYPASS, IN TRIM, Ø, PRE, MIC/DRIVE, _, IMPEDANCE IN, IMPEDANCE
         // BYPASS uses linkIdx 0 — the plug-in's own Bypass param (NOT
-        // REAPER's TrackFX_Enabled). Ø stays kNoSlot, handled as a
-        // track-meta TrackPhase action.
-        { 0,  4, kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot },
+        // REAPER's TrackFX_Enabled). Ø is a track-meta TrackPhase action,
+        // dispatched specially in the soft-key handler.
+        { 0,  4, 5, uf8::ext::Pre, uf8::ext::MicDrive, kNoSlot, uf8::ext::ImpedanceIn, uf8::ext::Impedance },
         // Bank 1: WIDTH, _, _, A/B, HIGH PASS, LOW PASS, EQ, EQ TYPE
-        { kNoSlot, kNoSlot, kNoSlot, kNoSlot,  7,  6, 15, 14 },
+        { 2, kNoSlot, kNoSlot, kNoSlot,  7,  6, 15, 14 },
         // Bank 2: LF FREQ, LF GAIN, LF TYPE, _, LMF FREQ, LMF GAIN, LMF Q, _
         { 19, 20, 21, kNoSlot, 17, 16, 18, kNoSlot },
         // Bank 3: HMF FREQ, HMF GAIN, HMF Q, _, _, HF FREQ, HF GAIN, HF TYPE
@@ -174,8 +181,10 @@ namespace softkey {
     constexpr int kBcBanks[6][kStrips] = {
         // V-POT: THRESHOLD, ATTACK, RELEASE, RATIO, S/C HPF, MIX, EXTERNAL S/C, BUS COMP
         // BUS COMP at pos 7 = the BC plug-in's own CompBypass param
-        // (linkIdx 0 in the BC 360 Link layout).
-        { 1, 3, 4, 5, 6, 7, kNoSlot, 0 },
+        // (linkIdx 0 in the BC 360 Link layout). External S/C uses
+        // uf8::ext::ExternalSC — only the Native BC2 plug-in exposes it (the
+        // 360 Link wrapper does not), so other BC variants will no-op.
+        { 1, 3, 4, 5, 6, 7, uf8::ext::ExternalSC, 0 },
         // Bank 1: OUTPUT GAIN (= MakeupGain in BC2 map), rest empty
         { 2, kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot, kNoSlot },
         // Banks 2..5: empty per SSL spec

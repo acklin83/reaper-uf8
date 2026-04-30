@@ -32,19 +32,6 @@ namespace {
 //            (External S/C, routing toggles, Legacy Cut/Solo, Width Mode,
 //            Auto Make-up, etc.). Must stay stable across plug-in tables so
 //            cross-plugin focused-param chase keeps working.
-namespace ext {
-    constexpr int ExternalSC      = 100;
-    constexpr int FiltersToInput  = 101;
-    constexpr int DynamicsPreEq   = 102;
-    constexpr int FiltersToSC     = 103;
-    constexpr int EqToSC          = 104;
-    constexpr int FiltersIn       = 108;
-    constexpr int WidthMode       = 109;
-    constexpr int WidthFreq       = 110;
-    constexpr int AutoMakeup      = 111;
-    constexpr int AutoMakeupOff   = 112;
-}
-
 // Native SSL Channel Strip 2 (VST3: "SSL Native Channel Strip 2 (SSL)")
 constexpr LinkSlot kCs2Slots[] = {
     {  0, "Bypass",             "Bypass",           "BYP",    0,  false },
@@ -153,6 +140,9 @@ constexpr LinkSlot k4kESlots[] = {
     // Compressor extension
     { ext::AutoMakeup,     "AutoMakeup",     "Auto Make-up",   "A.MU",  40,  false },
     { ext::AutoMakeupOff,  "AutoMakeupOff",  "A.M-up Off",     "A.MO",  41,  false },
+    // Preamp section
+    { ext::Pre,            "Pre",            "Pre",            "PRE",    3,  false },
+    { ext::MicDrive,       "MicDrive",       "Mic / Drive",    "MIC",    4,  false },
     // Output stage
     {  2, "Width",                            "Width",          "WID",    9,  false },
     { ext::WidthMode,      "WidthMode",      "Width Mode",     "W.MOD", 10,  false },
@@ -205,6 +195,9 @@ constexpr LinkSlot k4kBSlots[] = {
     // Compressor extension
     { ext::AutoMakeup,     "AutoMakeup",     "Auto Make-up",   "A.MU",  47,  false },
     { ext::AutoMakeupOff,  "AutoMakeupOff",  "A.M-up Off",     "A.MO",  48,  false },
+    // Preamp section (4K B-style)
+    { ext::Pre,            "Pre",            "Pre",            "PRE",    3,  false },
+    { ext::MicDrive,       "MicDrive",       "Mic / Drive",    "MIC",    4,  false },
     // Output stage
     {  2, "Width",                            "Width",          "WID",    8,  false },
     { ext::WidthMode,      "WidthMode",      "Width Mode",     "W.MOD", 45,  false },
@@ -258,6 +251,11 @@ constexpr LinkSlot k4kGSlots[] = {
     // Compressor extension
     { ext::AutoMakeup,     "AutoMakeup",     "Auto Make-up",   "A.MU",  44,  false },
     { ext::AutoMakeupOff,  "AutoMakeupOff",  "A.M-up Off",     "A.MO",  45,  false },
+    // Preamp section (4K G adds variable input impedance)
+    { ext::ImpedanceIn,    "ImpedanceIn",    "Impedance In",   "IMPi",   7,  false },
+    { ext::Impedance,      "Impedance",      "Impedance",      "IMP",    8,  false },
+    { ext::Pre,            "Pre",            "Pre",            "PRE",    9,  false },
+    { ext::MicDrive,       "MicDrive",       "Mic / Drive",    "MIC",   10,  false },
     // Output stage
     {  2, "Width",                            "Width",          "WID",   15,  false },
     { ext::WidthMode,      "WidthMode",      "Width Mode",     "W.MOD", 16,  false },
@@ -281,6 +279,10 @@ constexpr LinkSlot kBusComp2Slots[] = {
     { 4, "Release",      "Release",   "REL",   5, false },
     { 6, "SidechainHPF", "S/C HPF",   "HPF",   7, false },
     { 7, "DryWetMix",    "Mix",       "MIX",   8, false },
+    // External S/C lives on the Native plug-in (vst3 0); the SSL 360 Link
+    // BC wrapper has no equivalent. Reuses CS's ext::ExternalSC linkIdx
+    // so cross-domain focus chasing stays consistent.
+    { ext::ExternalSC, "ExternalSC", "External S/C", "EXT", 0, false },
 };
 
 // ----- registry ---------------------------------------------------------------

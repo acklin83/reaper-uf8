@@ -28,6 +28,41 @@
 
 namespace uf8 {
 
+// linkIdx convention:
+//   0..46  — SSL 360 Link's own VST3 param indices (authoritative virtual
+//            strip). See docs/ssl-native-params/VST3__SSL_360_Link_(SSL).md.
+//  100+    — extension-defined synthetic IDs for params NOT in SSL 360
+//            Link (External S/C, routing toggles, preamp section, Width
+//            Mode, Auto Make-up, etc.). Stable across plug-in tables so
+//            cross-plugin focused-param chase keeps working. Reference
+//            these by name from soft-key bank tables — never inline.
+namespace ext {
+    constexpr int ExternalSC      = 100;
+    constexpr int FiltersToInput  = 101;
+    constexpr int DynamicsPreEq   = 102;
+    constexpr int FiltersToSC     = 103;
+    constexpr int EqToSC          = 104;
+    constexpr int FiltersIn       = 108;
+    constexpr int WidthMode       = 109;
+    constexpr int WidthFreq       = 110;
+    constexpr int AutoMakeup      = 111;
+    constexpr int AutoMakeupOff   = 112;
+    // Hardware-style preamp params on the 4K-series plug-ins. CS2 has no
+    // equivalents (modern strip is post-preamp). Variant coverage:
+    //   Pre, MicDrive             — 4K B / 4K E / 4K G
+    //   ImpedanceIn, Impedance    — 4K G only
+    //
+    // MicDrive resolves to the native "Mic" gain param (vst3 4 on 4K B/E,
+    // vst3 10 on 4K G). The SSL hardware label "Mic/Drive" reflects that
+    // the same gain knob serves both Mic preamp and Drive modes; the
+    // mode select is exposed as the separate Pre toggle (and on UC1 will
+    // surface as a sub-menu — see plugin-bound UC1 work).
+    constexpr int Pre             = 113;
+    constexpr int MicDrive        = 114;
+    constexpr int ImpedanceIn     = 115;
+    constexpr int Impedance       = 116;
+}
+
 struct LinkSlot {
     int         linkIdx;      // SSL 360 Link virtual-strip slot (stable across plugins)
     const char* id;           // "InputTrim"
