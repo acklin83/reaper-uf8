@@ -293,8 +293,10 @@ void UF8Device::workerLoop_()
         auto now = std::chrono::steady_clock::now();
         if (now - lastHeartbeat >= std::chrono::milliseconds(20)) {
             int t = 0;
-            libusb_bulk_transfer(handle_, kEpOut, hb1, sizeof(hb1), &t, 100);
-            libusb_bulk_transfer(handle_, kEpOut, hb2, sizeof(hb2), &t, 100);
+            int rc = libusb_bulk_transfer(handle_, kEpOut, hb1, sizeof(hb1), &t, 100);
+            traceFrame_('O', hb1, sizeof(hb1), rc);
+            rc = libusb_bulk_transfer(handle_, kEpOut, hb2, sizeof(hb2), &t, 100);
+            traceFrame_('O', hb2, sizeof(hb2), rc);
             // Stamp live per-strip GR bytes into hb3 + recompute checksum.
             const uint64_t packed = grBytes_.load(std::memory_order_relaxed);
             for (int i = 0; i < 8; ++i)
@@ -302,8 +304,10 @@ void UF8Device::workerLoop_()
             uint32_t sum = 0;
             for (int k = 1; k < 12; ++k) sum += hb3[k];
             hb3[12] = static_cast<uint8_t>(sum & 0xFF);
-            libusb_bulk_transfer(handle_, kEpOut, hb3, sizeof(hb3), &t, 100);
-            libusb_bulk_transfer(handle_, kEpOut, hb4, sizeof(hb4), &t, 100);
+            rc = libusb_bulk_transfer(handle_, kEpOut, hb3, sizeof(hb3), &t, 100);
+            traceFrame_('O', hb3, sizeof(hb3), rc);
+            rc = libusb_bulk_transfer(handle_, kEpOut, hb4, sizeof(hb4), &t, 100);
+            traceFrame_('O', hb4, sizeof(hb4), rc);
             lastHeartbeat = now;
         }
         // FF 5B liveness — cap32 sends this at 50 Hz throughout. UC1
@@ -311,7 +315,8 @@ void UF8Device::workerLoop_()
         // to also expect it.
         if (now - lastHb5 >= std::chrono::milliseconds(20)) {
             int t = 0;
-            libusb_bulk_transfer(handle_, kEpOut, hb5, sizeof(hb5), &t, 100);
+            int rc = libusb_bulk_transfer(handle_, kEpOut, hb5, sizeof(hb5), &t, 100);
+            traceFrame_('O', hb5, sizeof(hb5), rc);
             lastHb5 = now;
         }
 
@@ -320,7 +325,8 @@ void UF8Device::workerLoop_()
             uint8_t ka[5] = {0xff, 0x1b, 0x01, pmCounter,
                              static_cast<uint8_t>(0x1b + 0x01 + pmCounter)};
             int t = 0;
-            libusb_bulk_transfer(handle_, kEpOut, ka, sizeof(ka), &t, 100);
+            int rc = libusb_bulk_transfer(handle_, kEpOut, ka, sizeof(ka), &t, 100);
+            traceFrame_('O', ka, sizeof(ka), rc);
             pmCounter = (pmCounter + 1) & 0x03;
             lastPmKeepalive = now;
         }
@@ -335,6 +341,7 @@ void UF8Device::workerLoop_()
                 lastError_ = std::string("bulk OUT failed: ") + libusb_error_name(rc);
                 // Keep running; transient errors shouldn't kill the extension.
             }
+            traceFrame_('O', frame.data(), frame.size(), rc);
             // Diag: log motor (FF 1D) and fader-pos (FF 1E) frames.
             if (frame.size() >= 5 && frame[0] == 0xFF
                 && (frame[1] == 0x1D || frame[1] == 0x1E)) {
@@ -361,6 +368,21 @@ void UF8Device::workerLoop_()
     }
 }
 
+void UF8Device::traceFrame_(char dir, const uint8_t* data, size_t len,
+                            int rc) const
+{
+    if (!frameTrace_.load(std::memory_order_relaxed)) return;
+    FILE* lg = std::fopen("/tmp/reaper_uf8_frames.log", "a");
+    if (!lg) return;
+    const auto t  = std::chrono::system_clock::now().time_since_epoch();
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t).count();
+    std::fprintf(lg, "[%lld] %c rc=%d len=%zu ",
+                 static_cast<long long>(ms), dir, rc, len);
+    for (size_t i = 0; i < len; ++i) std::fprintf(lg, "%02x", data[i]);
+    std::fputc('\n', lg);
+    std::fclose(lg);
+}
+
 void UF8Device::startBulkRead_()
 {
     auto* xfer = libusb_alloc_transfer(0);
@@ -383,6 +405,9 @@ void UF8Device::readCallback_(libusb_transfer* xfer)
 
     if (xfer->status == LIBUSB_TRANSFER_COMPLETED && xfer->actual_length > 0) {
         std::span<const uint8_t> data{xfer->buffer, static_cast<size_t>(xfer->actual_length)};
+
+        self->traceFrame_('I', xfer->buffer,
+                          static_cast<size_t>(xfer->actual_length), 0);
 
         if (self->rawInputHandler_) {
             self->rawInputHandler_(xfer->buffer, static_cast<size_t>(xfer->actual_length));

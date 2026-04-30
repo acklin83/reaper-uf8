@@ -3591,6 +3591,33 @@ custom_action_register_t g_actionProbeLegacyLed{
 };
 int g_cmdProbeLegacyLed = 0;
 
+// Diagnostic — toggle a per-frame USB trace into /tmp/reaper_uf8_frames.log.
+// Used to compare Rea-Sixty's frame stream against an SSL360 baseline when
+// the motor-lock symptom recurs. Off by default (zero overhead).
+void toggleFrameTrace()
+{
+    if (!g_dev) {
+        ShowConsoleMsg("Rea-Sixty trace: UF8 not open\n");
+        return;
+    }
+    const bool on = !g_dev->frameTrace();
+    g_dev->setFrameTrace(on);
+    if (on) {
+        // Drop any prior log so the trace starts clean.
+        std::remove("/tmp/reaper_uf8_frames.log");
+        ShowConsoleMsg(
+            "Rea-Sixty trace ON — logging to /tmp/reaper_uf8_frames.log\n");
+    } else {
+        ShowConsoleMsg("Rea-Sixty trace OFF\n");
+    }
+}
+
+custom_action_register_t g_actionFrameTrace{
+    0, "REASIXTY_FRAME_TRACE",
+    "Rea-Sixty: Toggle USB frame trace", nullptr,
+};
+int g_cmdFrameTrace = 0;
+
 // hookcommand2 is the correct hook for custom_action dispatch per SDK
 // note at reaper_plugin.h:1086. hookcommand (v1) only catches actions
 // triggered via menu/keyboard, not custom_action registered entries.
@@ -3603,6 +3630,7 @@ bool hookCommand2(KbdSectionInfo* /*sec*/, int command,
     if (command == g_cmdBrightnessDown) { brightnessDown(); return true; }
     if (command == g_cmdProbeLed)       { probeNextLedCell();       return true; }
     if (command == g_cmdProbeLegacyLed) { probeNextLegacyLedCell(); return true; }
+    if (command == g_cmdFrameTrace)     { toggleFrameTrace();       return true; }
     return false;
 }
 
@@ -3667,6 +3695,7 @@ extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(
     g_cmdBrightnessDown = plugin_register("custom_action", &g_actionBrightnessDown);
     g_cmdProbeLed       = plugin_register("custom_action", &g_actionProbeLed);
     g_cmdProbeLegacyLed = plugin_register("custom_action", &g_actionProbeLegacyLed);
+    g_cmdFrameTrace     = plugin_register("custom_action", &g_actionFrameTrace);
     plugin_register("hookcommand2", reinterpret_cast<void*>(hookCommand2));
 
     return 1;

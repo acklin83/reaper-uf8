@@ -70,14 +70,31 @@ public:
 
     const std::string& lastError() const { return lastError_; }
 
+    // Diagnostic — when on, every IN + OUT frame is appended to
+    // /tmp/reaper_uf8_frames.log with a timestamp. Used to compare
+    // Rea-Sixty's frame stream against an SSL360 baseline when the
+    // motor-lock symptom recurs.
+    void setFrameTrace(bool on) {
+        frameTrace_.store(on, std::memory_order_relaxed);
+    }
+    bool frameTrace() const {
+        return frameTrace_.load(std::memory_order_relaxed);
+    }
+
 private:
     void workerLoop_();
     void startBulkRead_();
     static void readCallback_(libusb_transfer* xfer);
 
+    // Diagnostic — append a single line per frame to the trace log
+    // when frameTrace_ is on. dir: 'O' (out → device) / 'I' (in ← device).
+    void traceFrame_(char dir, const uint8_t* data, size_t len,
+                     int rc) const;
+
     libusb_context*       ctx_      = nullptr;
     libusb_device_handle* handle_   = nullptr;
     std::atomic<bool>     shuttingDown_{false};
+    std::atomic<bool>     frameTrace_{false};
     std::atomic<uint64_t> grBytes_{0};
     std::thread           worker_;
     std::string           lastError_;
