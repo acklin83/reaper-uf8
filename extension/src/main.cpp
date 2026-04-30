@@ -2193,7 +2193,14 @@ void pushZonesForVisibleSlots()
             const int bankSk = std::clamp(g_softKeyBank.load(),
                 0, softkey::maxBankFor(domSk));
             const auto vSk = softkey::viewFor(domSk, bankSk);
-            std::string label = vSk.labels[s];
+            // Pad to 12 chars with trailing spaces so shorter labels
+            // (and the empty kNoSlot label) actively overwrite any
+            // longer residue left in the LCD zone from the previous
+            // bank. An empty payload (`FF 66 02 04 <strip>`) flips the
+            // strip into "slot empty" mode and darkens the colour bar —
+            // not what we want; we just want the label cleared.
+            std::string label(vSk.labels[s]);
+            if (label.size() < 12) label.resize(12, ' ');
             const int slotLink = vSk.linkIdx[s];
             uf8::TopSoftKeyState tssk;
             int8_t ledCacheKey;
