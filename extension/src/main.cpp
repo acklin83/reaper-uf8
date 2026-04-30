@@ -370,6 +370,9 @@ struct PendingInput {
                          // (not called inline from libusb thread):
                          // SetMediaTrackInfo_Value triggers REAPER UI updates
                          // that end in NSWindow setTitle — main-thread-only.
+        TrackPhaseStrip, // toggle B_PHASE on the strip's track (strip+bankOffset).
+                         // Used by V-Pot push in CS Bank 0 col 2 — per-strip,
+                         // unlike TrackPhase which always targets selected.
     };
     Kind    kind;
     uint8_t strip;
@@ -618,6 +621,12 @@ void drainInputQueue()
                 SetOnlyTrackSelected(tr);
                 followSelectedInMixer(tr);
                 break;
+            case PendingInput::TrackPhaseStrip: {
+                const double cur = GetMediaTrackInfo_Value(tr, "B_PHASE");
+                SetMediaTrackInfo_Value(tr, "B_PHASE",
+                    cur > 0.5 ? 0.0 : 1.0);
+                break;
+            }
             case PendingInput::VolumeAbs: {
                 // FLIP: fader drives the focused plug-in parameter on this
                 // strip's track instead of track volume. Read the raw
@@ -1624,11 +1633,26 @@ void onUf8Input(const uint8_t* data, size_t len)
                 }
                 handledNatively = true;
             } else if (id >= 0x08 && id <= 0x0F) {
-                // V-Pot push. In Pan mode (currently the only mode we
-                // implement for the V-Pot) a push resets pan to center.
+                // V-Pot push. Default: PanCenter (resets pan / focused-param
+                // to its neutral). Exception: CS Bank 0 col 2 ("Ø Phase") —
+                // the column has no plug-in param, so V-Pot 2's push toggles
+                // REAPER B_PHASE on that strip's track instead of being a
+                // dead key. Per-strip (uses bankOffset), not selected-track
+                // like the soft-key Ø handler.
                 if (pressed) {
-                    queueInput({PendingInput::PanCenter,
-                                static_cast<uint8_t>(id - 0x08), 0.0});
+                    const uint8_t strip = static_cast<uint8_t>(id - 0x08);
+                    const auto fp = uf8::getFocusedParam();
+                    const auto domain = (fp.domain == uf8::Domain::BusComp)
+                        ? uf8::Domain::BusComp : uf8::Domain::ChannelStrip;
+                    const int bank = std::clamp(g_softKeyBank.load(),
+                        0, softkey::maxBankFor(domain));
+                    if (bank == 0
+                        && domain == uf8::Domain::ChannelStrip
+                        && strip == 2) {
+                        queueInput({PendingInput::TrackPhaseStrip, strip, 0.0});
+                    } else {
+                        queueInput({PendingInput::PanCenter, strip, 0.0});
+                    }
                 }
                 handledNatively = true;
             } else if (id >= 0x20 && id <= 0x37) {
