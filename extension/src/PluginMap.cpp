@@ -35,7 +35,6 @@ namespace {
 // Native SSL Channel Strip 2 (VST3: "SSL Native Channel Strip 2 (SSL)")
 constexpr LinkSlot kCs2Slots[] = {
     {  0, "Bypass",             "Bypass",           "BYP",    0,  false },
-    { 35, "LinkableFaderLevel", "Fader",            "FADER", 38,  false },
     {  4, "InputTrim",          "Input Trim",       "IN",     2,  false },
     {  7, "HighPassFreq",       "HPF",              "HPF",    5,  false },
     {  6, "LowPassFreq",        "LPF",              "LPF",    4,  false },
@@ -98,7 +97,6 @@ constexpr LinkSlot kCs2Slots[] = {
 // place of EQ Type. VST3 param indices from docs/ssl-native-params.
 constexpr LinkSlot k4kESlots[] = {
     {  0, "Bypass",             "Bypass",           "BYP",    0,  false },
-    { 35, "LinkableFaderLevel", "Fader",            "FADER",  6,  false },
     {  4, "InputTrim",          "Input Trim",       "IN",     2,  false },
     {  7, "HighPassFreq",       "HPF",              "HPF",   14,  false },
     {  6, "LowPassFreq",        "LPF",              "LPF",   15,  false },
@@ -156,7 +154,6 @@ constexpr LinkSlot k4kESlots[] = {
 // Comp-Peak (simpler 4000-series B-feature set).
 constexpr LinkSlot k4kBSlots[] = {
     {  0, "Bypass",             "Bypass",           "BYP",    0,  false },
-    { 35, "LinkableFaderLevel", "Fader",            "FADER",  6,  false },
     {  4, "InputTrim",          "Input Trim",       "IN",     2,  false },
     {  7, "HighPassFreq",       "HPF",              "HPF",   10,  false },
     {  6, "LowPassFreq",        "LPF",              "LPF",   11,  false },
@@ -209,7 +206,6 @@ constexpr LinkSlot k4kBSlots[] = {
 // 4K G — full-featured G-series strip.
 constexpr LinkSlot k4kGSlots[] = {
     {  0, "Bypass",             "Bypass",           "BYP",    0,  false },
-    { 35, "LinkableFaderLevel", "Fader",            "FADER", 12,  false },
     {  4, "InputTrim",          "Input Trim",       "IN",     6,  false },
     {  7, "HighPassFreq",       "HPF",              "HPF",   20,  false },
     {  6, "LowPassFreq",        "LPF",              "LPF",   21,  false },

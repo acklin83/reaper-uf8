@@ -474,6 +474,41 @@ double   uiVolLinear(MediaTrack* tr);
 // block further down. Kept in sync with that block.
 constexpr uint16_t kUf8FaderPbMax = 15583;
 
+// CS plug-in's "Fader Level" param (= the SSL strip's own internal
+// fader, distinct from REAPER's track volume). Used when the Plugin
+// button is engaged so the UF8 motor faders drive the SSL strip
+// fader instead of post-effect track volume. The vst3 param index
+// differs per CS variant — looked up by the plug-in's display short
+// name. Returns {-1, -1} when the track has no CS plug-in.
+struct CsFaderHandle { int fxIndex; int vst3Param; };
+CsFaderHandle csFaderForTrack(MediaTrack* tr)
+{
+    if (!tr) return { -1, -1 };
+    auto mm = uf8::lookupPluginOnTrack(tr, uf8::Domain::ChannelStrip);
+    if (!mm.map) return { -1, -1 };
+    int p = -1;
+    const char* sn = mm.map->displayShort;
+    if      (std::strcmp(sn, "CS 2") == 0) p = 38;
+    else if (std::strcmp(sn, "4K G") == 0) p = 12;
+    else if (std::strcmp(sn, "4K E") == 0) p = 6;
+    else if (std::strcmp(sn, "4K B") == 0) p = 6;
+    return { mm.fxIndex, p };
+}
+
+// CS plug-in's Pan param (linkIdx 3 across all four CS variants). In
+// Plugin mode, the V-Pot's Pan-fallback drives this instead of REAPER's
+// track pan, so the SSL strip Pan stays the surface's source-of-truth.
+struct CsPanHandle { int fxIndex; int vst3Param; };
+CsPanHandle csPanForTrack(MediaTrack* tr)
+{
+    if (!tr) return { -1, -1 };
+    auto mm = uf8::lookupPluginOnTrack(tr, uf8::Domain::ChannelStrip);
+    if (!mm.map) return { -1, -1 };
+    const auto* sl = uf8::findSlotByLinkIdx(*mm.map, 3);
+    if (!sl) return { -1, -1 };
+    return { mm.fxIndex, sl->vst3Param };
+}
+
 void queueInput(PendingInput e)
 {
     std::lock_guard<std::mutex> lk(g_inQueueMutex);
@@ -610,6 +645,26 @@ void drainInputQueue()
                         slF->vst3Param, normF);
                     break;
                 }
+                // Plugin-fader mode: route the fader to the SSL strip's
+                // internal Fader Level param (vst3 index varies per
+                // variant) instead of REAPER's post-FX track volume.
+                // Same pb14/kUf8FaderPbMax mapping the FLIP path uses
+                // — gives an even 0..1 sweep the plug-in expects.
+                if (g_pluginFaderMode.load()) {
+                    const auto cs = csFaderForTrack(tr);
+                    if (cs.vst3Param >= 0) {
+                        const uint16_t pbCs = linearVolumeToPb(e.value);
+                        double n = static_cast<double>(pbCs) /
+                                   static_cast<double>(kUf8FaderPbMax);
+                        if (n < 0.0) n = 0.0;
+                        if (n > 1.0) n = 1.0;
+                        TrackFX_SetParamNormalized(tr, cs.fxIndex,
+                            cs.vst3Param, n);
+                        break;
+                    }
+                    // No CS plug-in on this track — fall through to track
+                    // volume so the fader still does *something*.
+                }
                 // Normal: CSurf_OnVolumeChange applies the new position to
                 // the track AND broadcasts to other surfaces. We do not
                 // cache the value — motor echo reads GetTrackUIVolPan
@@ -664,6 +719,30 @@ void drainInputQueue()
                     if (next < 0.0) next = 0.0;
                     if (next > 1.0) next = 1.0;
                     TrackFX_SetParamNormalized(tr, mm.fxIndex, sl.vst3Param, next);
+                } else if (g_pluginFaderMode.load()) {
+                    // Plugin mode + no focused slot → V-Pot drives the
+                    // SSL strip's own Pan param (linkIdx 3) instead of
+                    // REAPER track pan, so the plug-in remains the
+                    // surface's source of truth for the strip's panorama.
+                    const auto pn = csPanForTrack(tr);
+                    if (pn.vst3Param >= 0) {
+                        const double cur = TrackFX_GetParamNormalized(
+                            tr, pn.fxIndex, pn.vst3Param);
+                        double delta = e.value * 0.5;  // pan range 0..1, half-scale of REAPER's -1..+1
+                        if (g_shiftHeld.load()) delta *= 0.25;
+                        double next = cur + delta;
+                        if (next < 0.0) next = 0.0;
+                        if (next > 1.0) next = 1.0;
+                        TrackFX_SetParamNormalized(tr, pn.fxIndex,
+                            pn.vst3Param, next);
+                        break;
+                    }
+                    // Fall through to REAPER pan if no CS plug-in.
+                    const double cur = GetMediaTrackInfo_Value(tr, "D_PAN");
+                    double next = cur + e.value;
+                    if (next >  1.0) next =  1.0;
+                    if (next < -1.0) next = -1.0;
+                    SetMediaTrackInfo_Value(tr, "D_PAN", next);
                 } else {
                     const double cur = GetMediaTrackInfo_Value(tr, "D_PAN");
                     double next = cur + e.value;
@@ -721,6 +800,17 @@ void drainInputQueue()
                         const double resetVal = slPtr->deflt.value_or(0.5);
                         TrackFX_SetParamNormalized(tr, mm.fxIndex,
                             slPtr->vst3Param, resetVal);
+                    }
+                } else if (g_pluginFaderMode.load()) {
+                    // Plugin mode → reset SSL strip's own Pan to centre
+                    // (norm 0.5 = C). Falls back to REAPER pan reset
+                    // when the track has no CS plug-in.
+                    const auto pn = csPanForTrack(tr);
+                    if (pn.vst3Param >= 0) {
+                        TrackFX_SetParamNormalized(tr, pn.fxIndex,
+                            pn.vst3Param, 0.5);
+                    } else {
+                        SetMediaTrackInfo_Value(tr, "D_PAN", 0.0);
                     }
                 } else {
                     SetMediaTrackInfo_Value(tr, "D_PAN", 0.0);
@@ -1490,8 +1580,11 @@ void onUf8Input(const uint8_t* data, size_t len)
                 // Bank. Walks g_softKeyBank in the same domain-aware way
                 // the dedicated bank selectors (0x68/0x69..0x6D) do —
                 // clamped to softkey::maxBankFor(domain) (both = 5).
-                // User-requested default mapping; will be configurable
-                // via the Settings UI later.
+                // LED lights momentarily while held as press feedback.
+                const auto led = (id == 0x53)
+                    ? uf8::Uf8GlobalLed::PageRight
+                    : uf8::Uf8GlobalLed::PageLeft;
+                sendLedFrames(uf8::buildUf8GlobalLed(led, pressed));
                 if (pressed) {
                     const int delta = (id == 0x53) ? 1 : -1;
                     const auto fp = uf8::getFocusedParam();
@@ -2246,22 +2339,24 @@ void pushZonesForVisibleSlots()
             const int slotLink = vSk.linkIdx[s];
             uf8::TopSoftKeyState tssk;
             int8_t ledCacheKey;
-            if (slotLink == softkey::kNoSlot) {
-                tssk = uf8::TopSoftKeyState::Off;        // dark
-                ledCacheKey = 0;
-            } else if (slotLink == focused.slotIdx) {
+            if (slotLink != softkey::kNoSlot && slotLink == focused.slotIdx) {
                 tssk = uf8::TopSoftKeyState::On;         // bright = focused
                 ledCacheKey = 2;
             } else {
-                tssk = uf8::TopSoftKeyState::Dim;        // dim = available
+                // All other strips — including kNoSlot positions — render
+                // dim so the row stays visibly populated. Lighting only
+                // strips with a wired slot would leave gaps the user
+                // reads as "broken LEDs". Per user instruction 2026-04-30:
+                // bright only when the parameter is selected.
+                tssk = uf8::TopSoftKeyState::Dim;
                 ledCacheKey = 1;
             }
             if (ledCacheKey != g_lastTopSoftKey[s]) {
                 g_lastTopSoftKey[s] = ledCacheKey;
-                // SSL-mode default: white. Three visible levels —
-                // dark (00 F0) for kNoSlot, dim white (11 F1) for
-                // available, bright white (FF FF) for focused. User
-                // can pick per-strip colours via the Settings UI later.
+                // SSL-mode default: white. Two visible levels —
+                // dim white (11 F1) for available / unbound, bright
+                // white (FF FF) for focused. Settings UI will let the
+                // user pick per-strip colours later.
                 sendLedFrames(uf8::buildTopSoftKeyLed(
                     static_cast<uint8_t>(s), tssk, uf8::ledColourWhite()));
             }
@@ -2288,6 +2383,13 @@ void pushZonesForVisibleSlots()
         // slot. Without a slot there's no parameter to flip onto the
         // fader, so the strip falls back to normal mode silently.
         const bool flipActive = g_flip.load() && slot && fxIdx >= 0;
+
+        // Plugin-fader mode active on this strip = global plugin-fader
+        // toggle ON + a CS plug-in is loaded. FLIP wins if both are on
+        // (FLIP is per-strip and explicit; plugin-fader is global).
+        const auto cs = (g_pluginFaderMode.load() && !flipActive)
+                          ? csFaderForTrack(tr) : CsFaderHandle{-1, -1};
+        const bool csFaderActive = cs.vst3Param >= 0;
 
         // V-Pot Readout Bar position. Binary toggle slots render as
         // full (0xFF) or empty (0x00) — no in-between gradient; their
@@ -2316,6 +2418,24 @@ void pushZonesForVisibleSlots()
             } else {
                 vpotBar[s] = vpotPosFromUnipolar(visual);
             }
+        } else if (focused.slotIdx != -1) {
+            // A param is focused but this strip's plug-in doesn't have
+            // it (e.g. IMP IN focused while track hosts CS 2). Render
+            // the V-Pot blank so the user isn't misled into thinking
+            // the strip controls something — collapsed-bar sentinel.
+            vpotBar[s] = (uint16_t{0x00} | (uint16_t{0x80} << 8));
+        } else if (g_pluginFaderMode.load()) {
+            // Plugin mode → V-Pot Pan-fallback reflects the SSL strip's
+            // own Pan param. Falls through to track pan if no CS plug-in.
+            const auto pn = csPanForTrack(tr);
+            if (pn.vst3Param >= 0) {
+                const double norm = TrackFX_GetParamNormalized(
+                    tr, pn.fxIndex, pn.vst3Param);
+                vpotBar[s] = vpotPosFromBipolar(norm * 2.0 - 1.0);
+            } else {
+                const double pan = GetMediaTrackInfo_Value(tr, "D_PAN");
+                vpotBar[s] = vpotPosFromPan(pan);
+            }
         } else {
             const double pan = GetMediaTrackInfo_Value(tr, "D_PAN");
             vpotBar[s] = vpotPosFromPan(pan);
@@ -2342,12 +2462,16 @@ void pushZonesForVisibleSlots()
         // mode this zone shows the focused plug-in parameter's
         // formatted value (truncated to 6 chars to fit the zone), so
         // the fader has its own readout matching what it now drives.
+        // In Plugin-Fader mode the readout shows the SSL strip's
+        // internal Fader Level dB instead of REAPER's track volume.
         const double volLin = uiVolLinear(tr);
         std::string dbStr;
-        if (flipActive) {
+        if (flipActive || csFaderActive) {
             char paramBuf[64] = {0};
-            const double norm = TrackFX_GetParamNormalized(tr, fxIdx, slot->vst3Param);
-            TrackFX_FormatParamValueNormalized(tr, fxIdx, slot->vst3Param,
+            const int useFx = flipActive ? fxIdx : cs.fxIndex;
+            const int useParam = flipActive ? slot->vst3Param : cs.vst3Param;
+            const double norm = TrackFX_GetParamNormalized(tr, useFx, useParam);
+            TrackFX_FormatParamValueNormalized(tr, useFx, useParam,
                                                norm, paramBuf, sizeof(paramBuf));
             std::string s2(paramBuf);
             // Squash UTF-8 ∞ then non-printable, trim leading spaces — same
@@ -2397,10 +2521,12 @@ void pushZonesForVisibleSlots()
         // travels to where the plug-in param actually is.
         if (!g_touchReported[s].load()) {
             uint16_t pb;
-            if (flipActive) {
-                const double norm = TrackFX_GetParamNormalized(
-                    tr, fxIdx, slot->vst3Param);
-                const double v = slot->inverted ? 1.0 - norm : norm;
+            if (flipActive || csFaderActive) {
+                const int useFx = flipActive ? fxIdx : cs.fxIndex;
+                const int useParam = flipActive ? slot->vst3Param : cs.vst3Param;
+                const bool inverted = flipActive ? slot->inverted : false;
+                const double norm = TrackFX_GetParamNormalized(tr, useFx, useParam);
+                const double v = inverted ? 1.0 - norm : norm;
                 // Scale to the actual hardware fader top (kUf8FaderPbMax)
                 // so a fully-right param parks the motor at mechanical top
                 // exactly. 16383 here would aim past the hardware deadband.
@@ -2480,8 +2606,30 @@ void pushZonesForVisibleSlots()
                 break;
             }
             valLine = composeValueLine(slot->name, valStr);
+        } else if (focused.slotIdx != -1) {
+            // Param is focused but unavailable on this strip's plug-in
+            // — leave the Value Line blank instead of falling back to
+            // Pan, which would mislead the user into thinking the
+            // V-Pot controls something on this strip.
+            valLine = std::string(19, ' ');
+        } else if (g_pluginFaderMode.load()) {
+            // Plugin mode → show the SSL strip's own Pan instead of
+            // REAPER track pan. Plug-in pan is normalised 0..1 with
+            // 0.5 = centre; convert to REAPER's -1..+1 for the
+            // existing formatPanReadout helper. Falls back to track
+            // pan when there's no CS plug-in on the track.
+            const auto pn = csPanForTrack(tr);
+            if (pn.vst3Param >= 0) {
+                const double norm = TrackFX_GetParamNormalized(
+                    tr, pn.fxIndex, pn.vst3Param);
+                valLine = composeValueLine("Pan",
+                    formatPanReadout(norm * 2.0 - 1.0));
+            } else {
+                const double pan = GetMediaTrackInfo_Value(tr, "D_PAN");
+                valLine = composeValueLine("Pan", formatPanReadout(pan));
+            }
         } else {
-            // No plugin slot → V-Pot controls Pan; reflect that in
+            // Nothing focused → V-Pot controls Pan; reflect that in
             // the Value Line. Fader dB stays in the dedicated O/PdB
             // zone above, so we don't need to repeat volume here.
             const double pan = GetMediaTrackInfo_Value(tr, "D_PAN");
@@ -2975,13 +3123,16 @@ void pushUf8GlobalLeds()
 
     // Init-dim LEDs whose state we don't drive yet — without these,
     // anything left bright by the probe action (or by SSL360 before
-    // Rea-Sixty took the device) lingers across reloads.
+    // Rea-Sixty took the device) lingers across reloads. All shipped
+    // dim baseline so the user sees the row exists; they go bright
+    // when actively used (press feedback) or when bound via Settings.
     if (!g_globalLedsInit) {
         for (auto led : {
             uf8::Uf8GlobalLed::Layer1, uf8::Uf8GlobalLed::Layer2,
             uf8::Uf8GlobalLed::Layer3, uf8::Uf8GlobalLed::Btn360,
             uf8::Uf8GlobalLed::Channel,
-            uf8::Uf8GlobalLed::AutoOff,
+            uf8::Uf8GlobalLed::AutoOff, uf8::Uf8GlobalLed::Auto,
+            uf8::Uf8GlobalLed::Norm,
             uf8::Uf8GlobalLed::BankLeft, uf8::Uf8GlobalLed::BankRight,
             uf8::Uf8GlobalLed::ZoomUp, uf8::Uf8GlobalLed::ZoomDown,
             uf8::Uf8GlobalLed::ZoomLeft, uf8::Uf8GlobalLed::ZoomRight,
@@ -2989,32 +3140,28 @@ void pushUf8GlobalLeds()
         }) {
             sendLedFrames(uf8::buildUf8GlobalLed(led, false));
         }
-        // Send/Plugin 1..8 use the FF 3B 03 legacy mono path. Those
-        // LEDs are 2-state (ON/OFF only — no dim intermediate); we
-        // ship them ON at startup so the row is visible. Settings UI
-        // will let users assign actions and switch unbound buttons OFF.
+        // Send/Plugin 1..8 ship dim baseline. Settings UI will let the
+        // user assign actions per button — at runtime the LED of the
+        // currently-active assignment goes bright as a radio.
         for (auto led : {
             uf8::Uf8GlobalLed::SendPlugin1, uf8::Uf8GlobalLed::SendPlugin2,
             uf8::Uf8GlobalLed::SendPlugin3, uf8::Uf8GlobalLed::SendPlugin4,
             uf8::Uf8GlobalLed::SendPlugin5, uf8::Uf8GlobalLed::SendPlugin6,
             uf8::Uf8GlobalLed::SendPlugin7, uf8::Uf8GlobalLed::SendPlugin8,
         }) {
-            sendLedFrames(uf8::buildUf8GlobalLed(led, true));
+            sendLedFrames(uf8::buildUf8GlobalLed(led, false));
         }
     }
 
-    // Page Left / Page Right LEDs — bright always while extension is
-    // active. The PM-mode soft-key bank navigation wraps around so there
-    // is always a "previous" / "next" bank to go to. Cells confirmed
-    // via cap48 2026-04-30: PL 0x2D, PR 0x2C. Both are 3-state legacy
-    // LEDs; buildUf8GlobalLed handles the colour-pair + FF 3B 03 combo.
-    if (g_lastPageLeftLit != 1 || !g_globalLedsInit) {
-        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::PageLeft, true));
-        g_lastPageLeftLit = 1;
-    }
-    if (g_lastPageRightLit != 1 || !g_globalLedsInit) {
-        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::PageRight, true));
-        g_lastPageRightLit = 1;
+    // Page Left / Page Right LEDs — dim baseline, bright momentarily
+    // while held (driven from the press handler, not here). At init
+    // we just ensure both are at known dim state. Cells PL 0x2D,
+    // PR 0x2C (cap48 2026-04-30). Both are 3-state legacy LEDs.
+    if (!g_globalLedsInit) {
+        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::PageLeft, false));
+        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::PageRight, false));
+        g_lastPageLeftLit = 0;
+        g_lastPageRightLit = 0;
     }
 
     // Channel-encoder mode LEDs — exactly one of Nav/Nudge/Focus is bright,

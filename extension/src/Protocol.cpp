@@ -309,6 +309,12 @@ LedColourFrames buildTopSoftKeyLed(uint8_t strip, TopSoftKeyState state,
         std::span<const uint8_t> payload{out.ff39.data() + 1, out.ff39.size() - 1};
         out.ff39.push_back(checksum(payload));
     }
+    // Top-soft-keys are 3-state legacy LEDs (cap48 2026-04-30): the
+    // colour-pair sets the colour level shown, but the FF 3B 03 mono
+    // frame is the actual on/off toggle. Without it, Dim renders
+    // invisible on most strips — only strips already in firmware-
+    // default ON state would show as dim.
+    out.legacy = buildLedCommand(cell, state != TopSoftKeyState::Off);
     return out;
 }
 
@@ -590,7 +596,7 @@ constexpr Uf8GlobalLedDef kUf8GlobalLedTable[] = {
     /* SendPlugin6  */ {0x32, 0xFF, 0xFF, true},
     /* SendPlugin7  */ {0x31, 0xFF, 0xFF, true},
     /* SendPlugin8  */ {0x30, 0xFF, 0xFF, true},
-    /* Plugin       */ {0x2F, 0xFF, 0xFF},
+    /* Plugin       */ {0x2F, 0xFF, 0xFF, true},   // 3-state legacy LED
     // Page Left / Page Right both 3-state LEDs (off/dim/bright) requiring
     // colour-pair + legacy mono frames together — verified via cap48
     // 2026-04-30. PageRight at 0x2C was never lit by colour-pair alone in
@@ -639,11 +645,14 @@ LedColourFrames buildUf8GlobalLed(Uf8GlobalLed btn, GlobalLedState state)
             if (def.legacy) out.legacy = buildLedCommand(def.cell, true);
             break;
         case GlobalLedState::Dim:
-            // Dim: FF 38 == FF 39 = 11 F1 (white-off, same as SEL off).
-            // Capture shows SSL360 does NOT send the legacy frame for the
-            // dim transition — only the colour-pair, even for legacy LEDs.
+            // Dim: FF 38 == FF 39 = 11 F1 (low-intensity white). For
+            // legacy-family LEDs the FF 3B 03 frame must also fire with
+            // state=0x01 — without it the LED stays in legacy-OFF and
+            // the colour-pair has no visible effect (cap48 2026-04-30
+            // confirmed: SSL sends legacy ON alongside dim colour-pair).
             out.ff38 = buildSelFrame(0x38, def.cell, 0x11, 0xF1);
             out.ff39 = buildSelFrame(0x39, def.cell, 0x11, 0xF1);
+            if (def.legacy) out.legacy = buildLedCommand(def.cell, true);
             break;
         case GlobalLedState::Off:
             // True off — colour-pair `00 F0` zeros the baseline; legacy

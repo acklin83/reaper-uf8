@@ -2,14 +2,15 @@
 
 namespace uf8 {
 
-// Default = ChannelStrip / linkIdx 35 (LinkableFaderLevel = "Fader" in
-// every CS-family map: CS 2, 4K B, 4K E, 4K G — all align on this index
-// per the SSL 360 Link layout). Must be a real linkIdx, not an array
-// position: findSlotByLinkIdx walks linkIdx, so 0 resolves to nullptr
-// (lowest CS linkIdx is 4) — leaving FLIP and the V-Pot param-drive
-// path inactive until the first UC1 knob turn populated a valid focus.
+// Default = ChannelStrip / slotIdx -1 (no param focused). The render
+// path treats -1 as the "fall back to Pan" sentinel and any other
+// linkIdx that doesn't resolve via findSlotByLinkIdx as "leave the
+// V-Pot zones blank" (= the param is selected but unavailable on
+// this strip's plug-in variant — e.g. IMP IN selected, but track
+// hosts CS 2). Soft-key bank LEDs all render dim until a focus is
+// set by pressing a top-soft-key or by a UC1 knob touch.
 std::atomic<FocusedParam> g_focusedParam{
-    FocusedParam{ Domain::ChannelStrip, 35 }
+    FocusedParam{ Domain::ChannelStrip, -1 }
 };
 
 std::atomic<bool> g_focusedDirty{false};
