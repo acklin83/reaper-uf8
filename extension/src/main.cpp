@@ -36,6 +36,7 @@
 #include "FocusedParam.h"
 #include "HidDevice.h"
 #include "MidiBridge.h"
+#include "PluginChunkPatch.h"
 #include "PluginMap.h"
 #include "Protocol.h"
 #include "UC1Device.h"
@@ -373,6 +374,12 @@ struct PendingInput {
         TrackPhaseStrip, // toggle B_PHASE on the strip's track (strip+bankOffset).
                          // Used by V-Pot push in CS Bank 0 col 2 — per-strip,
                          // unlike TrackPhase which always targets selected.
+        TogglePluginAB,  // flip StateASelected on strip's CS plug-in chunk.
+                         // V-Pot push, CS Bank 1 col 3.
+        TogglePluginHQ,  // flip <PARAM_NON_AUTO id="HighQuality"> on strip's
+                         // CS plug-in chunk. V-Pot push, CS Bank 5 col 6.
+                         // Both Toggle* go through SetTrackStateChunk →
+                         // brief plug-in state reload (sub-ms click possible).
     };
     Kind    kind;
     uint8_t strip;
@@ -627,6 +634,12 @@ void drainInputQueue()
                     cur > 0.5 ? 0.0 : 1.0);
                 break;
             }
+            case PendingInput::TogglePluginAB:
+                uf8::togglePluginAB(tr);
+                break;
+            case PendingInput::TogglePluginHQ:
+                uf8::togglePluginHQ(tr);
+                break;
             case PendingInput::VolumeAbs: {
                 // FLIP: fader drives the focused plug-in parameter on this
                 // strip's track instead of track volume. Read the raw
@@ -1634,11 +1647,16 @@ void onUf8Input(const uint8_t* data, size_t len)
                 handledNatively = true;
             } else if (id >= 0x08 && id <= 0x0F) {
                 // V-Pot push. Default: PanCenter (resets pan / focused-param
-                // to its neutral). Exception: CS Bank 0 col 2 ("Ø Phase") —
-                // the column has no plug-in param, so V-Pot 2's push toggles
-                // REAPER B_PHASE on that strip's track instead of being a
-                // dead key. Per-strip (uses bankOffset), not selected-track
-                // like the soft-key Ø handler.
+                // to its neutral). Exceptions for the CS-bank columns whose
+                // soft-key labels have no plug-in param (kNoSlot in the
+                // bank tables) but DO have a meaningful per-strip action:
+                //   Bank 0 col 2  ("Ø Phase")  → REAPER B_PHASE toggle
+                //   Bank 1 col 3  ("A/B")      → SSL plug-in StateASelected
+                //   Bank 5 col 6  ("HQ MODE")  → SSL plug-in HighQuality
+                // The two Toggle* paths go through SetTrackStateChunk —
+                // brief plug-in state reload, sub-ms click possible during
+                // playback. Acceptable for HQ/A/B (toggled rarely).
+                // Per-strip target: strip + bankOffset, not selected.
                 if (pressed) {
                     const uint8_t strip = static_cast<uint8_t>(id - 0x08);
                     const auto fp = uf8::getFocusedParam();
@@ -1646,13 +1664,13 @@ void onUf8Input(const uint8_t* data, size_t len)
                         ? uf8::Domain::BusComp : uf8::Domain::ChannelStrip;
                     const int bank = std::clamp(g_softKeyBank.load(),
                         0, softkey::maxBankFor(domain));
-                    if (bank == 0
-                        && domain == uf8::Domain::ChannelStrip
-                        && strip == 2) {
-                        queueInput({PendingInput::TrackPhaseStrip, strip, 0.0});
-                    } else {
-                        queueInput({PendingInput::PanCenter, strip, 0.0});
+                    PendingInput::Kind kind = PendingInput::PanCenter;
+                    if (domain == uf8::Domain::ChannelStrip) {
+                        if      (bank == 0 && strip == 2) kind = PendingInput::TrackPhaseStrip;
+                        else if (bank == 1 && strip == 3) kind = PendingInput::TogglePluginAB;
+                        else if (bank == 5 && strip == 6) kind = PendingInput::TogglePluginHQ;
                     }
+                    queueInput({kind, strip, 0.0});
                 }
                 handledNatively = true;
             } else if (id >= 0x20 && id <= 0x37) {
