@@ -2794,6 +2794,13 @@ void pushZonesForVisibleSlots()
             MediaTrack* tr = GetTrack(nullptr, realSlot);
             int fxIdx = -1;
             const uf8::LinkSlot* slot = slotForStrip(tr, focused, &fxIdx);
+            // Pan-focus is treated as no-V-Pot-focus by the position +
+            // value-line render branches (defers to the Plugin/forcePan/
+            // REAPER pan tree, which is bipolar centre-out). Mode register
+            // must agree — otherwise the firmware renders the bipolar
+            // centre encoding (byte0=0x00, byte1=0x80) as left-edge in
+            // unipolar mode 0x01.
+            if (slot && isVPotPanFocus(focused)) slot = nullptr;
             const bool flipHere = g_flip.load() && slot && fxIdx >= 0;
             if (flipHere) {
                 vpotMode[s] = 0x01;  // FLIP: V-Pot = volume (unipolar)
