@@ -288,6 +288,24 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
     //   * ROUTING  → cycle the SSL routing-order chunk attribute (A3, TBD).
     //   * EXT_FUNCS→ scroll/adjust the Extended Functions menu (Phase B).
     //   * TRANSPORT→ scrub the playhead (A2, TBD — needs encoder-push id).
+    if (ev.id == knob::kBcEncoder && mode_ == Uc1Mode::Transport) {
+        // Sec-Encoder rotation in TRANSPORT scrubs the playhead. ~0.5s
+        // per detent (musical "feels-right" baseline; can tune later).
+        // Fine modifier shrinks to 0.05s/detent for fine-grained edits.
+        // Pure SetEditCurPos — no MCU/HUI dependency.
+        static int xportAcc = 0;
+        static std::chrono::steady_clock::time_point xportLastT{};
+        const int step = stepFromAccumulator(xportAcc, xportLastT, 3);
+        if (step == 0) { ++stats_.knobEventsHandled; return; }
+        const double secsPerDetent = fineMode_.load(std::memory_order_relaxed)
+                                       ? 0.05 : 0.5;
+        const double curPos = GetCursorPosition();
+        double newPos = curPos + step * secsPerDetent;
+        if (newPos < 0.0) newPos = 0.0;
+        SetEditCurPos(newPos, true /*moveview*/, false /*seekplay*/);
+        ++stats_.knobEventsHandled;
+        return;
+    }
     if (ev.id == knob::kBcEncoder && mode_ == Uc1Mode::Routing) {
         static int routingAcc = 0;
         static std::chrono::steady_clock::time_point routingLastT{};
