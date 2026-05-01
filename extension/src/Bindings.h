@@ -69,8 +69,17 @@ const char* toName(ButtonId id);
 // from JSON.
 ButtonId fromName(const char* name);
 
-enum class ActionType : uint8_t { Noop, Reaper, Keyboard, Builtin };
+enum class ActionType : uint8_t { Noop, Reaper, Keyboard, Builtin, Midi };
 enum class Behavior   : uint8_t { Momentary, Toggle, Hold };
+
+// MIDI message presets — the UI surfaces these as a combo so users
+// don't have to remember status-byte hex.
+enum class MidiMsgType : uint8_t {
+    NoteOn = 0,
+    NoteOff,
+    ControlChange,
+    ProgramChange,
+};
 
 struct Binding {
     ActionType  type     = ActionType::Noop;
@@ -79,6 +88,18 @@ struct Binding {
     int         param    = 0;
     std::string label;
     uint8_t     color[3] = {0, 0, 0};
+
+    // MIDI command fields — read only when `type == Midi`.
+    //   midiDevice  output device name (REAPER GetMIDIOutputName, "" = all)
+    //   midiChannel 1..16 (stored 1-based for human-readability)
+    //   midiMsgType see MidiMsgType — picks status nibble + interpretation
+    //   midiData1   note number / CC number / program number
+    //   midiData2   velocity / CC value (ignored for ProgramChange)
+    std::string midiDevice;
+    int         midiChannel = 1;
+    int         midiMsgType = 0;
+    int         midiData1   = 60;
+    int         midiData2   = 127;
 
     // Long-press secondary action. When `hasLongPress` is true AND the
     // primary `behavior` is Momentary, holding the button longer than
@@ -89,6 +110,11 @@ struct Binding {
     ActionType  longPressType    = ActionType::Noop;
     std::string longPressAction;
     int         longPressParam   = 0;
+    std::string longPressMidiDevice;
+    int         longPressMidiChannel = 1;
+    int         longPressMidiMsgType = 0;
+    int         longPressMidiData1   = 60;
+    int         longPressMidiData2   = 127;
 };
 
 struct Layer {

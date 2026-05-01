@@ -533,11 +533,204 @@ void drawUf8Vector(ImGui_Context* ctx, ButtonId& sel)
     drawTextCentered_(c, 500, 470, 0x9CA0AAFF, "Rea-Sixty");
 }
 
-// Editor panel for the currently-selected button. Reads the binding
-// fresh each frame, writes back through bindings::setBinding on change.
-// Lays out one widget per line so each label is fully readable — the
-// horizontal-table layout in the previous list view ate too much
-// horizontal space.
+// Push a Rea-Sixty-themed colour set so the editor's combos / buttons /
+// inputs match the schematic palette (dark blue-grey, soft accents)
+// instead of the default ImGui orange/red. Returns count to pop.
+int pushBindingsTheme(ImGui_Context* ctx)
+{
+    auto pc = [&](int idx, int rgba) { ImGui_PushStyleColor(ctx, idx, rgba); };
+    pc(ImGui_Col_FrameBg,         0x252A33FF);
+    pc(ImGui_Col_FrameBgHovered,  0x3A4253FF);
+    pc(ImGui_Col_FrameBgActive,   0x4477CCFF);
+    pc(ImGui_Col_Button,          0x252A33FF);
+    pc(ImGui_Col_ButtonHovered,   0x3A4253FF);
+    pc(ImGui_Col_ButtonActive,    0x4477CCFF);
+    pc(ImGui_Col_Header,          0x252A33FF);
+    pc(ImGui_Col_HeaderHovered,   0x3A4253FF);
+    pc(ImGui_Col_HeaderActive,    0x4477CCFF);
+    pc(ImGui_Col_Border,          0x4A5060FF);
+    pc(ImGui_Col_Text,            0xD0D4DAFF);
+    pc(ImGui_Col_TextDisabled,    0x6A6E78FF);
+    pc(ImGui_Col_PopupBg,         0x14181EFF);
+    pc(ImGui_Col_CheckMark,       0xAACCFFFF);
+    pc(ImGui_Col_SliderGrab,      0x4477CCFF);
+    pc(ImGui_Col_SliderGrabActive,0x6699EEFF);
+    pc(ImGui_Col_Separator,       0x3A4253FF);
+    pc(ImGui_Col_ChildBg,         0x1A1E24FF);
+    return 18;
+}
+
+void popBindingsTheme(ImGui_Context* ctx, int n)
+{
+    ImGui_PopStyleColor(ctx, &n);
+}
+
+// Mutable refs into a Binding so the same picker code drives the
+// primary action AND the long-press secondary action — the underlying
+// fields differ but the widget tree is identical.
+struct ActionFieldsRef {
+    uf8::bindings::ActionType*  type;
+    std::string*                action;
+    int*                        param;
+    std::string*                midiDevice;
+    int*                        midiChannel;
+    int*                        midiMsgType;
+    int*                        midiData1;
+    int*                        midiData2;
+};
+
+bool drawActionPicker(ImGui_Context* ctx, const char* prefix,
+                      ActionFieldsRef f)
+{
+    using namespace uf8::bindings;
+    bool dirty = false;
+    char idbuf[80];
+
+    auto sectionRadio = [&](const char* tag, const char* label, ActionType t) {
+        const bool on = (*f.type == t);
+        std::snprintf(idbuf, sizeof(idbuf), "%s##%s_%s", label, prefix, tag);
+        if (ImGui_RadioButton(ctx, idbuf, on)) {
+            *f.type = t;
+            dirty = true;
+        }
+    };
+
+    // ---- REAPER Action ----
+    sectionRadio("rd_reaper", "REAPER Action", ActionType::Reaper);
+    if (*f.type == ActionType::Reaper) {
+        ImGui_Indent(ctx, /*indent_w*/ nullptr);
+        char buf[128] = {0};
+        std::strncpy(buf, f.action->c_str(), sizeof(buf) - 1);
+        std::snprintf(idbuf, sizeof(idbuf), "Action ID##%s_actid", prefix);
+        double w = 260;
+        ImGui_PushItemWidth(ctx, w);
+        if (ImGui_InputTextWithHint(ctx, idbuf,
+                                    "e.g. 40044 (Track: Toggle FX bypass)",
+                                    buf, sizeof(buf), /*flags*/ nullptr)) {
+            *f.action = buf;
+            dirty = true;
+        }
+        ImGui_PopItemWidth(ctx);
+        ImGui_Unindent(ctx, /*indent_w*/ nullptr);
+    }
+
+    // ---- Native (Built-in) Action ----
+    sectionRadio("rd_native", "Native Action (Built-in)", ActionType::Builtin);
+    if (*f.type == ActionType::Builtin) {
+        ImGui_Indent(ctx, nullptr);
+        const std::string preview = f.action->empty()
+            ? std::string("<pick one>")
+            : builtinDisplayName(*f.action);
+        std::snprintf(idbuf, sizeof(idbuf), "Built-in##%s_native", prefix);
+        double w = 280;
+        ImGui_PushItemWidth(ctx, w);
+        if (ImGui_BeginCombo(ctx, idbuf, preview.c_str(), /*flags*/ nullptr)) {
+            for (auto& n : builtinNames()) {
+                std::string lbl = builtinDisplayName(n);
+                if (lbl != n) lbl += "   [" + n + "]";
+                bool s = (n == *f.action);
+                if (ImGui_Selectable(ctx, lbl.c_str(), &s,
+                                     nullptr, nullptr, nullptr)) {
+                    *f.action = n;
+                    dirty = true;
+                }
+            }
+            ImGui_EndCombo(ctx);
+        }
+        ImGui_PopItemWidth(ctx);
+        if (builtinUsesParam(*f.action)) {
+            std::snprintf(idbuf, sizeof(idbuf), "Param##%s_bparam", prefix);
+            double pw = 90;
+            ImGui_PushItemWidth(ctx, pw);
+            int p = *f.param;
+            if (ImGui_InputInt(ctx, idbuf, &p, nullptr, nullptr, nullptr)) {
+                *f.param = p;
+                dirty = true;
+            }
+            ImGui_PopItemWidth(ctx);
+        }
+        ImGui_Unindent(ctx, nullptr);
+    }
+
+    // ---- MIDI Command ----
+    sectionRadio("rd_midi", "MIDI Command", ActionType::Midi);
+    if (*f.type == ActionType::Midi) {
+        ImGui_Indent(ctx, nullptr);
+        // Device (free-text — Phase D will swap to a combo of REAPER's
+        // enumerated MIDI outputs).
+        char dbuf[64] = {0};
+        std::strncpy(dbuf, f.midiDevice->c_str(), sizeof(dbuf) - 1);
+        std::snprintf(idbuf, sizeof(idbuf), "Device##%s_dev", prefix);
+        double w = 200;
+        ImGui_PushItemWidth(ctx, w);
+        if (ImGui_InputTextWithHint(ctx, idbuf, "(empty = all enabled outputs)",
+                                    dbuf, sizeof(dbuf), nullptr)) {
+            *f.midiDevice = dbuf;
+            dirty = true;
+        }
+        ImGui_PopItemWidth(ctx);
+
+        // Channel 1..16
+        std::snprintf(idbuf, sizeof(idbuf), "Channel##%s_ch", prefix);
+        double cw = 90;
+        ImGui_PushItemWidth(ctx, cw);
+        int ch = *f.midiChannel;
+        if (ImGui_InputInt(ctx, idbuf, &ch, nullptr, nullptr, nullptr)) {
+            if (ch < 1)  ch = 1;
+            if (ch > 16) ch = 16;
+            *f.midiChannel = ch;
+            dirty = true;
+        }
+        ImGui_PopItemWidth(ctx);
+
+        // Message type
+        static char kMidiMsgItems[] =
+            "Note On\0Note Off\0Control Change\0Program Change\0";
+        std::snprintf(idbuf, sizeof(idbuf), "Message##%s_msg", prefix);
+        double mw = 160;
+        ImGui_PushItemWidth(ctx, mw);
+        int msg = *f.midiMsgType;
+        if (ImGui_Combo(ctx, idbuf, &msg, kMidiMsgItems, nullptr)) {
+            *f.midiMsgType = msg;
+            dirty = true;
+        }
+        ImGui_PopItemWidth(ctx);
+
+        // Data bytes
+        std::snprintf(idbuf, sizeof(idbuf), "Note / CC ###%s_d1", prefix);
+        double dw = 90;
+        ImGui_PushItemWidth(ctx, dw);
+        int d1 = *f.midiData1;
+        if (ImGui_InputInt(ctx, idbuf, &d1, nullptr, nullptr, nullptr)) {
+            if (d1 < 0)   d1 = 0;
+            if (d1 > 127) d1 = 127;
+            *f.midiData1 = d1;
+            dirty = true;
+        }
+        ImGui_PopItemWidth(ctx);
+
+        std::snprintf(idbuf, sizeof(idbuf), "Velocity / Value##%s_d2", prefix);
+        ImGui_PushItemWidth(ctx, dw);
+        int d2 = *f.midiData2;
+        if (ImGui_InputInt(ctx, idbuf, &d2, nullptr, nullptr, nullptr)) {
+            if (d2 < 0)   d2 = 0;
+            if (d2 > 127) d2 = 127;
+            *f.midiData2 = d2;
+            dirty = true;
+        }
+        ImGui_PopItemWidth(ctx);
+
+        ImGui_Text(ctx, "(Phase D wires real MIDI out — for now logs to "
+                        "/tmp/rea_sixty_midi.log)");
+        ImGui_Unindent(ctx, nullptr);
+    }
+
+    return dirty;
+}
+
+// Editor panel — two-column layout. Left: primary action + behavior +
+// clear. Right: long-press (only when primary behavior == Momentary).
+// Auto-saves on every change.
 void drawBindingEditor(ImGui_Context* ctx, int layer, ButtonId id)
 {
     using namespace uf8::bindings;
@@ -545,227 +738,114 @@ void drawBindingEditor(ImGui_Context* ctx, int layer, ButtonId id)
     Binding bd    = getBinding(layer, id);
     bool    dirty = false;
 
-    char header[64];
+    char header[80];
     std::snprintf(header, sizeof(header),
                   "Editing: %s   (Layer %d)", hwFaceLabel(id), layer + 1);
     ImGui_Text(ctx, header);
     ImGui_Separator(ctx);
 
     ImGui_PushID(ctx, uf8::bindings::toName(id));
+    const int themePushed = pushBindingsTheme(ctx);
 
-    // ---- Type ----
-    static char kTypeItems[] =
-        "Do nothing\0"
-        "REAPER action\0"
-        "Keyboard chord\0"
-        "Built-in Rea-Sixty action\0";
-    int t = static_cast<int>(bd.type);
+    // Two columns. Left = primary, right = long-press.
+    double availX = 0, availY = 0;
+    ImGui_GetContentRegionAvail(ctx, &availX, &availY);
+    double colW = (availX - 16) / 2.0;
+    if (colW < 280) colW = 280;
+    const double colH = 280;
+
+    // ---- Left column: PRIMARY ACTION ----
     {
-        double w = 240;
-        ImGui_PushItemWidth(ctx, w);
-        if (ImGui_Combo(ctx, "Action type", &t, kTypeItems,
-                        /*popup_max_height_in_items*/ nullptr)) {
-            bd.type = static_cast<ActionType>(t);
-            dirty = true;
+        double w = colW, h = colH;
+        bool border = true;
+        if (ImGui_BeginChild(ctx, "primary_col", &w, &h, &border, nullptr)) {
+            ImGui_Text(ctx, "PRIMARY ACTION");
+            ImGui_Separator(ctx);
+
+            ActionFieldsRef pri{
+                &bd.type, &bd.action, &bd.param,
+                &bd.midiDevice, &bd.midiChannel, &bd.midiMsgType,
+                &bd.midiData1, &bd.midiData2,
+            };
+            if (drawActionPicker(ctx, "pri", pri)) dirty = true;
+
+            ImGui_Spacing(ctx);
+            ImGui_Separator(ctx);
+
+            static char kBehaviorItems[] =
+                "Momentary (fire on press)\0"
+                "Toggle (flip on each press)\0"
+                "Hold (state mirrors button)\0";
+            int b = static_cast<int>(bd.behavior);
+            double bw = 240;
+            ImGui_PushItemWidth(ctx, bw);
+            if (ImGui_Combo(ctx, "Behavior##pri_beh", &b, kBehaviorItems,
+                            nullptr)) {
+                bd.behavior = static_cast<Behavior>(b);
+                dirty = true;
+            }
+            ImGui_PopItemWidth(ctx);
         }
-        ImGui_PopItemWidth(ctx);
+        ImGui_EndChild(ctx);
     }
 
-    // ---- Action argument (type-dependent) ----
-    if (bd.type == ActionType::Builtin) {
-        // Combo over registered builtin display names. Internal items
-        // (anything starting with __) are filtered out by builtinNames().
-        const std::string preview = bd.action.empty()
-            ? std::string("<pick a built-in>")
-            : builtinDisplayName(bd.action);
-        double w = 320;
-        ImGui_PushItemWidth(ctx, w);
-        if (ImGui_BeginCombo(ctx, "Built-in", preview.c_str(),
-                             /*flags*/ nullptr)) {
-            for (auto& n : builtinNames()) {
-                std::string label = builtinDisplayName(n);
-                if (label != n) {
-                    // Append canonical name for power users.
-                    label += "   [" + n + "]";
-                }
-                bool sel = (n == bd.action);
-                if (ImGui_Selectable(ctx, label.c_str(), &sel,
-                                     /*flags*/ nullptr,
-                                     /*size_w*/ nullptr,
-                                     /*size_h*/ nullptr)) {
-                    bd.action = n;
+    ImGui_SameLine(ctx, /*offset_from_start_x*/ nullptr,
+                   /*spacing*/ nullptr);
+
+    // ---- Right column: LONG-PRESS ACTION ----
+    {
+        double w = colW, h = colH;
+        bool border = true;
+        if (ImGui_BeginChild(ctx, "longpress_col", &w, &h, &border, nullptr)) {
+            ImGui_Text(ctx, "LONG-PRESS  (held > 0.5 s)");
+            ImGui_Separator(ctx);
+
+            if (bd.behavior != Behavior::Momentary) {
+                ImGui_Text(ctx, "Long-press is only available for");
+                ImGui_Text(ctx, "Momentary primary actions.");
+                if (bd.hasLongPress) {
+                    bd.hasLongPress = false;
                     dirty = true;
                 }
-            }
-            ImGui_EndCombo(ctx);
-        }
-        ImGui_PopItemWidth(ctx);
-    } else if (bd.type == ActionType::Reaper) {
-        char buf[128] = {0};
-        std::strncpy(buf, bd.action.c_str(), sizeof(buf) - 1);
-        double w = 320;
-        ImGui_PushItemWidth(ctx, w);
-        if (ImGui_InputTextWithHint(ctx, "Action ID",
-                                    "e.g. 40044 (Track: Toggle FX bypass)",
-                                    buf, sizeof(buf), /*flags*/ nullptr)) {
-            bd.action = buf;
-            dirty = true;
-        }
-        ImGui_PopItemWidth(ctx);
-        ImGui_Text(ctx, "  Find an action's ID in REAPER's Actions list (?).");
-    } else if (bd.type == ActionType::Keyboard) {
-        char buf[128] = {0};
-        std::strncpy(buf, bd.action.c_str(), sizeof(buf) - 1);
-        double w = 320;
-        ImGui_PushItemWidth(ctx, w);
-        if (ImGui_InputTextWithHint(ctx, "Key chord",
-                                    "e.g. ctrl+s",
-                                    buf, sizeof(buf), /*flags*/ nullptr)) {
-            bd.action = buf;
-            dirty = true;
-        }
-        ImGui_PopItemWidth(ctx);
-        ImGui_Text(ctx, "  (Keyboard simulation lands in Phase D.)");
-    }
-
-    // ---- Behavior ----
-    static char kBehaviorItems[] =
-        "Momentary (fire on press)\0"
-        "Toggle (flip on each press)\0"
-        "Hold (state mirrors button)\0";
-    int b = static_cast<int>(bd.behavior);
-    {
-        double w = 240;
-        ImGui_PushItemWidth(ctx, w);
-        if (ImGui_Combo(ctx, "Behavior", &b, kBehaviorItems,
-                        /*popup_max_height_in_items*/ nullptr)) {
-            bd.behavior = static_cast<Behavior>(b);
-            dirty = true;
-        }
-        ImGui_PopItemWidth(ctx);
-    }
-
-    // ---- Param (only for builtins that read it) ----
-    if (bd.type == ActionType::Builtin && builtinUsesParam(bd.action)) {
-        double w = 100;
-        ImGui_PushItemWidth(ctx, w);
-        int p = bd.param;
-        if (ImGui_InputInt(ctx, "Parameter", &p,
-                           /*step*/ nullptr, /*step_fast*/ nullptr,
-                           /*flags*/ nullptr)) {
-            bd.param = p;
-            dirty = true;
-        }
-        ImGui_PopItemWidth(ctx);
-    }
-
-    // ---- Long-press secondary action (only for Momentary primary) ----
-    ImGui_Spacing(ctx);
-    ImGui_Separator(ctx);
-    ImGui_Text(ctx, "Long-press (held > 0.5 s)");
-    if (bd.behavior != Behavior::Momentary) {
-        ImGui_Text(ctx, "  Long-press is only available for Momentary "
-                        "primary actions.");
-        if (bd.hasLongPress) {
-            // Behaviour was just switched away from Momentary — clear
-            // the dangling long-press payload so it doesn't surprise
-            // users when they switch back.
-            bd.hasLongPress = false;
-            dirty = true;
-        }
-    } else {
-        bool enabled = bd.hasLongPress;
-        if (ImGui_Checkbox(ctx, "Enable long-press action", &enabled)) {
-            bd.hasLongPress = enabled;
-            dirty = true;
-        }
-        if (bd.hasLongPress) {
-            // Type
-            int lt = static_cast<int>(bd.longPressType);
-            {
-                double w = 240;
-                ImGui_PushItemWidth(ctx, w);
-                if (ImGui_Combo(ctx, "Long-press type", &lt, kTypeItems,
-                                /*popup_max_height_in_items*/ nullptr)) {
-                    bd.longPressType = static_cast<ActionType>(lt);
-                    dirty = true;
-                }
-                ImGui_PopItemWidth(ctx);
-            }
-            // Argument
-            if (bd.longPressType == ActionType::Builtin) {
-                const std::string preview = bd.longPressAction.empty()
-                    ? std::string("<pick a built-in>")
-                    : builtinDisplayName(bd.longPressAction);
-                double w = 320;
-                ImGui_PushItemWidth(ctx, w);
-                if (ImGui_BeginCombo(ctx, "Long-press built-in",
-                                     preview.c_str(), /*flags*/ nullptr)) {
-                    for (auto& n : builtinNames()) {
-                        std::string label = builtinDisplayName(n);
-                        if (label != n) label += "   [" + n + "]";
-                        bool s = (n == bd.longPressAction);
-                        if (ImGui_Selectable(ctx, label.c_str(), &s,
-                                             nullptr, nullptr, nullptr)) {
-                            bd.longPressAction = n;
-                            dirty = true;
-                        }
+            } else {
+                bool en = bd.hasLongPress;
+                if (ImGui_Checkbox(ctx, "Enable long-press action##lp_en", &en)) {
+                    bd.hasLongPress = en;
+                    // First time enabling: default the secondary action
+                    // type to Native so the picker shows a useful UI
+                    // straight away (rather than the empty Noop state).
+                    if (en && bd.longPressType == ActionType::Noop) {
+                        bd.longPressType = ActionType::Builtin;
                     }
-                    ImGui_EndCombo(ctx);
-                }
-                ImGui_PopItemWidth(ctx);
-            } else if (bd.longPressType == ActionType::Reaper) {
-                char buf[128] = {0};
-                std::strncpy(buf, bd.longPressAction.c_str(), sizeof(buf) - 1);
-                double w = 320;
-                ImGui_PushItemWidth(ctx, w);
-                if (ImGui_InputTextWithHint(ctx, "Long-press Action ID",
-                                            "e.g. 40044",
-                                            buf, sizeof(buf), nullptr)) {
-                    bd.longPressAction = buf;
                     dirty = true;
                 }
-                ImGui_PopItemWidth(ctx);
-            } else if (bd.longPressType == ActionType::Keyboard) {
-                char buf[128] = {0};
-                std::strncpy(buf, bd.longPressAction.c_str(), sizeof(buf) - 1);
-                double w = 320;
-                ImGui_PushItemWidth(ctx, w);
-                if (ImGui_InputTextWithHint(ctx, "Long-press key chord",
-                                            "e.g. ctrl+shift+s",
-                                            buf, sizeof(buf), nullptr)) {
-                    bd.longPressAction = buf;
-                    dirty = true;
+                if (bd.hasLongPress) {
+                    ImGui_Spacing(ctx);
+                    ActionFieldsRef lp{
+                        &bd.longPressType, &bd.longPressAction,
+                        &bd.longPressParam,
+                        &bd.longPressMidiDevice, &bd.longPressMidiChannel,
+                        &bd.longPressMidiMsgType,
+                        &bd.longPressMidiData1, &bd.longPressMidiData2,
+                    };
+                    if (drawActionPicker(ctx, "lp", lp)) dirty = true;
                 }
-                ImGui_PopItemWidth(ctx);
-            }
-            // Param (only for builtins that read it)
-            if (bd.longPressType == ActionType::Builtin
-                && builtinUsesParam(bd.longPressAction)) {
-                double w = 100;
-                ImGui_PushItemWidth(ctx, w);
-                int p = bd.longPressParam;
-                if (ImGui_InputInt(ctx, "Long-press param", &p,
-                                   nullptr, nullptr, nullptr)) {
-                    bd.longPressParam = p;
-                    dirty = true;
-                }
-                ImGui_PopItemWidth(ctx);
             }
         }
+        ImGui_EndChild(ctx);
     }
 
     ImGui_Spacing(ctx);
     ImGui_Separator(ctx);
     if (ImGui_Button(ctx, "Clear binding (Do nothing)",
                      /*size_w*/ nullptr, /*size_h*/ nullptr)) {
-        bd = Binding{};   // type=Noop, behavior=Momentary, no action
+        bd = Binding{};   // reset to default (Noop, Momentary)
         dirty = true;
     }
 
-    if (dirty) {
-        setBinding(layer, id, bd);
-    }
+    popBindingsTheme(ctx, themePushed);
+
+    if (dirty) setBinding(layer, id, bd);
 
     ImGui_PopID(ctx);
 }

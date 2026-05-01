@@ -152,6 +152,7 @@ const char* actionTypeName(ActionType t)
         case ActionType::Reaper:   return "reaper";
         case ActionType::Keyboard: return "keyboard";
         case ActionType::Builtin:  return "builtin";
+        case ActionType::Midi:     return "midi";
     }
     return "noop";
 }
@@ -162,6 +163,7 @@ ActionType actionTypeFromName(const char* s)
     if (std::strcmp(s, "reaper")   == 0) return ActionType::Reaper;
     if (std::strcmp(s, "keyboard") == 0) return ActionType::Keyboard;
     if (std::strcmp(s, "builtin")  == 0) return ActionType::Builtin;
+    if (std::strcmp(s, "midi")     == 0) return ActionType::Midi;
     return ActionType::Noop;
 }
 
@@ -337,11 +339,29 @@ std::string serialize(const Config& c)
                << int(kv.second.color[0]) << ", "
                << int(kv.second.color[1]) << ", "
                << int(kv.second.color[2]) << "]";
+            if (kv.second.type == ActionType::Midi) {
+                os << ", \"midi\": {";
+                os << "\"device\": ";   appendEscaped(os, kv.second.midiDevice);
+                os << ", \"channel\": " << kv.second.midiChannel;
+                os << ", \"msg\": "     << kv.second.midiMsgType;
+                os << ", \"d1\": "      << kv.second.midiData1;
+                os << ", \"d2\": "      << kv.second.midiData2;
+                os << "}";
+            }
             if (kv.second.hasLongPress) {
                 os << ", \"long_press\": {";
                 os << "\"type\": ";    appendEscaped(os, actionTypeName(kv.second.longPressType));
                 os << ", \"action\": "; appendEscaped(os, kv.second.longPressAction);
                 os << ", \"param\": "  << kv.second.longPressParam;
+                if (kv.second.longPressType == ActionType::Midi) {
+                    os << ", \"midi\": {";
+                    os << "\"device\": ";   appendEscaped(os, kv.second.longPressMidiDevice);
+                    os << ", \"channel\": " << kv.second.longPressMidiChannel;
+                    os << ", \"msg\": "     << kv.second.longPressMidiMsgType;
+                    os << ", \"d1\": "      << kv.second.longPressMidiData1;
+                    os << ", \"d2\": "      << kv.second.longPressMidiData2;
+                    os << "}";
+                }
                 os << "}";
             }
             os << "}";
@@ -394,6 +414,21 @@ bool parseLayer_(wdl_json_element* lobj, Layer& out)
                 }
             }
         }
+        // MIDI sub-object — only meaningful when type == Midi but we
+        // parse it whenever present so the user can switch types in the
+        // UI without losing previously-entered MIDI values.
+        if (auto* mi = be->get_item_by_name("midi"); mi && mi->is_object()) {
+            if (auto* v = mi->get_item_by_name("device"))
+                if (auto* s = v->get_string_value()) bd.midiDevice = s;
+            if (auto* v = mi->get_item_by_name("channel"))
+                if (auto* s = v->get_string_value(true)) bd.midiChannel = std::atoi(s);
+            if (auto* v = mi->get_item_by_name("msg"))
+                if (auto* s = v->get_string_value(true)) bd.midiMsgType = std::atoi(s);
+            if (auto* v = mi->get_item_by_name("d1"))
+                if (auto* s = v->get_string_value(true)) bd.midiData1 = std::atoi(s);
+            if (auto* v = mi->get_item_by_name("d2"))
+                if (auto* s = v->get_string_value(true)) bd.midiData2 = std::atoi(s);
+        }
         // Long-press is optional — omit means hasLongPress stays false,
         // so older configs that predate this field still load cleanly.
         if (auto* lp = be->get_item_by_name("long_press"); lp && lp->is_object()) {
@@ -404,6 +439,18 @@ bool parseLayer_(wdl_json_element* lobj, Layer& out)
                 if (auto* s = v->get_string_value()) bd.longPressAction = s;
             if (auto* v = lp->get_item_by_name("param"))
                 if (auto* s = v->get_string_value(true)) bd.longPressParam = std::atoi(s);
+            if (auto* mi = lp->get_item_by_name("midi"); mi && mi->is_object()) {
+                if (auto* v = mi->get_item_by_name("device"))
+                    if (auto* s = v->get_string_value()) bd.longPressMidiDevice = s;
+                if (auto* v = mi->get_item_by_name("channel"))
+                    if (auto* s = v->get_string_value(true)) bd.longPressMidiChannel = std::atoi(s);
+                if (auto* v = mi->get_item_by_name("msg"))
+                    if (auto* s = v->get_string_value(true)) bd.longPressMidiMsgType = std::atoi(s);
+                if (auto* v = mi->get_item_by_name("d1"))
+                    if (auto* s = v->get_string_value(true)) bd.longPressMidiData1 = std::atoi(s);
+                if (auto* v = mi->get_item_by_name("d2"))
+                    if (auto* s = v->get_string_value(true)) bd.longPressMidiData2 = std::atoi(s);
+            }
         }
         out.bindings[bid] = std::move(bd);
     }
@@ -524,20 +571,42 @@ const Config& get()
 
 namespace {
 
-// Run a single action immediately. Used both for the primary-binding path
-// and for the long-press secondary path. `firing` mirrors the behavior
-// semantics (press-edge for Momentary/Toggle, every edge for Hold) but
-// the long-press call always passes firing=true (it's an instantaneous
-// fire on release).
-void runAction_(ActionType type, const std::string& action, int param,
-                bool firing, bool pressed)
+// Snapshot of the fields needed to run a single action — captures both
+// the primary and long-press paths in one struct so dispatch doesn't
+// have to branch on which sub-bundle of fields to read.
+struct ActionSet {
+    ActionType  type;
+    std::string action;
+    int         param;
+    std::string midiDevice;
+    int         midiChannel;
+    int         midiMsgType;
+    int         midiData1;
+    int         midiData2;
+};
+
+ActionSet primaryActionOf(const Binding& bd)
 {
-    switch (type) {
+    return { bd.type, bd.action, bd.param,
+             bd.midiDevice, bd.midiChannel, bd.midiMsgType,
+             bd.midiData1, bd.midiData2 };
+}
+ActionSet longPressActionOf(const Binding& bd)
+{
+    return { bd.longPressType, bd.longPressAction, bd.longPressParam,
+             bd.longPressMidiDevice, bd.longPressMidiChannel,
+             bd.longPressMidiMsgType, bd.longPressMidiData1,
+             bd.longPressMidiData2 };
+}
+
+void runAction_(const ActionSet& a, bool firing, bool pressed)
+{
+    switch (a.type) {
         case ActionType::Noop:
             break;
         case ActionType::Reaper: {
             if (!firing) break;
-            const int actionId = std::atoi(action.c_str());
+            const int actionId = std::atoi(a.action.c_str());
             if (actionId <= 0) break;
             auto it = g_builtins.find("__reaper_action__");
             if (it != g_builtins.end() && it->second.run) {
@@ -549,9 +618,23 @@ void runAction_(ActionType type, const std::string& action, int param,
             // Phase D — needs platform key-event injection.
             break;
         case ActionType::Builtin: {
-            auto it = g_builtins.find(action);
+            auto it = g_builtins.find(a.action);
             if (it != g_builtins.end() && it->second.run) {
-                it->second.run(firing, pressed, param);
+                it->second.run(firing, pressed, a.param);
+            }
+            break;
+        }
+        case ActionType::Midi: {
+            if (!firing) break;
+            // Phase D wiring: real MIDI out via REAPER's API. For now log
+            // the intent so the user can see their binding is reaching
+            // dispatch. File-log instead of ShowConsoleMsg to stay quiet
+            // on rapid presses.
+            if (FILE* f = std::fopen("/tmp/rea_sixty_midi.log", "a")) {
+                std::fprintf(f, "midi: dev='%s' ch=%d msg=%d d1=%d d2=%d\n",
+                             a.midiDevice.c_str(), a.midiChannel,
+                             a.midiMsgType, a.midiData1, a.midiData2);
+                std::fclose(f);
             }
             break;
         }
@@ -590,12 +673,11 @@ bool dispatch(ButtonId id, bool pressed)
                 const auto held = std::chrono::steady_clock::now() - it->second;
                 g_pressStart.erase(it);
                 if (held >= kLongPressThreshold) {
-                    runAction_(bd.longPressType, bd.longPressAction,
-                               bd.longPressParam, /*firing*/ true,
+                    runAction_(longPressActionOf(bd), /*firing*/ true,
                                /*pressed*/ false);
                 } else {
-                    runAction_(bd.type, bd.action, bd.param,
-                               /*firing*/ true, /*pressed*/ false);
+                    runAction_(primaryActionOf(bd),   /*firing*/ true,
+                               /*pressed*/ false);
                 }
             }
         }
@@ -609,7 +691,7 @@ bool dispatch(ButtonId id, bool pressed)
         case Behavior::Toggle:    firing = pressed; break;
         case Behavior::Hold:      firing = true;    break;
     }
-    runAction_(bd.type, bd.action, bd.param, firing, pressed);
+    runAction_(primaryActionOf(bd), firing, pressed);
     return true;
 }
 
