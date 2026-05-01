@@ -18,6 +18,8 @@ void reasixty_identifyUf8();
 void reasixty_identifyUc1();
 bool reasixty_selFollowsColor();
 void reasixty_setSelFollowsColor(bool follow);
+int  reasixty_ballisticMode();
+void reasixty_setBallisticMode(int mode);
 
 namespace uf8 {
 
@@ -116,12 +118,23 @@ void SettingsScreen::drawDevice(ImGui_Context* ctx)
         reasixty_setSelFollowsColor(selFollow);
     }
 
+    // Ballistic dropdown. Combo's `items` arg is a NUL-separated list
+    // followed by a final NUL terminator — the string literal already
+    // ends with one implicit \0, so "Peak\0VU\0RMS\0" is the proper
+    // double-terminated form.
+    static char kBallisticItems[] = "Peak\0VU\0RMS\0";
+    int ballistic = reasixty_ballisticMode();
+    if (ImGui_Combo(ctx, "Meter ballistic", &ballistic,
+                    kBallisticItems,
+                    /*popup_max_height_in_items*/ nullptr)) {
+        reasixty_setBallisticMode(ballistic);
+    }
+
     ImGui_Spacing(ctx);
     ImGui_Spacing(ctx);
     ImGui_Text(ctx, "Pending");
     ImGui_Separator(ctx);
     ImGui_Text(ctx, "  TODO: serial # + drag-to-reorder for multi-UF8 setups");
-    ImGui_Text(ctx, "  TODO: meter ballistic selector (PPM / VU / RMS)");
     ImGui_Text(ctx, "  TODO: Export Diagnostic Report button (.zip to Desktop)");
 }
 

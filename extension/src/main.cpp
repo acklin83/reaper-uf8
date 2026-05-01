@@ -294,6 +294,18 @@ std::atomic<int> g_scribbleBrightness{BL_Full};
 // ExtState; toggling re-fires bankDirty so per-strip SEL re-pushes.
 std::atomic<bool> g_selFollowsColor{true};
 
+// Meter ballistic. Peak = raw peak per Track_GetPeakInfo (no smoothing
+// here; REAPER's own ballistics already apply); VU = exp-smoothed dB
+// with τ=300 ms; RMS = exp-smoothed linear power with τ=600 ms then
+// converted to dB. Implementation lives next to peakToVuByte further
+// below — declared here so loadBrightness() can read the persisted pref.
+enum BallisticMode : int {
+    BM_Peak = 0,
+    BM_VU   = 1,
+    BM_RMS  = 2,
+};
+std::atomic<int> g_ballisticMode{BM_Peak};
+
 struct BrightnessBytes {
     uint8_t uf8_led; uint8_t uf8_lcd;
     uint8_t uc1_led; uint8_t uc1_lcd; uint8_t uc1_status;
@@ -373,6 +385,11 @@ void loadBrightness()
     const char* selFollow = GetExtState("rea_sixty", "sel_follows_color");
     if (selFollow && *selFollow) {
         g_selFollowsColor.store(std::atoi(selFollow) != 0);
+    }
+    const char* bm = GetExtState("rea_sixty", "ballistic_mode");
+    if (bm && *bm) {
+        const int v = std::atoi(bm);
+        if (v >= BM_Peak && v <= BM_RMS) g_ballisticMode.store(v);
     }
 }
 
@@ -3123,6 +3140,48 @@ uint8_t peakToVuByte(double peak)
     return static_cast<uint8_t>(std::clamp(byte, 0, 0x1F));
 }
 
+uint8_t dbToVuByte_(double dbfs)
+{
+    if (dbfs >= 0.0)   return 0x1F;
+    if (dbfs <= -55.0) return 0x00;
+    const double f = (dbfs + 55.0) / 55.0;
+    const int byte = static_cast<int>(f * 31.0 + 0.5);
+    return static_cast<uint8_t>(std::clamp(byte, 0, 0x1F));
+}
+
+// Per-channel envelope state for the BM_VU / BM_RMS smoothers (8 strips
+// × L/R). Reset to silence on init. Mode switch also resets — see
+// reasixty_setBallisticMode below.
+double g_vuEnvDb_[16];
+double g_rmsEnvPow_[16];
+bool   g_meterEnvInit_ = false;
+std::chrono::steady_clock::time_point g_meterEnvLast_{};
+
+uint8_t peakToVuByteBallistic(double peakLin, int channel, double dtSec)
+{
+    const int mode = g_ballisticMode.load();
+    if (mode == BM_Peak || channel < 0 || channel >= 16) {
+        return peakToVuByte(peakLin);
+    }
+    if (mode == BM_VU) {
+        const double dbInst = (peakLin <= 0.0) ? -120.0
+                                               : 20.0 * std::log10(peakLin);
+        constexpr double kTau = 0.30;  // 300 ms
+        const double alpha = 1.0 - std::exp(-dtSec / kTau);
+        g_vuEnvDb_[channel] += alpha * (dbInst - g_vuEnvDb_[channel]);
+        return dbToVuByte_(g_vuEnvDb_[channel]);
+    }
+    // RMS: smooth in linear-power domain, then convert to dB.
+    const double pow = peakLin * peakLin;
+    constexpr double kTau = 0.60;  // 600 ms
+    const double alpha = 1.0 - std::exp(-dtSec / kTau);
+    g_rmsEnvPow_[channel] += alpha * (pow - g_rmsEnvPow_[channel]);
+    const double dbf = (g_rmsEnvPow_[channel] <= 0.0)
+                     ? -120.0
+                     : 10.0 * std::log10(g_rmsEnvPow_[channel]);
+    return dbToVuByte_(dbf);
+}
+
 std::array<uint8_t, 16> g_lastVuLevels{};
 bool g_vuInit = false;
 std::chrono::steady_clock::time_point g_lastVuPushTime{};
@@ -3155,6 +3214,22 @@ void pushVuMeter()
         return held;
     };
 
+    // Tick delta for the ballistic envelope follower. First call seeds
+    // the previous timestamp so dt = ~0 and the smoother starts at the
+    // first measured value. After that we use real elapsed time.
+    const auto tNow = std::chrono::steady_clock::now();
+    double dtSec = 0.033;  // safe default ~30 Hz
+    if (g_meterEnvInit_) {
+        const auto delta = tNow - g_meterEnvLast_;
+        dtSec = std::chrono::duration<double>(delta).count();
+        if (dtSec <= 0.0)  dtSec = 0.001;
+        if (dtSec >  1.0)  dtSec = 1.0;  // clamp gross stalls
+    } else {
+        for (int i = 0; i < 16; ++i) { g_vuEnvDb_[i] = -120.0; g_rmsEnvPow_[i] = 0.0; }
+        g_meterEnvInit_ = true;
+    }
+    g_meterEnvLast_ = tNow;
+
     for (int s = 0; s < 8; ++s) {
         const int idx = s + bankOffset;
         uint8_t rawL = 0, rawR = 0;
@@ -3165,8 +3240,10 @@ void pushVuMeter()
                 // exposed via this call, so "in" and "out" end up
                 // mirroring each other for mono fader moves. Good
                 // enough until a JSFX probe exposes pre-fader.
-                rawL = peakToVuByte(Track_GetPeakInfo(tr, 0));
-                rawR = peakToVuByte(Track_GetPeakInfo(tr, 1));
+                rawL = peakToVuByteBallistic(Track_GetPeakInfo(tr, 0),
+                                             s * 2 + 0, dtSec);
+                rawR = peakToVuByteBallistic(Track_GetPeakInfo(tr, 1),
+                                             s * 2 + 1, dtSec);
             }
         }
         levels[s * 2 + 0] = stepByte(s_held[s * 2 + 0], rawL);  // "input"
@@ -4241,6 +4318,24 @@ void reasixty_setSelFollowsColor(bool follow)
     // Force a per-strip SEL re-push so the new colour mode lands without
     // requiring the user to bank-shift or click around.
     g_bankDirty.store(true);
+}
+
+int reasixty_ballisticMode()
+{
+    return g_ballisticMode.load();
+}
+
+void reasixty_setBallisticMode(int mode)
+{
+    if (mode < BM_Peak) mode = BM_Peak;
+    if (mode > BM_RMS)  mode = BM_RMS;
+    g_ballisticMode.store(mode);
+    char buf[8];
+    std::snprintf(buf, sizeof(buf), "%d", mode);
+    SetExtState("rea_sixty", "ballistic_mode", buf, true);
+    // Reset envelopes so the new mode starts cleanly from silence rather
+    // than carrying old smoothed values that don't match the new τ.
+    for (int i = 0; i < 16; ++i) { g_vuEnvDb_[i] = -120.0; g_rmsEnvPow_[i] = 0.0; }
 }
 
 extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(
