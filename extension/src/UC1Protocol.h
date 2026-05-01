@@ -290,6 +290,14 @@ std::vector<uint8_t> buildColourBarEnable(bool on);
 //   FF 66 05 01 <4 ASCII> CKSUM    (9 bytes)
 std::vector<uint8_t> buildCentralLabel(std::string_view fourChars);
 
+// Variable-length header label rendered above the 3-slot triple in
+// EXT_FUNCS / PRESETS / similar menu views. Frame:
+//   FF 66 <len> 01 <text> CKSUM
+// where <len> = text.size() + 1 (the 01 prefix counts as a payload
+// byte). Decoded from uc1_37 EXT_FUNCS labels and uc1_38 PRESETS
+// headers ("PRESETS", "CHANNEL STRIP ", "Auto Makeup Offset" …).
+std::vector<uint8_t> buildLcdHeader(std::string_view text);
+
 // Central Control Panel mode banner (decoded uc1_37 + uc1_38 2026-05-01).
 // Frame: FF 66 03 00 <mode> 00 <chk>. Selects which top-of-LCD layout
 // the firmware renders. All six bytes confirmed against captures.

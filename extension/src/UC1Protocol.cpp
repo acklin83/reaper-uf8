@@ -314,6 +314,17 @@ std::vector<uint8_t> buildColourBarEnable(bool on)
     return buildFrame(0x66, data);
 }
 
+std::vector<uint8_t> buildLcdHeader(std::string_view text)
+{
+    // FF 66 <len> 01 <text> CKSUM. Length byte = text.size() + 1 (the
+    // 01 prefix consumes one payload byte).
+    std::vector<uint8_t> data;
+    data.reserve(1 + text.size());
+    data.push_back(0x01);
+    for (char c : text) data.push_back(static_cast<uint8_t>(c));
+    return buildFrame(0x66, data);
+}
+
 std::vector<uint8_t> buildCentralLabel(std::string_view fourChars)
 {
     // FF 66 05 01 <4 ASCII> CKSUM

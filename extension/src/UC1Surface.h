@@ -191,6 +191,13 @@ private:
     // or the focused track lacks a plug-in of the focused domain.
     void pushFocusedParamReadout_();
 
+    // Render the PRESETS-mode LCD content. Selector subscreen shows a
+    // CHANNEL STRIP / BUS COMP toggle; Browse subscreen shows the
+    // currently-loaded preset name + "..." prev/next indicators.
+    // Called on entering PRESETS and on every encoder rotation /
+    // submode switch within PRESETS. No-op outside PRESETS.
+    void renderPresetsSubscreen_();
+
     // --- state ---
     UC1Device* device_ = nullptr;
     void*      focusedTrack_ = nullptr;  // MediaTrack*
@@ -204,9 +211,18 @@ private:
     // Central Control Panel mode. Defaults to MAIN on construction;
     // resets to MAIN on focusedTrack change so a new track always lands
     // in the canonical view. Mode transitions update the LCD top label
-    // (zone TBD — capture pending) and gate Back/Confirm/Sec-Enc
-    // behavior in poll().
+    // and gate Back/Confirm/Sec-Enc behavior in poll().
     Uc1Mode    mode_ = Uc1Mode::Main;
+
+    // PRESETS sub-mode (decoded uc1_38 2026-05-01). Pressing PRESETS
+    // enters the CS/BC selector; pushing the Sec-Encoder confirms the
+    // domain and drills into that domain's preset list.
+    enum class PresetsSubMode : uint8_t {
+        Selector,  // banner 0x03 — choose CS or BC
+        Browse,    // banner 0x02 — preset list inside selected domain
+    };
+    PresetsSubMode presetsSub_ = PresetsSubMode::Selector;
+    bool           presetsSelectCs_ = true;  // false = BC selected
 
     std::mutex               queueMu_;
     std::deque<ButtonEvent>  buttonQueue_;

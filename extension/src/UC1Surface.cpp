@@ -412,43 +412,39 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
         static std::chrono::steady_clock::time_point presetLastT{};
         const int step = stepFromAccumulator(presetAcc, presetLastT, 3);
         if (step == 0) { ++stats_.knobEventsHandled; return; }
+        if (presetsSub_ == PresetsSubMode::Selector) {
+            // Toggle CS/BC selection on every rotation step (only two
+            // options, so the magnitude of step is irrelevant — flip).
+            presetsSelectCs_ = !presetsSelectCs_;
+            renderPresetsSubscreen_();
+            ++stats_.knobEventsHandled;
+            return;
+        }
+        // Browse subscreen — live-preview navigate the focused-domain
+        // plug-in's preset list. NavigatePresets loads each preset on
+        // the way (REAPER's only API for sequential preset traversal).
         if (!focusedTrack_) {
             ++stats_.knobEventsHandled;
             return;
         }
-        // Default to the focused track's CS plug-in. CS/BC subselector
-        // (manual p.20 — "Push to Confirm | CHANNEL STRIP / BUS COMP")
-        // is deferred — most preset use is on the channel strip plug-in
-        // anyway. Fall back to BC if no CS is loaded.
-        auto match = uf8::lookupPluginOnTrack(focusedTrack_,
-                                              uf8::Domain::ChannelStrip);
+        auto match = uf8::lookupPluginOnTrack(
+            focusedTrack_,
+            presetsSelectCs_ ? uf8::Domain::ChannelStrip
+                             : uf8::Domain::BusComp);
         if (!match.map) {
-            match = uf8::lookupPluginOnTrack(focusedTrack_,
-                                             uf8::Domain::BusComp);
-        }
-        if (!match.map) {
-            ShowConsoleMsg("UC1 Presets: focused track has no SSL plug-in\n");
+            ShowConsoleMsg(presetsSelectCs_
+                ? "UC1 Presets: focused track has no CS plug-in\n"
+                : "UC1 Presets: focused track has no BC plug-in\n");
             ++stats_.knobEventsHandled;
             return;
         }
-        // Walk preset list `step` times. NavigatePresets loads each
-        // intermediate preset (REAPER doesn't expose a name-only read
-        // of the next preset without loading) — that's the live-preview
-        // model the SSL360 Presets UX uses anyway.
         const int dir = step > 0 ? 1 : -1;
         const int abs = step > 0 ? step : -step;
         for (int k = 0; k < abs; ++k) {
             TrackFX_NavigatePresets(static_cast<MediaTrack*>(focusedTrack_),
                                     match.fxIndex, dir);
         }
-        char name[128] = {};
-        TrackFX_GetPreset(static_cast<MediaTrack*>(focusedTrack_),
-                          match.fxIndex, name, sizeof(name));
-        char line[160];
-        std::snprintf(line, sizeof(line),
-            "UC1 Preset: %s (%s)\n",
-            name[0] ? name : "<no name>", match.map->displayShort);
-        ShowConsoleMsg(line);
+        renderPresetsSubscreen_();
         ++stats_.knobEventsHandled;
         return;
     }
@@ -725,6 +721,11 @@ void UC1Surface::handleButton_(const ButtonEvent& ev)
     auto setMode = [&](Uc1Mode m) {
         if (mode_ == m) return;
         mode_ = m;
+        // Reset PRESETS sub-mode whenever we enter (or leave) Presets
+        // so the user always lands on the CS/BC selector first.
+        if (m == Uc1Mode::Presets) {
+            presetsSub_ = PresetsSubMode::Selector;
+        }
         if (!device_) return;
         // LCD top-banner — all six bytes confirmed against uc1_37+38.
         const CentralMode banner =
@@ -743,6 +744,10 @@ void UC1Surface::handleButton_(const ButtonEvent& ev)
         for (auto& f : buildMenuDot(kCellPresetsDot, m == Uc1Mode::Presets)) {
             device_->send(f);
         }
+        // Render Presets subscreen content immediately on entry —
+        // header + selector triple — so the user sees CS/BC choice
+        // (matches SSL360's behaviour at uc1_38 t=0.6).
+        if (m == Uc1Mode::Presets) renderPresetsSubscreen_();
     };
     if (ev.id == button::kBack) {
         if (ev.pressed) {
@@ -750,7 +755,21 @@ void UC1Surface::handleButton_(const ButtonEvent& ev)
                 case Uc1Mode::Main:      setMode(Uc1Mode::ExtFuncs); break;
                 case Uc1Mode::ExtFuncs:  setMode(Uc1Mode::Main);     break;
                 case Uc1Mode::Routing:   setMode(Uc1Mode::Main);     break;
-                case Uc1Mode::Presets:   setMode(Uc1Mode::Main);     break;
+                case Uc1Mode::Presets:
+                    // BACK in Browse → up to Selector. BACK in
+                    // Selector → exit to MAIN.
+                    if (presetsSub_ == PresetsSubMode::Browse) {
+                        presetsSub_ = PresetsSubMode::Selector;
+                        // Re-send banner 0x03 (we switched to 0x02 in
+                        // Browse) + selector content.
+                        if (device_) {
+                            device_->send(buildCentralMode(CentralMode::Presets));
+                        }
+                        renderPresetsSubscreen_();
+                    } else {
+                        setMode(Uc1Mode::Main);
+                    }
+                    break;
                 case Uc1Mode::Transport:
                     // BACK in TRANSPORT = Stop. REAPER action 1016.
                     Main_OnCommand(1016, 0);
@@ -803,12 +822,23 @@ void UC1Surface::handleButton_(const ButtonEvent& ev)
     if (ev.id == button::kSecEncPush) {
         if (ev.pressed) {
             // Manual p.21: Sec-Encoder push toggles MAIN ↔ TRANSPORT.
-            // In other modes it acts as the contextual confirm/select
-            // (Phase B will handle EXT_FUNCS scroll/adjust via push).
+            // In Presets it confirms the CS/BC selector and drills into
+            // the chosen domain's preset list (matches SSL360 manual
+            // p.20 "Push to confirm").
             switch (mode_) {
                 case Uc1Mode::Main:      setMode(Uc1Mode::Transport); break;
                 case Uc1Mode::Transport: setMode(Uc1Mode::Main);      break;
-                case Uc1Mode::Presets:   /* A4: live-preview already loads on rotate */ break;
+                case Uc1Mode::Presets:
+                    if (presetsSub_ == PresetsSubMode::Selector) {
+                        presetsSub_ = PresetsSubMode::Browse;
+                        renderPresetsSubscreen_();
+                    } else {
+                        // In Browse — preset is already live-loaded by
+                        // rotation. Push acts as "confirm + exit"
+                        // (same as Confirm button in Presets).
+                        setMode(Uc1Mode::Main);
+                    }
+                    break;
                 case Uc1Mode::ExtFuncs:  /* Phase B: toggle scroll/adjust */ break;
                 case Uc1Mode::Routing:   /* nop */ break;
             }
@@ -1249,6 +1279,57 @@ void UC1Surface::pushFocusedParamReadout_()
     // value" display convention. Zone 0x03 stays reserved for button
     // status text (S/C Listen On, Solo On, ...).
     device_->send(buildDisplayText(zone::kBusCompReadout, readout, readout.size()));
+}
+
+void UC1Surface::renderPresetsSubscreen_()
+{
+    if (!device_ || mode_ != Uc1Mode::Presets) return;
+    if (presetsSub_ == PresetsSubMode::Selector) {
+        // Banner stays at 0x03 (Presets) — set in setMode(). Add the
+        // header label + 3-slot CS/BC selector triple. SSL360 puts the
+        // currently-selected option in the curr slot and the alternate
+        // in next; prev empty.
+        device_->send(buildLcdHeader("PRESETS"));
+        if (presetsSelectCs_) {
+            device_->send(buildTrackNameTripleLarge("",
+                "CHANNEL STRIP", "BUS COMP"));
+        } else {
+            device_->send(buildTrackNameTripleLarge("",
+                "BUS COMP", "CHANNEL STRIP"));
+        }
+        return;
+    }
+    // Browse subscreen — banner 0x02 + domain header + preset name.
+    device_->send(buildCentralMode(CentralMode::PresetsSub));
+    device_->send(buildLcdHeader(presetsSelectCs_
+        ? "CHANNEL STRIP" : "BUS COMP"));
+    if (!focusedTrack_) {
+        device_->send(buildTrackNameTripleLarge("", "<no track>", ""));
+        return;
+    }
+    auto match = uf8::lookupPluginOnTrack(
+        focusedTrack_,
+        presetsSelectCs_ ? uf8::Domain::ChannelStrip
+                         : uf8::Domain::BusComp);
+    if (!match.map) {
+        device_->send(buildTrackNameTripleLarge("", "<no plug-in>", ""));
+        return;
+    }
+    char name[128] = {};
+    TrackFX_GetPreset(static_cast<MediaTrack*>(focusedTrack_),
+                      match.fxIndex, name, sizeof(name));
+    int numPresets = 0;
+    const int curIdx = TrackFX_GetPresetIndex(
+        static_cast<MediaTrack*>(focusedTrack_), match.fxIndex, &numPresets);
+    // REAPER's preset API doesn't expose names without navigating, so
+    // prev/next slots show "..." indicators when more presets exist
+    // in that direction. Visually less rich than SSL360's full
+    // prev/next preset names, but functional and safe.
+    const std::string prev = (curIdx > 0) ? "..." : "";
+    const std::string next = (curIdx + 1 < numPresets) ? "..." : "";
+    device_->send(buildTrackNameTripleLarge(prev,
+        name[0] ? std::string{name} : std::string{"<no name>"},
+        next));
 }
 
 void UC1Surface::pushKnobReadout_(uint8_t knobId, void* trackRaw, int fxIdx,
