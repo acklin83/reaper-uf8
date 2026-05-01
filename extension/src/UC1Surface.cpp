@@ -362,12 +362,19 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
         return;
     }
 
-    auto bindings = lookupBindingsOnTrack(focusedTrack_);
-    if (!bindings.busCompMap && !bindings.channelMap) {
+    auto csBindings = lookupBindingsOnTrack(focusedTrack_);
+    // BC writes target the BC anchor track (independent of focusedTrack_)
+    // so the BC section stays pinned regardless of the user's CS focus.
+    void* bcAnchorRaw = effectiveBcTrack_();
+    UC1Bindings bcBindings = bcAnchorRaw
+        ? ((bcAnchorRaw == focusedTrack_) ? csBindings
+                                          : lookupBindingsOnTrack(bcAnchorRaw))
+        : UC1Bindings{};
+    if (!bcBindings.busCompMap && !csBindings.channelMap) {
         if (logThis) {
             char line[96];
             std::snprintf(line, sizeof(line),
-                "UC1 knob 0x%02x delta=%d  (track has no BC/CS plugin)\n",
+                "UC1 knob 0x%02x delta=%d  (no BC anchor + no CS on focus)\n",
                 ev.id, (int)ev.delta);
             ShowConsoleMsg(line);
         }
@@ -382,16 +389,18 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
     const PluginBindings* map = nullptr;
     int fxIdx = -1;
     bool busCompContext = false;
+    void* writeTrackRaw = focusedTrack_;
 
     const ControlDomain domain = classifyKnob(ev.id);
-    if (domain == ControlDomain::BusComp && bindings.busCompMap) {
-        map           = bindings.busCompMap;
-        fxIdx         = bindings.busCompFxIdx;
+    if (domain == ControlDomain::BusComp && bcBindings.busCompMap) {
+        map           = bcBindings.busCompMap;
+        fxIdx         = bcBindings.busCompFxIdx;
         busCompContext = true;
-    } else if (bindings.channelMap) {
-        map   = bindings.channelMap;
-        fxIdx = bindings.channelFxIdx;
-    } else if (bindings.busCompMap) {
+        writeTrackRaw = bcAnchorRaw;
+    } else if (csBindings.channelMap) {
+        map   = csBindings.channelMap;
+        fxIdx = csBindings.channelFxIdx;
+    } else if (bcBindings.busCompMap) {
         // No CS plugin — even a CS-area knob won't have anywhere to go.
         // Fall through as suppressed.
     }
@@ -420,7 +429,7 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
         return;
     }
 
-    MediaTrack* tr = static_cast<MediaTrack*>(focusedTrack_);
+    MediaTrack* tr = static_cast<MediaTrack*>(writeTrackRaw);
     double cur = TrackFX_GetParamNormalized(tr, fxIdx, vst3Param);
     double next = cur + clickToDelta_(ev.delta) * (map->inverted[ev.id] ? -1.0 : 1.0);
     next = std::clamp(next, 0.0, 1.0);
@@ -443,7 +452,10 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
     const auto uf8Domain = busCompContext
         ? uf8::Domain::BusComp
         : uf8::Domain::ChannelStrip;
-    auto uf8Match = uf8::lookupPluginOnTrack(focusedTrack_, uf8Domain);
+    // Look up the UF8 plugin on whichever track the write actually went
+    // to — for BC knobs that's bcAnchor, not focusedTrack_. Without this
+    // a BC knob on a CS-only focused track would skip the focus push.
+    auto uf8Match = uf8::lookupPluginOnTrack(writeTrackRaw, uf8Domain);
     bool focusedParamRendered = false;
     if (uf8Match.map) {
         const int slotIdx = uf8::slotIdxForVst3Param(*uf8Match.map, vst3Param);
@@ -601,6 +613,15 @@ void UC1Surface::handleButton_(const ButtonEvent& ev)
 
     auto bindings = lookupBindingsOnTrack(focusedTrack_);
     MediaTrack* tr = static_cast<MediaTrack*>(focusedTrack_);
+    // BC button targets are routed to the BC anchor (independent of CS
+    // focus). For most buttons the CS path stays on focusedTrack_; only
+    // the BusCompIn case below needs the anchor.
+    void* bcAnchorRaw = effectiveBcTrack_();
+    UC1Bindings bcBindings = bcAnchorRaw
+        ? ((bcAnchorRaw == focusedTrack_) ? bindings
+                                          : lookupBindingsOnTrack(bcAnchorRaw))
+        : UC1Bindings{};
+    MediaTrack* bcTr = static_cast<MediaTrack*>(bcAnchorRaw);
 
     // Polarity — toggle REAPER's per-track phase-invert (B_PHASE),
     // not a plugin param. cap17/18 noted this button produces no
@@ -626,12 +647,12 @@ void UC1Surface::handleButton_(const ButtonEvent& ev)
     // REAPER's TrackFX_Enabled). Inverted semantic: param=1 means
     // bypassed → IN is OFF, so LED brightness is the inverse of the
     // value we just wrote.
-    auto toggleBypassParam = [&](const PluginBindings* m, int fxIdx,
-                                 const char* labelLong, int readoutZone) {
-        if (!m || m->bypassParam == kParamNone) return false;
-        const double cur = TrackFX_GetParamNormalized(tr, fxIdx, m->bypassParam);
+    auto toggleBypassParam = [&](MediaTrack* targetTr, const PluginBindings* m,
+                                 int fxIdx, const char* labelLong, int readoutZone) {
+        if (!targetTr || !m || m->bypassParam == kParamNone) return false;
+        const double cur = TrackFX_GetParamNormalized(targetTr, fxIdx, m->bypassParam);
         const double next = (cur > 0.5) ? 0.0 : 1.0;
-        TrackFX_SetParamNormalized(tr, fxIdx, m->bypassParam, next);
+        TrackFX_SetParamNormalized(targetTr, fxIdx, m->bypassParam, next);
         const bool inActive = next < 0.5;
         pushButtonLed_(ev.id, inActive);
         pushButtonReadout_(ev.id, labelLong,
@@ -640,7 +661,7 @@ void UC1Surface::handleButton_(const ButtonEvent& ev)
     };
 
     if (ev.id == button::kChannelIn) {
-        if (!toggleBypassParam(bindings.channelMap, bindings.channelFxIdx,
+        if (!toggleBypassParam(tr, bindings.channelMap, bindings.channelFxIdx,
                                "Channel Strip", zone::kChannelStripReadout)) {
             // No SSL CS plug-in on the focused track — fall back to
             // bypassing the first track FX (legacy behaviour). Edge
@@ -658,7 +679,8 @@ void UC1Surface::handleButton_(const ButtonEvent& ev)
         return;
     }
     if (ev.id == button::kBusCompIn) {
-        toggleBypassParam(bindings.busCompMap, bindings.busCompFxIdx,
+        // BC IN targets the BC anchor track, not the CS-focused track.
+        toggleBypassParam(bcTr, bcBindings.busCompMap, bcBindings.busCompFxIdx,
                           "Bus Comp", zone::kBusCompReadout);
         ++stats_.buttonEventsHandled;
         return;
@@ -1086,27 +1108,28 @@ const RingDef* ringFor(uint8_t knobId)
 } // namespace
 
 UC1Surface::CascadeState UC1Surface::computeCascade_(
-    void* trackRaw, const UC1Bindings& bindings)
+    void* csRaw, const UC1Bindings& csBindings,
+    void* bcRaw, const UC1Bindings& bcBindings)
 {
     CascadeState s{};
-    MediaTrack* tr = static_cast<MediaTrack*>(trackRaw);
-    if (!tr) return s;
-    auto readBypass = [&](const PluginBindings* m, int fxIdx) -> bool {
-        if (!m || m->bypassParam == kParamNone) return false;
-        return TrackFX_GetParamNormalized(tr, fxIdx, m->bypassParam) > 0.5;
+    MediaTrack* csTr = static_cast<MediaTrack*>(csRaw);
+    MediaTrack* bcTr = static_cast<MediaTrack*>(bcRaw);
+    auto readBypass = [](MediaTrack* t, const PluginBindings* m, int fxIdx) -> bool {
+        if (!t || !m || m->bypassParam == kParamNone) return false;
+        return TrackFX_GetParamNormalized(t, fxIdx, m->bypassParam) > 0.5;
     };
-    s.csBypassed = readBypass(bindings.channelMap, bindings.channelFxIdx);
-    s.bcBypassed = readBypass(bindings.busCompMap, bindings.busCompFxIdx);
-    if (bindings.channelMap) {
-        const int eqInP = bindings.channelMap->buttonParam[button::kEqIn];
+    s.csBypassed = readBypass(csTr, csBindings.channelMap, csBindings.channelFxIdx);
+    s.bcBypassed = readBypass(bcTr, bcBindings.busCompMap, bcBindings.busCompFxIdx);
+    if (csTr && csBindings.channelMap) {
+        const int eqInP = csBindings.channelMap->buttonParam[button::kEqIn];
         if (eqInP != kParamNone) {
             s.eqOff = TrackFX_GetParamNormalized(
-                tr, bindings.channelFxIdx, eqInP) < 0.5;
+                csTr, csBindings.channelFxIdx, eqInP) < 0.5;
         }
-        const int dynP = bindings.channelMap->buttonParam[button::kDynIn];
+        const int dynP = csBindings.channelMap->buttonParam[button::kDynIn];
         if (dynP != kParamNone) {
             s.dynOff = TrackFX_GetParamNormalized(
-                tr, bindings.channelFxIdx, dynP) < 0.5;
+                csTr, csBindings.channelFxIdx, dynP) < 0.5;
         }
     }
     return s;
@@ -1361,7 +1384,15 @@ void UC1Surface::pollButtonLeds_()
 
     MediaTrack* tr = static_cast<MediaTrack*>(focusedTrack_);
     UC1Bindings bindings = tr ? lookupBindingsOnTrack(tr) : UC1Bindings{};
-    const CascadeState cascade = computeCascade_(tr, bindings);
+    // BC button LED state reads from the BC anchor (BC section is pinned
+    // independent of CS focus).
+    void* bcAnchorRaw = effectiveBcTrack_();
+    MediaTrack* bcTr = static_cast<MediaTrack*>(bcAnchorRaw);
+    UC1Bindings bcBindings = bcAnchorRaw
+        ? ((bcAnchorRaw == focusedTrack_) ? bindings
+                                          : lookupBindingsOnTrack(bcAnchorRaw))
+        : UC1Bindings{};
+    const CascadeState cascade = computeCascade_(tr, bindings, bcTr, bcBindings);
 
     auto ledForParam = [&](const PluginBindings* map, int fxIdx, uint8_t btnId) {
         if (!map || !tr) return false;
@@ -1386,13 +1417,13 @@ void UC1Surface::pollButtonLeds_()
                 // TrackFX_Enabled if a track has BC2 but no bypassParam
                 // is registered (shouldn't happen — kept defensively).
                 bool bcOn = false;
-                if (bindings.busCompMap && tr) {
-                    if (bindings.busCompMap->bypassParam != kParamNone) {
+                if (bcBindings.busCompMap && bcTr) {
+                    if (bcBindings.busCompMap->bypassParam != kParamNone) {
                         bcOn = TrackFX_GetParamNormalized(
-                            tr, bindings.busCompFxIdx,
-                            bindings.busCompMap->bypassParam) < 0.5;
+                            bcTr, bcBindings.busCompFxIdx,
+                            bcBindings.busCompMap->bypassParam) < 0.5;
                     } else {
-                        bcOn = TrackFX_GetEnabled(tr, bindings.busCompFxIdx);
+                        bcOn = TrackFX_GetEnabled(bcTr, bcBindings.busCompFxIdx);
                     }
                 }
                 pushButtonLed_(btn, bcOn);
@@ -1547,26 +1578,34 @@ void UC1Surface::pollKnobRings_()
 {
     if (!device_) return;
     MediaTrack* tr = static_cast<MediaTrack*>(focusedTrack_);
-    if (!tr) return;
-    UC1Bindings bindings = lookupBindingsOnTrack(tr);
-    const CascadeState cascade = computeCascade_(tr, bindings);
+    UC1Bindings bindings = tr ? lookupBindingsOnTrack(tr) : UC1Bindings{};
+    void* bcAnchorRaw = effectiveBcTrack_();
+    MediaTrack* bcTr = static_cast<MediaTrack*>(bcAnchorRaw);
+    UC1Bindings bcBindings = bcAnchorRaw
+        ? ((bcAnchorRaw == focusedTrack_) ? bindings
+                                          : lookupBindingsOnTrack(bcAnchorRaw))
+        : UC1Bindings{};
+    if (!tr && !bcTr) return;
+    const CascadeState cascade = computeCascade_(tr, bindings, bcTr, bcBindings);
 
-    auto pushOne = [&](uint8_t knobId, const PluginBindings* m, int fxIdx) {
+    auto pushOne = [&](MediaTrack* t, uint8_t knobId,
+                       const PluginBindings* m, int fxIdx) {
+        if (!t || !m) return;
         const int vst3Param = m->knobParam[knobId];
         if (vst3Param == kParamNone) return;
-        const double v = TrackFX_GetParamNormalized(tr, fxIdx, vst3Param);
+        const double v = TrackFX_GetParamNormalized(t, fxIdx, vst3Param);
         const double visual = m->inverted[knobId] ? (1.0 - v) : v;
         pushKnobRing_(knobId, visual, knobCascadeDim_(knobId, cascade));
     };
 
-    if (bindings.channelMap) {
+    if (tr && bindings.channelMap) {
         for (uint8_t knobId = 0; knobId < 0x20; ++knobId) {
-            pushOne(knobId, bindings.channelMap, bindings.channelFxIdx);
+            pushOne(tr, knobId, bindings.channelMap, bindings.channelFxIdx);
         }
     }
-    if (bindings.busCompMap) {
+    if (bcTr && bcBindings.busCompMap) {
         for (uint8_t knobId = 0; knobId < 0x20; ++knobId) {
-            pushOne(knobId, bindings.busCompMap, bindings.busCompFxIdx);
+            pushOne(bcTr, knobId, bcBindings.busCompMap, bcBindings.busCompFxIdx);
         }
     }
 }
@@ -1576,6 +1615,13 @@ void UC1Surface::refresh()
     if (!device_) return;
 
     auto bindings = focusedTrack_ ? lookupBindingsOnTrack(focusedTrack_) : UC1Bindings{};
+    // BC bindings live on the BC anchor (independent of CS focus).
+    void* bcAnchorRaw_ = effectiveBcTrack_();
+    MediaTrack* bcTr_ = static_cast<MediaTrack*>(bcAnchorRaw_);
+    UC1Bindings bcBindings_ = bcAnchorRaw_
+        ? ((bcAnchorRaw_ == focusedTrack_) ? bindings
+                                           : lookupBindingsOnTrack(bcAnchorRaw_))
+        : UC1Bindings{};
 
     // Track name push — zones 0x02 (CS slot) and 0x04 (BC slot). Per
     // SSL UC1 User Guide p.17 each slot shows the DAW track name of
@@ -1705,11 +1751,12 @@ void UC1Surface::refresh()
     // shortName ("CS 2", "BC 2", "4K E" …). Also drives the
     // colour-bar-enable flag that gates the coloured top-stripe
     // rendering: 0x01 when plugin context exists, 0x00 for MAIN.
-    const bool havePlugin = bindings.channelMap || bindings.busCompMap;
+    // Plugin presence: CS bound to focused track, BC bound to anchor.
+    const bool havePlugin = bindings.channelMap || bcBindings_.busCompMap;
     device_->send(buildColourBarEnable(havePlugin));
     const char* label =
-        bindings.channelMap ? bindings.channelMap->shortName :
-        bindings.busCompMap ? bindings.busCompMap->shortName :
+        bindings.channelMap   ? bindings.channelMap->shortName :
+        bcBindings_.busCompMap ? bcBindings_.busCompMap->shortName :
         "MAIN";
     device_->send(buildCentralLabel(label));
 
@@ -1732,7 +1779,7 @@ void UC1Surface::refresh()
     // We walk the full button-ID range and ask the appropriate binding
     // for each one; kParamNone or no binding → LED off.
     MediaTrack* tr = static_cast<MediaTrack*>(focusedTrack_);
-    const CascadeState cascade = computeCascade_(tr, bindings);
+    const CascadeState cascade = computeCascade_(tr, bindings, bcTr_, bcBindings_);
     auto ledForParam = [&](const PluginBindings* map, int fxIdx, uint8_t btnId) {
         if (!map || !tr) return false;
         const int p = map->buttonParam[btnId];
@@ -1752,16 +1799,15 @@ void UC1Surface::refresh()
         bool on = false;
         switch (classifyButton(btn)) {
             case ControlDomain::BusComp: {
-                // BC IN LED — see comment in pollButtonLeds_; reads
-                // the plug-in's Bypass param (linkIdx 0, vst3 idx 10).
+                // BC IN LED reads from BC anchor (BC section pinned).
                 bool bcOn = false;
-                if (bindings.busCompMap && tr) {
-                    if (bindings.busCompMap->bypassParam != kParamNone) {
+                if (bcBindings_.busCompMap && bcTr_) {
+                    if (bcBindings_.busCompMap->bypassParam != kParamNone) {
                         bcOn = TrackFX_GetParamNormalized(
-                            tr, bindings.busCompFxIdx,
-                            bindings.busCompMap->bypassParam) < 0.5;
+                            bcTr_, bcBindings_.busCompFxIdx,
+                            bcBindings_.busCompMap->bypassParam) < 0.5;
                     } else {
-                        bcOn = TrackFX_GetEnabled(tr, bindings.busCompFxIdx);
+                        bcOn = TrackFX_GetEnabled(bcTr_, bcBindings_.busCompFxIdx);
                     }
                 }
                 pushButtonLed_(btn, bcOn);
@@ -1834,7 +1880,7 @@ void UC1Surface::refresh()
 
     // Zero the Bus Comp GR readout so stale values from the last track
     // don't linger until the JSFX probe next ticks.
-    if (bindings.busCompMap) {
+    if (bcBindings_.busCompMap) {
         device_->send(buildZeroGr());
     }
 
@@ -1858,16 +1904,16 @@ void UC1Surface::refresh()
             pushKnobRing_(knobId, visual, knobCascadeDim_(knobId, cascade));
         }
     }
-    // BC knob rings only fire when the focused track itself has a BC
-    // plugin (so we never dirty the carousel-anchor's section).
-    if (tr && bindings.busCompMap) {
+    // BC knob rings read from the BC anchor track (pinned independent
+    // of CS focus).
+    if (bcTr_ && bcBindings_.busCompMap) {
         for (uint8_t knobId = 0; knobId < 0x20; ++knobId) {
-            const int vst3Param = bindings.busCompMap->knobParam[knobId];
+            const int vst3Param = bcBindings_.busCompMap->knobParam[knobId];
             if (vst3Param == kParamNone) continue;
             const double v = TrackFX_GetParamNormalized(
-                tr, bindings.busCompFxIdx, vst3Param);
+                bcTr_, bcBindings_.busCompFxIdx, vst3Param);
             const double visual =
-                bindings.busCompMap->inverted[knobId] ? (1.0 - v) : v;
+                bcBindings_.busCompMap->inverted[knobId] ? (1.0 - v) : v;
             pushKnobRing_(knobId, visual, knobCascadeDim_(knobId, cascade));
         }
     }

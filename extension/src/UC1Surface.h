@@ -165,7 +165,8 @@ private:
         bool eqOff      = false;
         bool dynOff     = false;
     };
-    CascadeState computeCascade_(void* tr, const UC1Bindings& bindings);
+    CascadeState computeCascade_(void* csTr, const UC1Bindings& csBindings,
+                                 void* bcTr, const UC1Bindings& bcBindings);
     bool buttonCascadeDim_(uint8_t buttonId, const CascadeState&) const;
     bool knobCascadeDim_(uint8_t knobId, const CascadeState&) const;
 
