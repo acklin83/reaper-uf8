@@ -347,6 +347,19 @@ std::vector<uint8_t> buildLcdValue(std::string_view text)
     return buildFrame(0x66, data);
 }
 
+std::vector<uint8_t> buildLcdUnit(std::string_view text)
+{
+    // FF 66 <len> 0F <text> CKSUM. Empty text → FF 66 01 0F (1-byte
+    // payload = single 0x0F prefix, no chars). The unit frame must
+    // be sent between the value and the round-indicator for the
+    // firmware to paint the yellow arc.
+    std::vector<uint8_t> data;
+    data.reserve(1 + text.size());
+    data.push_back(0x0F);
+    for (char c : text) data.push_back(static_cast<uint8_t>(c));
+    return buildFrame(0x66, data);
+}
+
 std::vector<uint8_t> buildLcdRoundIndicator(double norm)
 {
     if (norm < 0.0) norm = 0.0;

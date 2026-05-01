@@ -310,12 +310,23 @@ std::vector<uint8_t> buildLcdSubHeader(std::string_view text);
 // item's current parameter value.
 std::vector<uint8_t> buildLcdValue(std::string_view text);
 
+// Unit-text frame paired with the value frame in EXT_FUNCS scroll.
+// Frame: FF 66 <len> 0F <text> CKSUM (empty text → FF 66 01 0F = unit
+// cleared / blank). Decoded from uc1_37: SSL360 sends this for EVERY
+// scroll step, even when there's no unit text — it acts as a separator
+// before the round-indicator frame and the firmware needs both to
+// render the value field's yellow arc.
+std::vector<uint8_t> buildLcdUnit(std::string_view text);
+
 // Round-indicator (yellow value-arc around the value field) position
 // frame. Decoded from uc1_37 EXT_FUNCS scroll. Frame:
 //   FF 66 04 0D <pos_lo> <pos_hi> <theme> CKSUM
 // Position is 12-bit (0..0xFFF) split across pos_lo and the lower 4
 // bits of pos_hi. Theme byte 0xC0 = yellow arc (the only value
 // observed so far). norm in [0,1] maps to 0..0xFFF.
+//
+// MUST follow buildLcdUnit() in the per-scroll frame sequence —
+// firmware ignores the indicator without the unit-frame separator.
 std::vector<uint8_t> buildLcdRoundIndicator(double norm);
 
 // 5-slot scrollable list rendered in the PRESETS browse subscreen

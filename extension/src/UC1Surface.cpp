@@ -1419,7 +1419,10 @@ void UC1Surface::renderExtFuncsSubscreen_()
                     if (sp != std::string::npos) val.erase(sp);
                     if (val.size() > 8) val.resize(8);
                     device_->send(buildLcdValue(val));
-                    // Round indicator (yellow arc around the value).
+                    // Unit frame (always empty per user request) —
+                    // MUST come between value and round-indicator
+                    // or firmware skips painting the yellow arc.
+                    device_->send(buildLcdUnit(""));
                     device_->send(buildLcdRoundIndicator(v));
                     break;
                 }
