@@ -327,6 +327,33 @@ std::vector<uint8_t> buildCentralLabel(std::string_view fourChars)
     return buildFrame(0x66, data);
 }
 
+std::vector<uint8_t> buildCentralMode(CentralMode m)
+{
+    // FF 66 03 00 <mode> 00 CKSUM
+    const uint8_t data[3] = {0x00, static_cast<uint8_t>(m), 0x00};
+    return buildFrame(0x66, data);
+}
+
+std::vector<uint8_t> buildRoutingOrderIndicator(uint8_t orderByte)
+{
+    // FF 66 02 0A <byte> CKSUM
+    const uint8_t data[2] = {0x0A, orderByte};
+    return buildFrame(0x66, data);
+}
+
+std::vector<uint8_t> buildMenuStatusDot(uint8_t cell, bool on)
+{
+    // FF 13 04 02 <cell> 01 <0xFF on / 0x00 off> CKSUM. Single
+    // brightness write (no selection-bit pair) — cap37 confirmed
+    // SSL360 only writes bank=0x02 for these status dots.
+    std::vector<uint8_t> f{0xFF, 0x13, 0x04, 0x02, cell, 0x01,
+                           static_cast<uint8_t>(on ? 0xFF : 0x00)};
+    uint32_t sum = 0;
+    for (size_t i = 1; i < f.size(); ++i) sum += f[i];
+    f.push_back(static_cast<uint8_t>(sum & 0xFF));
+    return f;
+}
+
 namespace {
 void writeSlot(uint8_t* dst, size_t slotWidth, std::string_view text)
 {

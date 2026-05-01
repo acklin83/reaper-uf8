@@ -590,21 +590,29 @@ void UC1Surface::handleButton_(const ButtonEvent& ev)
     // TRANSPORT bodies (chunk patch / preset nav / transport actions)
     // and the LCD top-label rendering land in subsequent commits.
     auto setMode = [&](Uc1Mode m) {
-        if (mode_ != m) {
-            mode_ = m;
-            // Re-push the central label on the next refresh tick — modes
-            // affect what the 4-char zone shows. Cached state cleared via
-            // bumping lastModePushed_; refresh() compares + sends.
-            char line[96];
-            std::snprintf(line, sizeof(line),
-                "UC1 mode → %s\n",
-                m == Uc1Mode::Main      ? "MAIN"
-              : m == Uc1Mode::ExtFuncs  ? "EXT_FUNCS"
-              : m == Uc1Mode::Routing   ? "ROUTING"
-              : m == Uc1Mode::Presets   ? "PRESETS"
-                                        : "TRANSPORT");
-            ShowConsoleMsg(line);
-        }
+        if (mode_ == m) return;
+        mode_ = m;
+        if (!device_) return;
+        // LCD top-banner (decoded uc1_37): FF 66 03 00 <mode> 00.
+        // PRESETS / TRANSPORT byte values are placeholders pending a
+        // capture that enters those modes via the UC1 hardware buttons.
+        const uc1::CentralMode banner =
+            m == Uc1Mode::Main      ? uc1::CentralMode::Main
+          : m == Uc1Mode::ExtFuncs  ? uc1::CentralMode::ExtFuncs
+          : m == Uc1Mode::Routing   ? uc1::CentralMode::Routing
+          : m == Uc1Mode::Presets   ? uc1::CentralMode::Presets
+                                    : uc1::CentralMode::Transport;
+        device_->send(uc1::buildCentralMode(banner));
+        // Status dots above the menu-row buttons: BC dot lit only in
+        // MAIN, Routing dot only in ROUTING, Presets dot only in
+        // PRESETS. SSL360 also un-lights the dots when entering any
+        // menu so the active mode is unambiguous.
+        device_->send(uc1::buildMenuStatusDot(uc1::kCellBcModeDot,
+                                              m == Uc1Mode::Main));
+        device_->send(uc1::buildMenuStatusDot(uc1::kCellRoutingDot,
+                                              m == Uc1Mode::Routing));
+        device_->send(uc1::buildMenuStatusDot(uc1::kCellPresetsDot,
+                                              m == Uc1Mode::Presets));
     };
     if (ev.id == button::kBack) {
         if (ev.pressed) {
