@@ -35,6 +35,7 @@
 #include <ApplicationServices/ApplicationServices.h>
 #endif
 
+#include "Bindings.h"
 #include "ColorSync.h"
 #include "FocusedParam.h"
 #include "HidDevice.h"
@@ -1573,298 +1574,105 @@ void onUf8Input(const uint8_t* data, size_t len)
             // for example 0x18..0x1F are the top soft-keys above each
             // scribble, not MCU SELECT.
             //
-            // Per-strip:
+            // Per-strip (still hardcoded in v1):
             //   0x08..0x0F  V-Pot push           (stride 1)
             //   0x18..0x1F  Top soft-key         (stride 1)
             //   0x20..0x37  SOLO/CUT/SEL         (3-byte group per strip)
             //
-            // Global buttons live at 0x40..0x7E (see docs/protocol-notes.md).
+            // Global buttons (Phase 2.7 Bindings Phase A) route through
+            // uf8::bindings::dispatch, which looks up the binding for the
+            // active layer and fires the configured builtin / REAPER
+            // action. Factory defaults match the previously hardcoded
+            // dispatch byte-for-byte; users can rebind from the
+            // Settings → Bindings tab once Phase C lands.
             //
-            // In PM mode REAPER's MCU surface (CSI) is not the active target,
-            // so per-strip SOLO/CUT/SEL are routed via the REAPER API
-            // directly on press-edge. Top soft-keys are swallowed (otherwise
-            // they'd fire MCU SELECT). Everything else still falls through
-            // to MCU passthrough so CSI mappings for global functions keep
-            // working.
+            // Anything still unbound falls through to MCU passthrough so
+            // the legacy CSI escape hatch keeps working.
             const uint8_t id    = data[i + 3];
             const uint8_t state = data[i + 5];
             const bool pressed  = state == 0x01;
 
             bool handledNatively = false;
 
-            if (id == 0x6F) {
-                // Fine / Shift modifier — track state so SEL can distinguish
-                // exclusive (plain) from additive (Shift) selection.
-                g_shiftHeld.store(pressed);
-                handledNatively = true;
-            } else if (id == 0x73) {
-                if (pressed) {
-                    g_encoderMode.store(EncoderMode::Nav);
-                    SetExtState("ReaSixty", "encoderMode", "Nav", true);
+            // Bindings layer — globals previously hardcoded inline.
+            if (auto bid = uf8::bindings::fromUf8DeviceId(id);
+                bid != uf8::bindings::ButtonId::None) {
+                if (uf8::bindings::dispatch(bid, pressed)) {
+                    handledNatively = true;
                 }
-                handledNatively = true;
-            } else if (id == 0x74) {
-                if (pressed) {
-                    g_encoderMode.store(EncoderMode::Nudge);
-                    SetExtState("ReaSixty", "encoderMode", "Nudge", true);
-                }
-                handledNatively = true;
-            } else if (id == 0x75) {
-                if (pressed) {
-                    g_encoderMode.store(EncoderMode::Focus);
-                    SetExtState("ReaSixty", "encoderMode", "Focus", true);
-                }
-                handledNatively = true;
-            } else if (id == 0x76) {
-                // Channel Encoder Push — UF8 default is "return to
-                // CHANNEL mode" (the track-selection default). We map it
-                // to the same: flip the encoder back into Nav mode.
-                if (pressed) {
-                    g_encoderMode.store(EncoderMode::Nav);
-                    SetExtState("ReaSixty", "encoderMode", "Nav", true);
-                }
-                handledNatively = true;
-            } else if (id >= 0x58 && id <= 0x5D) {
-                // Automation keys. REAPER modes: 0 Trim/Read (default),
-                // 1 Read, 2 Touch, 3 Write, 4 Latch, 5 Latch Preview.
-                // UF8 Off and Trim both map to Trim/Read (REAPER has no
-                // separate "Off" mode).
-                static constexpr int kModeById[6] = {
-                    /*0x58 Off  */ 0,
-                    /*0x59 Read */ 1,
-                    /*0x5A Wri  */ 3,
-                    /*0x5B Trim */ 0,
-                    /*0x5C Latc */ 4,
-                    /*0x5D Touc */ 2,
-                };
-                if (pressed) {
-                    const int target = kModeById[id - 0x58];
-                    queueInput({PendingInput::AutomationMode, 0,
-                                static_cast<double>(target)});
-                    // Light the target Auto LED immediately. Without this,
-                    // the firmware briefly flashes its default (TRIM) over
-                    // the held button while we wait for REAPER to apply
-                    // the mode change and the next tick to read it back.
-                    pushAutoModeLeds(target);
-                }
-                handledNatively = true;
-            } else if (id == 0x7A || id == 0x7B || id == 0x7C
-                    || id == 0x7D || id == 0x7E) {
-                // Zoom pad. 4 arrows zoom horizontally/vertically; the
-                // centre (0x7C) fits the project to window. Wired to
-                // REAPER's built-in zoom actions via Main_OnCommand on
-                // press only (repeat-on-hold not implemented — single
-                // press = single zoom step). LED lights momentarily
-                // while held as press feedback.
-                uf8::Uf8GlobalLed led = uf8::Uf8GlobalLed::ZoomCenter;
-                int action = 0;
-                switch (id) {
-                    case 0x7A: led = uf8::Uf8GlobalLed::ZoomUp;     action = 40112; break;
-                    case 0x7E: led = uf8::Uf8GlobalLed::ZoomDown;   action = 40111; break;
-                    case 0x7B: led = uf8::Uf8GlobalLed::ZoomLeft;   action = 1011;  break;
-                    case 0x7D: led = uf8::Uf8GlobalLed::ZoomRight;  action = 1012;  break;
-                    case 0x7C: led = uf8::Uf8GlobalLed::ZoomCenter; action = 40295; break;
-                }
-                sendLedFrames(uf8::buildUf8GlobalLed(led, pressed));
-                if (pressed && action) {
-                    queueInput({PendingInput::MainAction, 0,
-                                static_cast<double>(action)});
-                }
-                handledNatively = true;
-            } else if (id == 0x54) {
-                // FLIP button: swap fader ↔ V-Pot mapping for every strip.
-                // Toggle and persist; pageDirty forces a fresh re-render
-                // of value-line / motor / V-Pot bar with swapped sources.
-                if (pressed) {
-                    const bool next = !g_flip.load();
-                    g_flip.store(next);
-                    g_pageDirty.store(true);
-                    SetExtState("ReaSixty", "flip", next ? "1" : "0", true);
-                }
-                handledNatively = true;
-            } else if (id == 0x50) {
-                // Plugin button — toggles "UF8 faders drive SSL strip
-                // fader" mode. With it on, the fader steers the CS
-                // plug-in's Fader Level (linkIdx 35) and the V-Pot's
-                // Pan-fallback steers the plug-in's Pan (linkIdx 3);
-                // off restores REAPER track volume + track pan.
-                if (pressed) {
-                    const bool next = !g_pluginFaderMode.load();
-                    g_pluginFaderMode.store(next);
-                    g_pageDirty.store(true);
-                    SetExtState("ReaSixty", "pluginFaderMode",
-                                next ? "1" : "0", true);
-                }
-                handledNatively = true;
-            } else if (id == 0x46) {
-                // 360 button — opens our Plugin Mixer / Settings window
-                // (Phase 2.6 + 2.7). SSL 360° opens the SSL editor here;
-                // we ARE the SSL 360° replacement, so the same physical
-                // affordance opens our window. Defer the actual toggle
-                // to onTimer() — this branch runs on the USB worker
-                // thread and ImGui must be touched main-thread only.
-                if (pressed) g_mixerToggleRequest.store(true);
-                handledNatively = true;
-            } else if (id == 0x6E) {
-                // PAN button: toggle "force all V-Pots to Pan" regardless
-                // of SSL-plug-in presence on each track. Invalidates the
-                // per-strip caches so the Value Line / V-Pot bar switch
-                // to pan-mode rendering on the next tick.
-                if (pressed) {
-                    const bool next = !g_forcePan.load();
-                    g_forcePan.store(next);
-                    g_pageDirty.store(true);
-                    SetExtState("ReaSixty", "forcePan", next ? "1" : "0", true);
-                }
-                handledNatively = true;
-            } else if (id == 0x43 || id == 0x44) {
-                // Quick 1 (0x43) / Quick 2 (0x44) — Selection Mode row
-                // above the channel encoder. In Plug-in Mixer Mode these
-                // are locked to domain switching per SSL UF8 User Guide:
-                //   Quick 1 → Channel Strip
-                //   Quick 2 → Bus Compressor
-                // (Quick 3 / 0x45 is reserved for the I/O meter toggle —
-                //  not wired yet.)
-                if (pressed) {
-                    const auto target = (id == 0x43)
-                        ? uf8::Domain::ChannelStrip
-                        : uf8::Domain::BusComp;
-                    const auto fp = uf8::getFocusedParam();
-                    if (fp.domain != target) {
-                        // Slot 0 = Bypass for both domains (CS plug-in's
-                        // own Bypass on CS, BC plug-in's CompBypass on
-                        // BC). Bank-follow-focus snaps the soft-key bank
-                        // to V-POT (bank 0) on the next tick.
-                        uf8::setFocus({target, 0});
-                    }
-                }
-                handledNatively = true;
-            } else if (id >= 0x68 && id <= 0x6D) {
-                // Soft-key bank selectors: 0x68 = V-POT bank, 0x69..0x6D
-                // = Bank 1..5. Switches which 8 param labels appear in
-                // the top zones. BC mode only has 0..1 — ignore higher.
-                // Pressing any of these also clears global Pan override
-                // (matches SSL paradigm: "I want params, not pan").
-                if (pressed) {
-                    const int target = (id == 0x68) ? 0 : (id - 0x69 + 1);
-                    const auto fp = uf8::getFocusedParam();
-                    const auto domain = (fp.domain == uf8::Domain::BusComp)
-                        ? uf8::Domain::BusComp : uf8::Domain::ChannelStrip;
-                    if (target <= softkey::maxBankFor(domain)) {
-                        if (g_softKeyBank.exchange(target) != target) {
-                            g_softKeyDirty.store(true);
-                            char buf[8];
-                            std::snprintf(buf, sizeof(buf), "%d", target);
-                            SetExtState("ReaSixty", "softKeyBank", buf, true);
+            }
+
+            // Per-strip + soft-key bank dispatch — stay hardcoded in v1.
+            // Architecture (memory bindings-architecture.md) says the PM-
+            // mode soft-key tables move into Layer 2/3 default bindings
+            // only when Phase B/C lands; v1 leaves them alone.
+            if (!handledNatively) {
+                if (id >= 0x68 && id <= 0x6D) {
+                    // Soft-key bank selectors: 0x68 = V-POT bank, 0x69..0x6D
+                    // = Bank 1..5. BC mode only has 0..1 — ignore higher.
+                    // Pressing any of these also clears global Pan override
+                    // (matches SSL paradigm: "I want params, not pan").
+                    if (pressed) {
+                        const int target = (id == 0x68) ? 0 : (id - 0x69 + 1);
+                        const auto fp = uf8::getFocusedParam();
+                        const auto domain = (fp.domain == uf8::Domain::BusComp)
+                            ? uf8::Domain::BusComp : uf8::Domain::ChannelStrip;
+                        if (target <= softkey::maxBankFor(domain)) {
+                            if (g_softKeyBank.exchange(target) != target) {
+                                g_softKeyDirty.store(true);
+                                char buf[8];
+                                std::snprintf(buf, sizeof(buf), "%d", target);
+                                SetExtState("ReaSixty", "softKeyBank", buf, true);
+                            }
+                        }
+                        if (g_forcePan.load()) {
+                            g_forcePan.store(false);
+                            g_pageDirty.store(true);
+                            SetExtState("ReaSixty", "forcePan", "0", true);
                         }
                     }
-                    if (g_forcePan.load()) {
-                        g_forcePan.store(false);
-                        g_pageDirty.store(true);
-                        SetExtState("ReaSixty", "forcePan", "0", true);
+                    handledNatively = true;
+                } else if (id >= 0x08 && id <= 0x0F) {
+                    // V-Pot push: reset focused param / pan to neutral.
+                    if (pressed) {
+                        queueInput({PendingInput::PanCenter,
+                                    static_cast<uint8_t>(id - 0x08), 0.0});
                     }
-                }
-                handledNatively = true;
-            } else if (id == 0x52 || id == 0x53) {
-                // Page ← (0x52) / Page → (0x53) → previous/next Soft-Key
-                // Bank. Walks g_softKeyBank in the same domain-aware way
-                // the dedicated bank selectors (0x68/0x69..0x6D) do —
-                // clamped to softkey::maxBankFor(domain) (both = 5).
-                // LED lights momentarily while held as press feedback.
-                const auto led = (id == 0x53)
-                    ? uf8::Uf8GlobalLed::PageRight
-                    : uf8::Uf8GlobalLed::PageLeft;
-                sendLedFrames(uf8::buildUf8GlobalLed(led, pressed));
-                if (pressed) {
-                    const int delta = (id == 0x53) ? 1 : -1;
-                    const auto fp = uf8::getFocusedParam();
-                    const auto domain = (fp.domain == uf8::Domain::BusComp)
-                        ? uf8::Domain::BusComp : uf8::Domain::ChannelStrip;
-                    const int maxBank = softkey::maxBankFor(domain);
-                    int next = g_softKeyBank.load() + delta;
-                    if (next < 0)         next = 0;
-                    if (next > maxBank)   next = maxBank;
-                    if (g_softKeyBank.exchange(next) != next) {
-                        g_softKeyDirty.store(true);
-                        char buf[8];
-                        std::snprintf(buf, sizeof(buf), "%d", next);
-                        SetExtState("ReaSixty", "softKeyBank", buf, true);
+                    handledNatively = true;
+                } else if (id >= 0x20 && id <= 0x37) {
+                    const uint8_t strip = static_cast<uint8_t>((id - 0x20) / 3);
+                    const int which     = (id - 0x20) % 3;   // 0=SOLO 1=CUT 2=SEL
+                    if (pressed) {
+                        PendingInput::Kind k = PendingInput::SoloToggle;
+                        if (which == 1) {
+                            k = PendingInput::MuteToggle;
+                        } else if (which == 2) {
+                            k = g_shiftHeld.load() ? PendingInput::SelectToggle
+                                                   : PendingInput::SelectExclusive;
+                        }
+                        queueInput({k, strip, 0.0});
                     }
-                }
-                handledNatively = true;
-            } else if (id == 0x78 || id == 0x79) {
-                // Bank ← (0x78) / Bank → (0x79). 8-strip scroll, clamped
-                // so the bank start can go from 0 up to max(0, tracks-1).
-                // Allowing up to tracks-1 means the last bank can end
-                // with empty slots rather than snapping short of the end.
-                // LED lights momentarily while held as press feedback.
-                const auto led = (id == 0x79)
-                    ? uf8::Uf8GlobalLed::BankRight
-                    : uf8::Uf8GlobalLed::BankLeft;
-                sendLedFrames(uf8::buildUf8GlobalLed(led, pressed));
-                if (pressed) {
-                    const int delta      = (id == 0x79) ? 8 : -8;
-                    const int trackCount = CountTracks(nullptr);
-                    const int maxStart   = trackCount > 1 ? trackCount - 1 : 0;
-                    int next = g_bankOffset.load() + delta;
-                    if (next < 0)        next = 0;
-                    if (next > maxStart) next = maxStart;
-                    if (next != g_bankOffset.exchange(next)) {
-                        g_bankDirty.store(true);
+                    handledNatively = true;
+                } else if (id >= 0x18 && id <= 0x1F) {
+                    // Per-strip top soft-key. Picks the param under that
+                    // strip from the active bank and assigns it to all 8
+                    // V-Pots (setFocus across the bus). kNoSlot positions
+                    // stay silent — Settings UI will wire them later.
+                    if (pressed) {
+                        const int strip = id - 0x18;
+                        const auto fp = uf8::getFocusedParam();
+                        const auto domain = (fp.domain == uf8::Domain::BusComp)
+                            ? uf8::Domain::BusComp : uf8::Domain::ChannelStrip;
+                        const int bank = std::clamp(g_softKeyBank.load(),
+                            0, softkey::maxBankFor(domain));
+                        const auto v = softkey::viewFor(domain, bank);
+                        const int linkIdx = v.linkIdx[strip];
+                        if (linkIdx != softkey::kNoSlot) {
+                            uf8::setFocus({domain, linkIdx});
+                        }
                     }
+                    handledNatively = true;
                 }
-                handledNatively = true;
-            } else if (id >= 0x08 && id <= 0x0F) {
-                // V-Pot push: reset focused param / pan to neutral. The
-                // toggle actions (Phase/A/B/HQ) live on the top soft-keys
-                // (0x18..0x1F), not here — see that branch below.
-                if (pressed) {
-                    queueInput({PendingInput::PanCenter,
-                                static_cast<uint8_t>(id - 0x08), 0.0});
-                }
-                handledNatively = true;
-            } else if (id >= 0x20 && id <= 0x37) {
-                const uint8_t strip = static_cast<uint8_t>((id - 0x20) / 3);
-                const int which     = (id - 0x20) % 3;   // 0=SOLO 1=CUT 2=SEL
-                if (pressed) {
-                    PendingInput::Kind k = PendingInput::SoloToggle;
-                    if (which == 1) {
-                        k = PendingInput::MuteToggle;
-                    } else if (which == 2) {
-                        k = g_shiftHeld.load() ? PendingInput::SelectToggle
-                                               : PendingInput::SelectExclusive;
-                    }
-                    queueInput({k, strip, 0.0});
-                }
-                handledNatively = true;
-            } else if (id >= 0x18 && id <= 0x1F) {
-                // Per-strip top soft-key. In Plug-in Mixer Mode this picks
-                // the param under that strip from the active bank and
-                // assigns it to all 8 V-Pots (= setFocus across the bus).
-                //
-                // BYPASS / BUS COMP are normal LinkSlots now (plug-in's
-                // own Bypass param at linkIdx 0). Pressing them sets
-                // focus across the bus; V-Pot push toggles per-strip.
-                //
-                // Soft-key sets focus to the column's slot (real VST3 param
-                // OR synthetic ext::* like TrackPhase / PluginAB / PluginHQ).
-                // Render + V-Pot push paths special-case the synthetics.
-                // kNoSlot positions (WIDTH, EXT S/C, PRE on CS2 etc.) stay
-                // silent — Settings UI will wire them to user actions later.
-                if (pressed) {
-                    const int strip = id - 0x18;
-                    const auto fp = uf8::getFocusedParam();
-                    const auto domain = (fp.domain == uf8::Domain::BusComp)
-                        ? uf8::Domain::BusComp : uf8::Domain::ChannelStrip;
-                    const int bank = std::clamp(g_softKeyBank.load(),
-                        0, softkey::maxBankFor(domain));
-                    const auto v = softkey::viewFor(domain, bank);
-                    const int linkIdx = v.linkIdx[strip];
-                    if (linkIdx != softkey::kNoSlot) {
-                        uf8::setFocus({domain, linkIdx});
-                    }
-                }
-                handledNatively = true;
             }
 
             if (!handledNatively) {
@@ -4469,6 +4277,228 @@ void reasixty_setBallisticMode(int mode)
     for (int i = 0; i < 16; ++i) { g_vuEnvDb_[i] = -120.0; g_rmsEnvPow_[i] = 0.0; }
 }
 
+// Phase 2.7 Bindings — Phase A. Registers the builtin handlers that
+// uf8::bindings::dispatch invokes for the previously-hardcoded global
+// buttons. Each handler keeps using the existing atomic globals
+// (g_flip, g_pluginFaderMode, g_forcePan, g_shiftHeld, g_encoderMode,
+// g_softKeyBank, g_bankOffset, g_mixerToggleRequest, g_pageDirty,
+// g_softKeyDirty, g_bankDirty) as state of record so behaviour matches
+// the pre-refactor dispatch byte-for-byte.
+//
+// The handlers run on the libusb worker thread (same as the old inline
+// branches did). Anything that mutates REAPER state goes through
+// queueInput() so Main_OnCommand / SetTrackAutomationMode run on the
+// timer's main-thread drain. Direct atomic stores + sendLedFrames are
+// safe from the USB thread (they only touch our own state and the USB
+// device's send queue).
+void registerBindingHandlers()
+{
+    using uf8::bindings::BuiltinDescriptor;
+    using uf8::bindings::registerBuiltin;
+
+    // Sentinel used by ActionType::Reaper dispatch — funnels Main_OnCommand
+    // through the main-thread queue so REAPER's API contract is honoured.
+    registerBuiltin("__reaper_action__", BuiltinDescriptor{
+        [](bool firing, bool /*pressed*/, int actionId) {
+            if (firing && actionId > 0) {
+                queueInput({PendingInput::MainAction, 0,
+                            static_cast<double>(actionId)});
+            }
+        },
+        nullptr
+    });
+
+    registerBuiltin("flip", BuiltinDescriptor{
+        [](bool firing, bool /*pressed*/, int /*param*/) {
+            if (!firing) return;
+            const bool next = !g_flip.load();
+            g_flip.store(next);
+            g_pageDirty.store(true);
+            SetExtState("ReaSixty", "flip", next ? "1" : "0", true);
+        },
+        [](int) { return g_flip.load(); }
+    });
+
+    registerBuiltin("ssl_strip_mode_toggle", BuiltinDescriptor{
+        [](bool firing, bool /*pressed*/, int /*param*/) {
+            if (!firing) return;
+            const bool next = !g_pluginFaderMode.load();
+            g_pluginFaderMode.store(next);
+            g_pageDirty.store(true);
+            SetExtState("ReaSixty", "pluginFaderMode",
+                        next ? "1" : "0", true);
+        },
+        [](int) { return g_pluginFaderMode.load(); }
+    });
+
+    registerBuiltin("pan_force", BuiltinDescriptor{
+        [](bool firing, bool /*pressed*/, int /*param*/) {
+            if (!firing) return;
+            const bool next = !g_forcePan.load();
+            g_forcePan.store(next);
+            g_pageDirty.store(true);
+            SetExtState("ReaSixty", "forcePan", next ? "1" : "0", true);
+        },
+        [](int) { return g_forcePan.load(); }
+    });
+
+    registerBuiltin("mixer_toggle", BuiltinDescriptor{
+        [](bool firing, bool /*pressed*/, int /*param*/) {
+            if (firing) g_mixerToggleRequest.store(true);
+        },
+        nullptr
+    });
+
+    // Hold behaviour — state mirrors the physical button.
+    registerBuiltin("fine_modifier", BuiltinDescriptor{
+        [](bool /*firing*/, bool pressed, int /*param*/) {
+            g_shiftHeld.store(pressed);
+        },
+        [](int) { return g_shiftHeld.load(); }
+    });
+
+    registerBuiltin("encoder_nav", BuiltinDescriptor{
+        [](bool firing, bool /*pressed*/, int /*param*/) {
+            if (!firing) return;
+            g_encoderMode.store(EncoderMode::Nav);
+            SetExtState("ReaSixty", "encoderMode", "Nav", true);
+        },
+        nullptr
+    });
+    registerBuiltin("encoder_nudge", BuiltinDescriptor{
+        [](bool firing, bool /*pressed*/, int /*param*/) {
+            if (!firing) return;
+            g_encoderMode.store(EncoderMode::Nudge);
+            SetExtState("ReaSixty", "encoderMode", "Nudge", true);
+        },
+        nullptr
+    });
+    registerBuiltin("encoder_focus", BuiltinDescriptor{
+        [](bool firing, bool /*pressed*/, int /*param*/) {
+            if (!firing) return;
+            g_encoderMode.store(EncoderMode::Focus);
+            SetExtState("ReaSixty", "encoderMode", "Focus", true);
+        },
+        nullptr
+    });
+
+    registerBuiltin("domain_cs", BuiltinDescriptor{
+        [](bool firing, bool /*pressed*/, int /*param*/) {
+            if (!firing) return;
+            const auto fp = uf8::getFocusedParam();
+            if (fp.domain != uf8::Domain::ChannelStrip) {
+                uf8::setFocus({uf8::Domain::ChannelStrip, 0});
+            }
+        },
+        nullptr
+    });
+    registerBuiltin("domain_bc", BuiltinDescriptor{
+        [](bool firing, bool /*pressed*/, int /*param*/) {
+            if (!firing) return;
+            const auto fp = uf8::getFocusedParam();
+            if (fp.domain != uf8::Domain::BusComp) {
+                uf8::setFocus({uf8::Domain::BusComp, 0});
+            }
+        },
+        nullptr
+    });
+
+    // Automation row. param = REAPER mode (0..4). Auto Off and Auto Trim
+    // both bind with param=0 (REAPER has no separate "off" mode).
+    registerBuiltin("automation_mode", BuiltinDescriptor{
+        [](bool firing, bool /*pressed*/, int param) {
+            if (!firing) return;
+            queueInput({PendingInput::AutomationMode, 0,
+                        static_cast<double>(param)});
+            // Pre-empt the firmware's transition flash through TRIM.
+            pushAutoModeLeds(param);
+        },
+        nullptr
+    });
+
+    registerBuiltin("bank_left", BuiltinDescriptor{
+        [](bool firing, bool pressed, int /*param*/) {
+            sendLedFrames(uf8::buildUf8GlobalLed(
+                uf8::Uf8GlobalLed::BankLeft, pressed));
+            if (!firing) return;
+            const int trackCount = CountTracks(nullptr);
+            const int maxStart   = trackCount > 1 ? trackCount - 1 : 0;
+            int next = g_bankOffset.load() - 8;
+            if (next < 0)        next = 0;
+            if (next > maxStart) next = maxStart;
+            if (next != g_bankOffset.exchange(next)) g_bankDirty.store(true);
+        },
+        nullptr
+    });
+    registerBuiltin("bank_right", BuiltinDescriptor{
+        [](bool firing, bool pressed, int /*param*/) {
+            sendLedFrames(uf8::buildUf8GlobalLed(
+                uf8::Uf8GlobalLed::BankRight, pressed));
+            if (!firing) return;
+            const int trackCount = CountTracks(nullptr);
+            const int maxStart   = trackCount > 1 ? trackCount - 1 : 0;
+            int next = g_bankOffset.load() + 8;
+            if (next < 0)        next = 0;
+            if (next > maxStart) next = maxStart;
+            if (next != g_bankOffset.exchange(next)) g_bankDirty.store(true);
+        },
+        nullptr
+    });
+
+    auto pageStep = [](int delta) {
+        const auto fp = uf8::getFocusedParam();
+        const auto domain = (fp.domain == uf8::Domain::BusComp)
+            ? uf8::Domain::BusComp : uf8::Domain::ChannelStrip;
+        const int maxBank = softkey::maxBankFor(domain);
+        int next = g_softKeyBank.load() + delta;
+        if (next < 0)       next = 0;
+        if (next > maxBank) next = maxBank;
+        if (g_softKeyBank.exchange(next) != next) {
+            g_softKeyDirty.store(true);
+            char buf[8];
+            std::snprintf(buf, sizeof(buf), "%d", next);
+            SetExtState("ReaSixty", "softKeyBank", buf, true);
+        }
+    };
+    registerBuiltin("page_left", BuiltinDescriptor{
+        [pageStep](bool firing, bool pressed, int /*param*/) {
+            sendLedFrames(uf8::buildUf8GlobalLed(
+                uf8::Uf8GlobalLed::PageLeft, pressed));
+            if (firing) pageStep(-1);
+        },
+        nullptr
+    });
+    registerBuiltin("page_right", BuiltinDescriptor{
+        [pageStep](bool firing, bool pressed, int /*param*/) {
+            sendLedFrames(uf8::buildUf8GlobalLed(
+                uf8::Uf8GlobalLed::PageRight, pressed));
+            if (firing) pageStep(1);
+        },
+        nullptr
+    });
+
+    // Zoom pad — bundled builtins (REAPER action + LED feedback). Phase B
+    // collapses these into ActionType::Reaper once per-binding LED config
+    // lands.
+    auto zoomBuiltin = [](uf8::Uf8GlobalLed led, int actionId) {
+        return BuiltinDescriptor{
+            [led, actionId](bool firing, bool pressed, int /*param*/) {
+                sendLedFrames(uf8::buildUf8GlobalLed(led, pressed));
+                if (firing && actionId) {
+                    queueInput({PendingInput::MainAction, 0,
+                                static_cast<double>(actionId)});
+                }
+            },
+            nullptr
+        };
+    };
+    registerBuiltin("zoom_up",     zoomBuiltin(uf8::Uf8GlobalLed::ZoomUp,     40112));
+    registerBuiltin("zoom_down",   zoomBuiltin(uf8::Uf8GlobalLed::ZoomDown,   40111));
+    registerBuiltin("zoom_left",   zoomBuiltin(uf8::Uf8GlobalLed::ZoomLeft,   1011));
+    registerBuiltin("zoom_right",  zoomBuiltin(uf8::Uf8GlobalLed::ZoomRight,  1012));
+    registerBuiltin("zoom_center", zoomBuiltin(uf8::Uf8GlobalLed::ZoomCenter, 40295));
+}
+
 extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(
     REAPER_PLUGIN_HINSTANCE hInstance, reaper_plugin_info_t* rec)
 {
@@ -4504,6 +4534,16 @@ extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(
         const int v = std::atoi(sb);
         if (v >= 0 && v <= softkey::kCsMaxBank) g_softKeyBank.store(v);
     }
+
+    // Phase 2.7 Bindings — register builtins + load JSON config BEFORE
+    // the csurf class registration. The surface ctor opens USB, which
+    // starts the input thread; that thread calls bindings::dispatch on
+    // the first key press, so builtins must be registered and the
+    // active-layer config must be loaded by then. Order: register
+    // handlers, then load (which may seed factories on first run and
+    // write bindings.json under the REAPER resource path), then csurf.
+    registerBindingHandlers();
+    uf8::bindings::load();
 
     // Register as a full control-surface class. The user adds a
     // "Rea-Sixty" entry in Preferences → Control/OSC/Web; REAPER then

@@ -71,6 +71,8 @@ add_library(reaper_uf8 MODULE
     src/MixerLayout.cpp
     src/SettingsScreen.cpp
     src/ThemeBridge.cpp
+    # Phase 2.7 Bindings — Phase A
+    src/Bindings.cpp
 )
 
 target_link_libraries(reaper_uf8 PRIVATE PkgConfig::HIDAPI)
@@ -86,6 +88,7 @@ target_include_directories(reaper_uf8 PRIVATE
     src
     "${REAPER_SDK_DIR}/sdk"
     "${VENDOR_DIR}/reaimgui"
+    "${WDL_DIR}"
 )
 
 target_link_libraries(reaper_uf8 PRIVATE PkgConfig::LIBUSB)
