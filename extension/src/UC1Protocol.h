@@ -107,6 +107,12 @@ namespace button {
     constexpr uint8_t k360        = 0x12;  // 360 knob press
     constexpr uint8_t kMagnifier  = 0x13;
 
+    // Secondary Encoder push (decoded uc1_38 2026-05-01). The same
+    // numeric ID 0x0D appears as a knob-rotation event for the
+    // CHANNEL encoder (knob::kChannelEncoder); the protocol uses the
+    // event family (FF 22 button vs FF 24 knob) to disambiguate.
+    constexpr uint8_t kSecEncPush = 0x0D;
+
     // Dyn section
     constexpr uint8_t kFastAttComp = 0x14;
     constexpr uint8_t kPeak        = 0x15;
@@ -284,20 +290,22 @@ std::vector<uint8_t> buildColourBarEnable(bool on);
 //   FF 66 05 01 <4 ASCII> CKSUM    (9 bytes)
 std::vector<uint8_t> buildCentralLabel(std::string_view fourChars);
 
-// Central Control Panel mode banner (decoded uc1_37 2026-05-01).
+// Central Control Panel mode banner (decoded uc1_37 + uc1_38 2026-05-01).
 // Frame: FF 66 03 00 <mode> 00 <chk>. Selects which top-of-LCD layout
-// the firmware renders.
+// the firmware renders. All six bytes confirmed against captures.
 //   0x01 = MAIN (default carousel + plug-in name)
+//   0x02 = PRESETS subscreen (CS / BC drill-down inside PRESETS)
+//   0x03 = PRESETS (top-level list)
 //   0x04 = ROUTING (graph + order indicator)
+//   0x05 = TRANSPORT
 //   0x06 = EXTENDED FUNCTIONS (param scroll list)
-//   PRESETS / TRANSPORT bytes still TBD (separate capture).
 enum class CentralMode : uint8_t {
-    Main      = 0x01,
-    Routing   = 0x04,
-    ExtFuncs  = 0x06,
-    // Presets / Transport are placeholders; real bytes pending.
-    Presets   = 0x05,
-    Transport = 0x03,
+    Main           = 0x01,
+    PresetsSub     = 0x02,
+    Presets        = 0x03,
+    Routing        = 0x04,
+    Transport      = 0x05,
+    ExtFuncs       = 0x06,
 };
 std::vector<uint8_t> buildCentralMode(CentralMode m);
 
@@ -308,15 +316,25 @@ std::vector<uint8_t> buildCentralMode(CentralMode m);
 std::vector<uint8_t> buildRoutingOrderIndicator(uint8_t orderByte);
 
 // Central Control Panel status indicator LEDs above the menu-row
-// buttons (decoded uc1_37 2026-05-01). Each is a single bank=0x02
-// brightness write at byte5=0x01.
-//   BC mode dot   → cell 0x9E (lit in MAIN, dark in any menu mode)
-//   Routing dot   → cell 0x9F (lit only in ROUTING)
-//   Presets dot   → cell 0xA0 (lit only in PRESETS — TBD capture)
+// buttons (decoded uc1_37 + uc1_38 2026-05-01).
+//   BC mode dot   → cell 0x9E byte5=0x01, single bank=0x02 brightness
+//                   (lit in MAIN, dark in any menu mode)
+//   Routing dot   → cell 0x9F byte5=0x01, dual-bank (sel 0x04 ON /
+//                   0x01 OFF + bank=0x02 brightness)
+//                   (lit only in ROUTING)
+//   Presets dot   → cell 0x9D byte5=0x01, dual-bank like Routing
+//                   (lit only in PRESETS)
 constexpr uint8_t kCellBcModeDot   = 0x9E;
 constexpr uint8_t kCellRoutingDot  = 0x9F;
-constexpr uint8_t kCellPresetsDot  = 0xA0;
-std::vector<uint8_t> buildMenuStatusDot(uint8_t cell, bool on);
+constexpr uint8_t kCellPresetsDot  = 0x9D;
+
+// BC dot uses single bank=0x02 brightness write (no selection bit
+// involved). 0xFF = on, 0x00 = off.
+std::vector<uint8_t> buildBcModeDot(bool on);
+// Routing / Presets dots are dual-bank — two frames per state, in
+// the order SSL360 sends them: bank=0x02 brightness, bank=0x01
+// selection (sel 0x04 = on, 0x01 = off).
+std::array<std::vector<uint8_t>, 2> buildMenuDot(uint8_t cell, bool on);
 
 // Track-name carousel — 3-slot version for both small (0x02) and large
 // (0x04) zones. Each slot is left-aligned, zero-padded to its slot

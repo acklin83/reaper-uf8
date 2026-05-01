@@ -341,17 +341,33 @@ std::vector<uint8_t> buildRoutingOrderIndicator(uint8_t orderByte)
     return buildFrame(0x66, data);
 }
 
-std::vector<uint8_t> buildMenuStatusDot(uint8_t cell, bool on)
-{
-    // FF 13 04 02 <cell> 01 <0xFF on / 0x00 off> CKSUM. Single
-    // brightness write (no selection-bit pair) — cap37 confirmed
-    // SSL360 only writes bank=0x02 for these status dots.
-    std::vector<uint8_t> f{0xFF, 0x13, 0x04, 0x02, cell, 0x01,
-                           static_cast<uint8_t>(on ? 0xFF : 0x00)};
+namespace {
+std::vector<uint8_t> buildLedDotFrame(uint8_t bank, uint8_t cell,
+                                      uint8_t state) {
+    std::vector<uint8_t> f{0xFF, 0x13, 0x04, bank, cell, 0x01, state};
     uint32_t sum = 0;
     for (size_t i = 1; i < f.size(); ++i) sum += f[i];
     f.push_back(static_cast<uint8_t>(sum & 0xFF));
     return f;
+}
+} // namespace
+
+std::vector<uint8_t> buildBcModeDot(bool on)
+{
+    // FF 13 04 02 9E 01 <0xFF/0x00> CKSUM. uc1_37 confirmed SSL360
+    // only writes bank=0x02 for the BC dot — no selection-bit pair.
+    return buildLedDotFrame(0x02, kCellBcModeDot, on ? 0xFF : 0x00);
+}
+
+std::array<std::vector<uint8_t>, 2> buildMenuDot(uint8_t cell, bool on)
+{
+    // Dual-bank pair (uc1_38 entry/exit sequence). Order:
+    //   1. bank=0x02 brightness (0xFF on / 0x00 off)
+    //   2. bank=0x01 selection  (0x04 on / 0x01 off)
+    return {
+        buildLedDotFrame(0x02, cell, on ? 0xFF : 0x00),
+        buildLedDotFrame(0x01, cell, on ? 0x04 : 0x01),
+    };
 }
 
 namespace {

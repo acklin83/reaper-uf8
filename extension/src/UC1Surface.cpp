@@ -593,26 +593,23 @@ void UC1Surface::handleButton_(const ButtonEvent& ev)
         if (mode_ == m) return;
         mode_ = m;
         if (!device_) return;
-        // LCD top-banner (decoded uc1_37): FF 66 03 00 <mode> 00.
-        // PRESETS / TRANSPORT byte values are placeholders pending a
-        // capture that enters those modes via the UC1 hardware buttons.
-        const uc1::CentralMode banner =
-            m == Uc1Mode::Main      ? uc1::CentralMode::Main
-          : m == Uc1Mode::ExtFuncs  ? uc1::CentralMode::ExtFuncs
-          : m == Uc1Mode::Routing   ? uc1::CentralMode::Routing
-          : m == Uc1Mode::Presets   ? uc1::CentralMode::Presets
-                                    : uc1::CentralMode::Transport;
-        device_->send(uc1::buildCentralMode(banner));
-        // Status dots above the menu-row buttons: BC dot lit only in
-        // MAIN, Routing dot only in ROUTING, Presets dot only in
-        // PRESETS. SSL360 also un-lights the dots when entering any
-        // menu so the active mode is unambiguous.
-        device_->send(uc1::buildMenuStatusDot(uc1::kCellBcModeDot,
-                                              m == Uc1Mode::Main));
-        device_->send(uc1::buildMenuStatusDot(uc1::kCellRoutingDot,
-                                              m == Uc1Mode::Routing));
-        device_->send(uc1::buildMenuStatusDot(uc1::kCellPresetsDot,
-                                              m == Uc1Mode::Presets));
+        // LCD top-banner — all six bytes confirmed against uc1_37+38.
+        const CentralMode banner =
+            m == Uc1Mode::Main      ? CentralMode::Main
+          : m == Uc1Mode::ExtFuncs  ? CentralMode::ExtFuncs
+          : m == Uc1Mode::Routing   ? CentralMode::Routing
+          : m == Uc1Mode::Presets   ? CentralMode::Presets
+                                    : CentralMode::Transport;
+        device_->send(buildCentralMode(banner));
+        // BC mode dot: lit only in MAIN. Single bank=0x02 frame.
+        device_->send(buildBcModeDot(m == Uc1Mode::Main));
+        // Routing + Presets dots: dual-bank (brightness + selection).
+        for (auto& f : buildMenuDot(kCellRoutingDot, m == Uc1Mode::Routing)) {
+            device_->send(f);
+        }
+        for (auto& f : buildMenuDot(kCellPresetsDot, m == Uc1Mode::Presets)) {
+            device_->send(f);
+        }
     };
     if (ev.id == button::kBack) {
         if (ev.pressed) {
@@ -621,7 +618,10 @@ void UC1Surface::handleButton_(const ButtonEvent& ev)
                 case Uc1Mode::ExtFuncs:  setMode(Uc1Mode::Main);     break;
                 case Uc1Mode::Routing:   setMode(Uc1Mode::Main);     break;
                 case Uc1Mode::Presets:   setMode(Uc1Mode::Main);     break;
-                case Uc1Mode::Transport: /* A2: STOP via REAPER action */ break;
+                case Uc1Mode::Transport:
+                    // BACK in TRANSPORT = Stop. REAPER action 1016.
+                    Main_OnCommand(1016, 0);
+                    break;
             }
             ++stats_.buttonEventsHandled;
         }
@@ -658,7 +658,26 @@ void UC1Surface::handleButton_(const ButtonEvent& ev)
                     }
                     setMode(Uc1Mode::Main);
                     break;
-                case Uc1Mode::Transport: /* A2: PLAY via REAPER action */ break;
+                case Uc1Mode::Transport:
+                    // CONFIRM in TRANSPORT = Play. REAPER action 1007.
+                    Main_OnCommand(1007, 0);
+                    break;
+            }
+            ++stats_.buttonEventsHandled;
+        }
+        return;
+    }
+    if (ev.id == button::kSecEncPush) {
+        if (ev.pressed) {
+            // Manual p.21: Sec-Encoder push toggles MAIN ↔ TRANSPORT.
+            // In other modes it acts as the contextual confirm/select
+            // (Phase B will handle EXT_FUNCS scroll/adjust via push).
+            switch (mode_) {
+                case Uc1Mode::Main:      setMode(Uc1Mode::Transport); break;
+                case Uc1Mode::Transport: setMode(Uc1Mode::Main);      break;
+                case Uc1Mode::Presets:   /* A4: live-preview already loads on rotate */ break;
+                case Uc1Mode::ExtFuncs:  /* Phase B: toggle scroll/adjust */ break;
+                case Uc1Mode::Routing:   /* nop */ break;
             }
             ++stats_.buttonEventsHandled;
         }
