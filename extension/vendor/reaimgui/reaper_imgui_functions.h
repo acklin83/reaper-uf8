@@ -201,7 +201,12 @@ REAIMGUIAPI_EXTERN ReaImGuiEnum ImGui_ConfigFlags_NavEnableSetMousePos REAIMGUIA
 REAIMGUIAPI_EXTERN ReaImGuiEnum ImGui_ConfigFlags_NoMouse REAIMGUIAPI_INIT("ImGui_ConfigFlags_NoMouse");
 REAIMGUIAPI_EXTERN ReaImGuiEnum ImGui_ConfigFlags_NoMouseCursorChange REAIMGUIAPI_INIT("ImGui_ConfigFlags_NoMouseCursorChange");
 REAIMGUIAPI_EXTERN ReaImGuiEnum ImGui_ConfigFlags_None REAIMGUIAPI_INIT("ImGui_ConfigFlags_None");
-REAIMGUIAPI_EXTERN ReaImGuiFunc<ImGui_Context*(const char* title, int size_w, int size_h, int* pos_xInOptional, int* pos_yInOptional)> ImGui_CreateContext REAIMGUIAPI_INIT("ImGui_CreateContext");
+// Patched 2026-05-01: installed ReaImGui (v0.10+) makes size_w/size_h
+// optional int pointers — passing literal ints crashed because the
+// dylib's CallConv::Safe trampoline dereferenced them as int*.
+// Crash symbol confirms: Tag<int*, (unsigned char)9>. Call sites must
+// pass nullptr (defaults) or &int.
+REAIMGUIAPI_EXTERN ReaImGuiFunc<ImGui_Context*(const char* title, int* size_wInOptional, int* size_hInOptional, int* pos_xInOptional, int* pos_yInOptional)> ImGui_CreateContext REAIMGUIAPI_INIT("ImGui_CreateContext");
 REAIMGUIAPI_EXTERN ReaImGuiFunc<ImGui_ListClipper*(ImGui_Context* ctx)> ImGui_CreateListClipper REAIMGUIAPI_INIT("ImGui_CreateListClipper");
 REAIMGUIAPI_EXTERN ReaImGuiFunc<void(ImGui_Context* ctx)> ImGui_DestroyContext REAIMGUIAPI_INIT("ImGui_DestroyContext");
 REAIMGUIAPI_EXTERN ReaImGuiEnum ImGui_Dir_Down REAIMGUIAPI_INIT("ImGui_Dir_Down");

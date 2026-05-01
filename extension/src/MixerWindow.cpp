@@ -56,11 +56,16 @@ struct MixerWindow::Impl {
     void create()
     {
         if (ctx) return;
-        // Title is also the OS window title. v0.1.1 ImGui_CreateContext
-        // creates the context and an OS-level window in one call.
+        // v0.10+ ImGui_CreateContext takes optional int* for all four
+        // dimension args — passing raw ints (1280, 720) crashed because
+        // the dylib's trampoline dereferenced them as pointers (= addr
+        // 0x500). Must pass &int or nullptr. Vendored header patched in
+        // tandem; see learnings.md rule 17.
+        int sizeW = 1280;
+        int sizeH = 720;
         ctx = ImGui_CreateContext(
             "Rea-Sixty",
-            /*size_w*/ 1280, /*size_h*/ 720,
+            &sizeW, &sizeH,
             /*pos_x*/ nullptr, /*pos_y*/ nullptr);
     }
 
