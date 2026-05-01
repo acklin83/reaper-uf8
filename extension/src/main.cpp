@@ -3602,10 +3602,10 @@ void onTimer()
     }
     if (g_uc1_surface) g_uc1_surface->poll();
 
-    // Once-per-second UC1 wire stats — only print if something is
-    // actually wrong (errors accumulating, or OUT flow stalled).
-    // Silent otherwise so the console stays readable while the user
-    // explores knob mappings.
+    // Once-per-second UC1 wire stats — disabled. Earlier dev diagnostic
+    // that called ShowConsoleMsg from onTimer; a crash log captured a
+    // PC=0 fault on this exact call site so we route any future stat
+    // logging through the file path instead.
     static auto lastStat = std::chrono::steady_clock::now();
     static uint64_t prevOutFrames = 0, prevOutErrors = 0;
     if (g_uc1_dev) {
@@ -3615,12 +3615,13 @@ void onTimer()
             const auto oe = uc1::debugOutErrors();
             const auto dOf = of - prevOutFrames;
             const auto dOe = oe - prevOutErrors;
-            if (dOe > 0 || dOf < 20) {
-                char line[128];
-                std::snprintf(line, sizeof(line),
-                    "UC1 WARN: OUT=%llu frames/s errs=%llu (expected ~50)\n",
-                    (unsigned long long)dOf, (unsigned long long)dOe);
-                ShowConsoleMsg(line);
+            if ((dOe > 0 || dOf < 20)) {
+                if (FILE* f = std::fopen("/tmp/rea_sixty_uc1_stats.log", "a")) {
+                    std::fprintf(f,
+                        "UC1 WARN: OUT=%llu frames/s errs=%llu (expected ~50)\n",
+                        (unsigned long long)dOf, (unsigned long long)dOe);
+                    std::fclose(f);
+                }
             }
             prevOutFrames = of; prevOutErrors = oe;
             lastStat = now;
