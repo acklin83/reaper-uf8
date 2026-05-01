@@ -127,6 +127,17 @@ std::atomic<bool> g_flip{false};
 // the Plugin LED feedback land in this commit.
 std::atomic<bool> g_pluginFaderMode{false};
 
+// V-Pot has dedicated Pan UX (Plugin button → plug-in Pan; PAN button →
+// REAPER track pan; default → REAPER track pan). Clicking the Pan knob
+// in the SSL plug-in GUI fires GetLastTouchedFX, which chaseLastTouchedFx
+// turns into setFocus({ChannelStrip, 3}) — and that focus persists across
+// Plugin/PAN button toggles, hijacking the V-Pot's Pan-mode tree. Fader
+// + V-Pot drive/display sites treat Pan-focus as "no focus" so the
+// Plugin/forcePan/REAPER tree retains authority over Pan.
+inline bool isVPotPanFocus(const uf8::FocusedParam& f) {
+    return f.domain == uf8::Domain::ChannelStrip && f.slotIdx == 3;
+}
+
 // Soft-Key Bank — which page of params is currently shown across the 8
 // top-soft-key labels (and selectable via the per-strip 0x18..0x1F
 // keys). Range is 0..5 (V-POT + Bank 1..5) for both domains; in BC
@@ -617,6 +628,10 @@ void drainInputQueue()
                 const uf8::LinkSlot* slF = (!forcePanF && mmF.map)
                     ? uf8::findSlotByLinkIdx(*mmF.map, focusedF.slotIdx)
                     : nullptr;
+                // Pan-focus is owned by Plugin/PAN buttons — don't let it
+                // hijack the fader either (FLIP+Pan would conflict with
+                // Plugin-fader mode's fader→CS-Fader routing).
+                if (isVPotPanFocus(focusedF)) slF = nullptr;
                 if (g_flip.load() && slF) {
                     const uint16_t pbF = linearVolumeToPb(e.value);
                     double normF = static_cast<double>(pbF) /
@@ -679,6 +694,10 @@ void drainInputQueue()
                 const uf8::LinkSlot* slPtr = (!forcePan && mm.map)
                     ? uf8::findSlotByLinkIdx(*mm.map, focused.slotIdx)
                     : nullptr;
+                // Pan-focus ignored for V-Pot drive (Plugin/PAN buttons own
+                // the Pan-mode tree). FLIP is also bypassed — flipping Pan
+                // onto the fader would conflict with Plugin-fader mode.
+                if (isVPotPanFocus(focused)) slPtr = nullptr;
                 if (g_flip.load() && slPtr) {
                     // Map detent fraction (signed6/128) to pb14 delta —
                     // single detent ≈ 128 pb (1/128 of full sweep, same
@@ -775,6 +794,9 @@ void drainInputQueue()
                 const uf8::LinkSlot* slPtr = (!forcePan && mm.map)
                     ? uf8::findSlotByLinkIdx(*mm.map, focused.slotIdx)
                     : nullptr;
+                // Pan-focus ignored for V-Pot push (Plugin/PAN buttons own
+                // the Pan-mode tree).
+                if (isVPotPanFocus(focused)) slPtr = nullptr;
                 if (g_flip.load() && slPtr) {
                     CSurf_OnVolumeChange(tr, 1.0, false);
                     break;
@@ -2473,7 +2495,7 @@ void pushZonesForVisibleSlots()
         } else if (g_forcePan.load()) {
             const double pan = GetMediaTrackInfo_Value(tr, "D_PAN");
             vpotBar[s] = vpotPosFromPan(pan);
-        } else if (slot && fxIdx >= 0) {
+        } else if (slot && fxIdx >= 0 && !isVPotPanFocus(focused)) {
             const double norm = TrackFX_GetParamNormalized(tr, fxIdx, slot->vst3Param);
             const double visual = slot->inverted ? 1.0 - norm : norm;
             if (isBinarySlot(*slot)) {
@@ -2487,7 +2509,7 @@ void pushZonesForVisibleSlots()
             } else {
                 vpotBar[s] = vpotPosFromUnipolar(visual);
             }
-        } else if (focused.slotIdx != -1) {
+        } else if (focused.slotIdx != -1 && !isVPotPanFocus(focused)) {
             // A param is focused but this strip's plug-in doesn't have
             // it (e.g. IMP IN focused while track hosts CS 2). Render
             // the V-Pot blank so the user isn't misled.
@@ -2560,6 +2582,20 @@ void pushZonesForVisibleSlots()
                 const char prev = s2[p - 2];
                 if ((prev >= '0' && prev <= '9') || prev == '.') s2.erase(p - 1, 1);
                 break;
+            }
+            // dB readout zone has "dB" baked into the protocol frame
+            // (Protocol.cpp:378). SSL's own formatter returns "-0.6 dB"
+            // → space-strip leaves "-0.6dB" → frame appends "dB" → the
+            // LCD renders "-0.6dBdB". Strip a trailing dB suffix so the
+            // CS Fader value lines up with REAPER-volume formatting (no
+            // unit; the frame supplies it).
+            if (s2.size() >= 2) {
+                const char a = s2[s2.size() - 2];
+                const char b = s2[s2.size() - 1];
+                if ((a == 'd' || a == 'D') && (b == 'B' || b == 'b')) {
+                    s2.erase(s2.size() - 2);
+                    while (!s2.empty() && s2.back() == ' ') s2.pop_back();
+                }
             }
             if (s2.size() > 6) s2.resize(6);
             dbStr = s2;
@@ -2646,7 +2682,7 @@ void pushZonesForVisibleSlots()
                     valLine = composeValueLine("HQ", v);
                 }
             }
-        } else if (slot && fxIdx >= 0) {
+        } else if (slot && fxIdx >= 0 && !isVPotPanFocus(focused)) {
             char paramBuf[64] = {0};
             const double norm = TrackFX_GetParamNormalized(tr, fxIdx, slot->vst3Param);
             TrackFX_FormatParamValueNormalized(tr, fxIdx, slot->vst3Param,
@@ -2699,7 +2735,7 @@ void pushZonesForVisibleSlots()
                 break;
             }
             valLine = composeValueLine(slot->name, valStr);
-        } else if (focused.slotIdx != -1) {
+        } else if (focused.slotIdx != -1 && !isVPotPanFocus(focused)) {
             // Param is focused but unavailable on this strip's plug-in
             // — leave the Value Line blank instead of falling back to
             // Pan, which would mislead the user into thinking the
@@ -2872,6 +2908,7 @@ void commitDebouncedTouchReleases()
             const uf8::LinkSlot* slT = (!g_forcePan.load() && mmT.map)
                 ? uf8::findSlotByLinkIdx(*mmT.map, focusedT.slotIdx)
                 : nullptr;
+            if (isVPotPanFocus(focusedT)) slT = nullptr;
             const auto csT = csFaderForTrack(tr);
             if (g_flip.load() && slT) {
                 double normT = static_cast<double>(touchPb) /
