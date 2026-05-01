@@ -13,6 +13,10 @@
 class ImGui_Context;
 class ImGui_DrawList;
 class ImGui_ListClipper;
+// Patched 2026-05-02 — v0.10 added ImGui_Function* trailing callback args
+// to several text-input APIs (e.g. InputTextWithHint). Forward-declare so
+// patched sigs compile; we only ever pass nullptr.
+class ImGui_Function;
 
 struct reaper_array;
 
@@ -68,7 +72,18 @@ REAIMGUIAPI_EXTERN ReaImGuiFunc<bool(ImGui_Context* ctx, int* rgbaOut, int* flag
 REAIMGUIAPI_EXTERN ReaImGuiFunc<void(ImGui_Context* ctx)> ImGui_AlignTextToFramePadding REAIMGUIAPI_INIT("ImGui_AlignTextToFramePadding");
 REAIMGUIAPI_EXTERN ReaImGuiFunc<bool(ImGui_Context* ctx, const char* str_id, int dir)> ImGui_ArrowButton REAIMGUIAPI_INIT("ImGui_ArrowButton");
 REAIMGUIAPI_EXTERN ReaImGuiFunc<bool(ImGui_Context* ctx, const char* name, bool* p_openInOptional, int* flagsInOptional)> ImGui_Begin REAIMGUIAPI_INIT("ImGui_Begin");
-REAIMGUIAPI_EXTERN ReaImGuiFunc<bool(ImGui_Context* ctx, const char* str_id, double* size_wInOptional, double* size_hInOptional, bool* borderInOptional, int* flagsInOptional)> ImGui_BeginChild REAIMGUIAPI_INIT("ImGui_BeginChild");
+// Patched 2026-05-02: v0.10 replaced the v0.1.1 `bool* border` 5th arg
+// with `int* child_flags` (ChildFlags_Borders is now a flag, not a bool).
+// Vendored header still declared bool* — passing &border made the v0.10
+// trampoline read 4 bytes through a 1-byte stack pointer, producing
+// indeterminate child_flags bits (occasional ChildFlags_AlwaysAutoResize
+// or ChildFlags_FrameStyle) and random crashes on ~5th open of the mixer
+// when drawBindingEditor's nested children rendered. Verified against
+// dylib's own metadata: `ImGui_Context*,const char*,double*,double*,
+// int*,int*` with arg names `ctx,str_id,size_w,size_h,child_flags,
+// window_flags`. Call sites must pass `int childFlags = ImGui_ChildFlags_X;
+// &childFlags` (or nullptr).
+REAIMGUIAPI_EXTERN ReaImGuiFunc<bool(ImGui_Context* ctx, const char* str_id, double* size_wInOptional, double* size_hInOptional, int* child_flagsInOptional, int* window_flagsInOptional)> ImGui_BeginChild REAIMGUIAPI_INIT("ImGui_BeginChild");
 REAIMGUIAPI_EXTERN ReaImGuiFunc<bool(ImGui_Context* ctx, const char* label, const char* preview_value, int* flagsInOptional)> ImGui_BeginCombo REAIMGUIAPI_INIT("ImGui_BeginCombo");
 REAIMGUIAPI_EXTERN ReaImGuiFunc<bool(ImGui_Context* ctx, int* flagsInOptional)> ImGui_BeginDragDropSource REAIMGUIAPI_INIT("ImGui_BeginDragDropSource");
 REAIMGUIAPI_EXTERN ReaImGuiFunc<bool(ImGui_Context* ctx)> ImGui_BeginDragDropTarget REAIMGUIAPI_INIT("ImGui_BeginDragDropTarget");
@@ -98,6 +113,10 @@ REAIMGUIAPI_EXTERN ReaImGuiFunc<void(ImGui_Context* ctx, const char* text, doubl
 REAIMGUIAPI_EXTERN ReaImGuiFunc<bool(ImGui_Context* ctx, const char* label, bool* vInOut)> ImGui_Checkbox REAIMGUIAPI_INIT("ImGui_Checkbox");
 REAIMGUIAPI_EXTERN ReaImGuiFunc<bool(ImGui_Context* ctx, const char* label, int* flagsInOut, int flags_value)> ImGui_CheckboxFlags REAIMGUIAPI_INIT("ImGui_CheckboxFlags");
 REAIMGUIAPI_EXTERN ReaImGuiFunc<void(ImGui_Context* ctx)> ImGui_CloseCurrentPopup REAIMGUIAPI_INIT("ImGui_CloseCurrentPopup");
+// Patched 2026-05-02 — added the v0.10 ChildFlags enum bindings (BeginChild's
+// child_flags arg; replaces the v0.1.1 `bool border` flag).
+REAIMGUIAPI_EXTERN ReaImGuiEnum ImGui_ChildFlags_None REAIMGUIAPI_INIT("ImGui_ChildFlags_None");
+REAIMGUIAPI_EXTERN ReaImGuiEnum ImGui_ChildFlags_Borders REAIMGUIAPI_INIT("ImGui_ChildFlags_Borders");
 REAIMGUIAPI_EXTERN ReaImGuiEnum ImGui_Col_Border REAIMGUIAPI_INIT("ImGui_Col_Border");
 REAIMGUIAPI_EXTERN ReaImGuiEnum ImGui_Col_BorderShadow REAIMGUIAPI_INIT("ImGui_Col_BorderShadow");
 REAIMGUIAPI_EXTERN ReaImGuiEnum ImGui_Col_Button REAIMGUIAPI_INIT("ImGui_Col_Button");
@@ -394,7 +413,14 @@ REAIMGUIAPI_EXTERN ReaImGuiEnum ImGui_InputTextFlags_None REAIMGUIAPI_INIT("ImGu
 REAIMGUIAPI_EXTERN ReaImGuiEnum ImGui_InputTextFlags_Password REAIMGUIAPI_INIT("ImGui_InputTextFlags_Password");
 REAIMGUIAPI_EXTERN ReaImGuiEnum ImGui_InputTextFlags_ReadOnly REAIMGUIAPI_INIT("ImGui_InputTextFlags_ReadOnly");
 REAIMGUIAPI_EXTERN ReaImGuiFunc<bool(ImGui_Context* ctx, const char* label, char* bufInOutNeedBig, int bufInOutNeedBig_sz, double* widthInOptional, double* heightInOptional, int* flagsInOptional)> ImGui_InputTextMultiline REAIMGUIAPI_INIT("ImGui_InputTextMultiline");
-REAIMGUIAPI_EXTERN ReaImGuiFunc<bool(ImGui_Context* ctx, const char* label, const char* hint, char* bufInOutNeedBig, int bufInOutNeedBig_sz, int* flagsInOptional)> ImGui_InputTextWithHint REAIMGUIAPI_INIT("ImGui_InputTextWithHint");
+// Patched 2026-05-02: v0.10 added a trailing optional ImGui_Function*
+// callback arg (7 args, was 6 in v0.1.1). Per dylib metadata args are
+// `ctx,label,hint,bufInOutNeedBig,bufInOutNeedBig_sz,flagsInOptional,
+// callbackInOptional`. Without this, the trampoline reads the 7th arg
+// from a stack/register slot we never wrote — usually garbage, possibly
+// crashing when v0.10 tries to invoke it as a callback. Call sites must
+// pass nullptr for the new last arg.
+REAIMGUIAPI_EXTERN ReaImGuiFunc<bool(ImGui_Context* ctx, const char* label, const char* hint, char* bufInOutNeedBig, int bufInOutNeedBig_sz, int* flagsInOptional, ImGui_Function* callbackInOptional)> ImGui_InputTextWithHint REAIMGUIAPI_INIT("ImGui_InputTextWithHint");
 REAIMGUIAPI_EXTERN ReaImGuiFunc<bool(ImGui_Context* ctx, const char* str_id, double size_w, double size_h, int* flagsInOptional)> ImGui_InvisibleButton REAIMGUIAPI_INIT("ImGui_InvisibleButton");
 REAIMGUIAPI_EXTERN ReaImGuiFunc<bool(ImGui_Context* ctx)> ImGui_IsAnyItemActive REAIMGUIAPI_INIT("ImGui_IsAnyItemActive");
 REAIMGUIAPI_EXTERN ReaImGuiFunc<bool(ImGui_Context* ctx)> ImGui_IsAnyItemFocused REAIMGUIAPI_INIT("ImGui_IsAnyItemFocused");

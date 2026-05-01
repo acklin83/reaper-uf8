@@ -606,7 +606,9 @@ bool drawActionPicker(ImGui_Context* ctx, const char* prefix,
         ImGui_PushItemWidth(ctx, w);
         if (ImGui_InputTextWithHint(ctx, idbuf,
                                     "e.g. 40044 (Track: Toggle FX bypass)",
-                                    buf, sizeof(buf), /*flags*/ nullptr)) {
+                                    buf, sizeof(buf),
+                                    /*flags*/ nullptr,
+                                    /*callback*/ nullptr)) {
             *f.action = buf;
             dirty = true;
         }
@@ -664,7 +666,9 @@ bool drawActionPicker(ImGui_Context* ctx, const char* prefix,
         double w = 200;
         ImGui_PushItemWidth(ctx, w);
         if (ImGui_InputTextWithHint(ctx, idbuf, "(empty = all enabled outputs)",
-                                    dbuf, sizeof(dbuf), nullptr)) {
+                                    dbuf, sizeof(dbuf),
+                                    /*flags*/ nullptr,
+                                    /*callback*/ nullptr)) {
             *f.midiDevice = dbuf;
             dirty = true;
         }
@@ -756,10 +760,13 @@ void drawBindingEditor(ImGui_Context* ctx, int layer, ButtonId id)
     const double colH = 320;
 
     // ---- Left column: PRIMARY ACTION ----
+    // child_flags = ChildFlags_Borders matches the previous "bool border=true"
+    // intent under v0.1.1. v0.10 BeginChild's 5th arg is int* child_flags
+    // (vendored header patched 2026-05-02 — see learnings rule 17).
     {
         double w = colW, h = colH;
-        bool border = true;
-        if (ImGui_BeginChild(ctx, "primary_col", &w, &h, &border, nullptr)) {
+        int childFlags = ImGui_ChildFlags_Borders;
+        if (ImGui_BeginChild(ctx, "primary_col", &w, &h, &childFlags, nullptr)) {
             ImGui_Text(ctx, "PRIMARY ACTION");
             ImGui_Separator(ctx);
 
@@ -796,8 +803,8 @@ void drawBindingEditor(ImGui_Context* ctx, int layer, ButtonId id)
     // ---- Right column: LONG-PRESS ACTION ----
     {
         double w = colW, h = colH;
-        bool border = true;
-        if (ImGui_BeginChild(ctx, "longpress_col", &w, &h, &border, nullptr)) {
+        int childFlags = ImGui_ChildFlags_Borders;
+        if (ImGui_BeginChild(ctx, "longpress_col", &w, &h, &childFlags, nullptr)) {
             ImGui_Text(ctx, "LONG-PRESS  (held > 0.5 s)");
             ImGui_Separator(ctx);
 
