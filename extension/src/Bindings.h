@@ -36,6 +36,9 @@ enum class ButtonId : uint16_t {
     BankLeft, BankRight,
     PageLeft, PageRight,
 
+    // Layer (Phase B)
+    Layer1, Layer2, Layer3,
+
     // Quick (selection-mode row above the channel encoder)
     Quick1, Quick2, Quick3,
 
@@ -121,13 +124,24 @@ void save();
 
 const Config& get();
 
+// Active-layer accessors. Phase B exposes these so the Layer LED-pusher
+// in main.cpp can mirror state and so the layer_select_<n> builtin can
+// drive the switch. setActiveLayer persists to JSON; for transient
+// switches (mixer auto-switch) call onMixerVisibilityChanged instead.
+int  getActiveLayer();
+void setActiveLayer(int layer);
+
 // Dispatch a hardware button event. `pressed` is true on press-edge,
 // false on release-edge. Returns true if `id` is bound on the active
 // layer (caller marks event as handled); false if no binding (caller
 // falls through to legacy paths).
 bool dispatch(ButtonId id, bool pressed);
 
-// Phase B hook — stub in Phase A.
+// Mixer-window visibility change hook. Walks Layers 2/3 looking for
+// `auto_when_mixer_visible=true`; on first match saves the current
+// active layer and switches to the flagged one. On `visible=false`
+// restores the saved layer. Manual layer switches via setActiveLayer
+// invalidate the save (manual override wins on close).
 void onMixerVisibilityChanged(bool visible);
 
 } // namespace uf8::bindings

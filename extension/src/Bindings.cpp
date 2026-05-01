@@ -41,6 +41,9 @@ constexpr NameEntry kNames[] = {
     { ButtonId::BankRight,   "bank_right"   },
     { ButtonId::PageLeft,    "page_left"    },
     { ButtonId::PageRight,   "page_right"   },
+    { ButtonId::Layer1,      "layer_1"      },
+    { ButtonId::Layer2,      "layer_2"      },
+    { ButtonId::Layer3,      "layer_3"      },
     { ButtonId::Quick1,      "quick_1"      },
     { ButtonId::Quick2,      "quick_2"      },
     { ButtonId::Quick3,      "quick_3"      },
@@ -111,6 +114,9 @@ ButtonId fromUf8DeviceId(uint8_t id)
         case 0x53: return ButtonId::PageRight;
         case 0x78: return ButtonId::BankLeft;
         case 0x79: return ButtonId::BankRight;
+        case 0x40: return ButtonId::Layer1;
+        case 0x41: return ButtonId::Layer2;
+        case 0x42: return ButtonId::Layer3;
         default:   return ButtonId::None;
     }
 }
@@ -163,6 +169,13 @@ std::mutex                                 g_cfgMutex;
 Config                                     g_cfg;
 std::unordered_map<std::string, BuiltinDescriptor> g_builtins;
 
+// Mixer auto-switch save slot. -1 means "no transient swap in effect".
+// When the mixer opens and a Layer 2/3 has auto_when_mixer_visible=true,
+// we stash the currently-active layer here and flip activeLayer to the
+// flagged one. On mixer close (or a manual layer press in the meantime)
+// we restore (or invalidate) this slot.
+int g_savedLayer = -1;
+
 // ---- Factory defaults -----------------------------------------------------
 
 Binding mkBuiltin(const char* name, Behavior b, const char* label,
@@ -187,6 +200,23 @@ void seedFactoryDefaults_(Config& c)
     c.layers[0].name = "Layer 1";
     c.layers[1].name = "Layer 2";
     c.layers[2].name = "Layer 3";
+
+    // Layer-select bindings live on ALL three layers so the user can
+    // always navigate back even on the otherwise-empty Layer 2/3
+    // scaffolds. Each layer presses commit through setActiveLayer →
+    // persists. Param = target layer index (0..2). Layer button LED
+    // state is driven by main.cpp's pushUf8GlobalLeds based on
+    // getActiveLayer() — has-state semantics live there, not in the
+    // Binding's own toggle.
+    for (int li = 0; li < 3; ++li) {
+        auto& L = c.layers[li].bindings;
+        L[ButtonId::Layer1] = mkBuiltin("layer_select", Behavior::Momentary,
+                                        "LAYER 1", 255,255,255, 0);
+        L[ButtonId::Layer2] = mkBuiltin("layer_select", Behavior::Momentary,
+                                        "LAYER 2", 255,255,255, 1);
+        L[ButtonId::Layer3] = mkBuiltin("layer_select", Behavior::Momentary,
+                                        "LAYER 3", 255,255,255, 2);
+    }
 
     auto& L1 = c.layers[0].bindings;
 
@@ -526,9 +556,47 @@ bool dispatch(ButtonId id, bool pressed)
     return true;
 }
 
-void onMixerVisibilityChanged(bool /*visible*/)
+int getActiveLayer()
 {
-    // Phase B will route this to Layer 2/3 auto-switch. Phase A: no-op.
+    std::lock_guard<std::mutex> lk(g_cfgMutex);
+    int n = g_cfg.activeLayer;
+    if (n < 0 || n > 2) n = 0;
+    return n;
+}
+
+void setActiveLayer(int layer)
+{
+    if (layer < 0 || layer > 2) return;
+    std::lock_guard<std::mutex> lk(g_cfgMutex);
+    if (g_cfg.activeLayer == layer) return;
+    g_cfg.activeLayer = layer;
+    // Manual switch wins over a pending mixer-auto save; otherwise
+    // closing the mixer would override the user's deliberate choice.
+    g_savedLayer = -1;
+    ensureConfigDir_();
+    writeFile_(configPath_(), serialize(g_cfg));
+}
+
+void onMixerVisibilityChanged(bool visible)
+{
+    std::lock_guard<std::mutex> lk(g_cfgMutex);
+    if (visible) {
+        // Walk Layers 2/3 (index 1, 2). Layer 1 doesn't carry the flag
+        // per resolved Q5. First match wins; UI invariant (Phase C) is
+        // "at most one layer flagged".
+        for (int i = 1; i <= 2; ++i) {
+            if (g_cfg.layers[i].autoWhenMixerVisible) {
+                if (g_savedLayer < 0) g_savedLayer = g_cfg.activeLayer;
+                g_cfg.activeLayer = i;
+                return;
+            }
+        }
+    } else {
+        if (g_savedLayer >= 0) {
+            g_cfg.activeLayer = g_savedLayer;
+            g_savedLayer = -1;
+        }
+    }
 }
 
 } // namespace uf8::bindings

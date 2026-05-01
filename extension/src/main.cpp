@@ -1200,6 +1200,7 @@ void sendLedFrames(uf8::LedColourFrames frames)
 // trigger sequence, and by drainInputQueue's FLIP path which routes
 // fader pb14 → focused-param normalised position).
 void pushAutoModeLeds(int mode);
+void pushLayerLeds(int active);
 int  autoModeToLedIndex(int mode);
 uint16_t linearVolumeToPb(double linear);
 extern int g_lastAutoMode;
@@ -3147,6 +3148,7 @@ int  g_lastPageLeftLit  = -1;     // -1 = unknown / 0 = off / 1 = on
 int  g_lastPageRightLit = -1;
 int  g_lastPluginLit    = -1;     // -1 = unknown / 0 = dim / 1 = bright (mode)
 int  g_lastDomainLed    = -1;     // -1 = unknown, 0 = CS, 1 = BC
+int  g_lastActiveLayer  = -1;     // -1 = unknown, 0..2 = Layer 1..3 (Phase B)
 bool g_globalLedsInit = false;
 
 // Map REAPER's automation-mode integer to a position in kAutoLeds.
@@ -3190,6 +3192,19 @@ void pushAutoModeLeds(int mode)
     g_lastAutoMode = mode;
 }
 
+// Layer 1/2/3 radio LEDs — one bright, two dim. Used both by the
+// LED-refresh dedup in pushUf8GlobalLeds and by the layer_select press
+// handler so the LED moves on the same tick the user presses (matches
+// pushAutoModeLeds's role on the Auto row).
+void pushLayerLeds(int active)
+{
+    if (!g_dev || !g_dev->isOpen()) return;
+    sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Layer1, active == 0));
+    sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Layer2, active == 1));
+    sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Layer3, active == 2));
+    g_lastActiveLayer = active;
+}
+
 void pushUf8GlobalLeds()
 {
     if (!g_dev || !g_dev->isOpen()) return;
@@ -3217,6 +3232,7 @@ void pushUf8GlobalLeds()
     const int  softKeyBank     = g_softKeyBank.load();
     const int  domainLed       = (uf8::getFocusedParam().domain == uf8::Domain::BusComp)
                                      ? 1 : 0;
+    const int  activeLayer     = uf8::bindings::getActiveLayer();
 
     // Page Left LED — confirmed via probe 2026-04-30 to live at cell
     // 0x2D (NOT 0x5D as cap35/36 originally suggested — that earlier
@@ -3236,7 +3252,8 @@ void pushUf8GlobalLeds()
         anyArmed == g_lastAnyArmed && forcePan == g_lastForcePan &&
         flip == g_lastFlip && shiftHeld == g_lastShiftHeld &&
         encMode == g_lastEncoderMode && softKeyBank == g_lastSoftKeyBank &&
-        pluginLit == g_lastPluginLit && domainLed == g_lastDomainLed) {
+        pluginLit == g_lastPluginLit && domainLed == g_lastDomainLed &&
+        activeLayer == g_lastActiveLayer) {
         return;
     }
 
@@ -3310,15 +3327,25 @@ void pushUf8GlobalLeds()
         g_lastDomainLed = domainLed;
     }
 
+    // Layer 1/2/3 LEDs — radio group reflecting bindings::getActiveLayer().
+    // Driven by the layer_select builtin on hardware press AND by the
+    // mixer-visibility auto-switch hook, so this dedup catches both
+    // sources cleanly via g_lastActiveLayer.
+    if (activeLayer != g_lastActiveLayer || !g_globalLedsInit) {
+        pushLayerLeds(activeLayer);
+    }
+
     // Init-dim LEDs whose state we don't drive yet — without these,
     // anything left bright by the probe action (or by SSL360 before
     // Rea-Sixty took the device) lingers across reloads. All shipped
     // dim baseline so the user sees the row exists; they go bright
     // when actively used (press feedback) or when bound via Settings.
     if (!g_globalLedsInit) {
+        // Layer1/2/3 LEDs are now driven actively by the activeLayer
+        // dedup above — keep them out of the init-dim sweep so we don't
+        // briefly clear the active-layer LED on first tick.
         for (auto led : {
-            uf8::Uf8GlobalLed::Layer1, uf8::Uf8GlobalLed::Layer2,
-            uf8::Uf8GlobalLed::Layer3, uf8::Uf8GlobalLed::Btn360,
+            uf8::Uf8GlobalLed::Btn360,
             uf8::Uf8GlobalLed::Channel,
             uf8::Uf8GlobalLed::AutoOff, uf8::Uf8GlobalLed::Auto,
             uf8::Uf8GlobalLed::Norm,
@@ -3613,7 +3640,19 @@ void onTimer()
     // window is closed; when open, drives the entire ReaImGui paint cycle
     // for this tick. Kept last so any REAPER-API reads above (track
     // peaks, GR, focus state) are settled before the UI samples them.
+    //
+    // Edge-detect visibility around the paint so onMixerVisibilityChanged
+    // fires once per open/close transition (Phase B: drives the Layer 2/3
+    // auto-switch). The paint itself can flip visibility off if the user
+    // hits the OS close button, which is why the read happens AFTER
+    // onRunTick.
+    static bool s_lastMixerVisible = false;
     g_mixerWindow.onRunTick();
+    const bool nowVisible = g_mixerWindow.isOpen();
+    if (nowVisible != s_lastMixerVisible) {
+        uf8::bindings::onMixerVisibilityChanged(nowVisible);
+        s_lastMixerVisible = nowVisible;
+    }
 }
 
 // Brightness custom actions — registered at plugin entry point. REAPER
@@ -4399,6 +4438,21 @@ void registerBindingHandlers()
             if (fp.domain != uf8::Domain::BusComp) {
                 uf8::setFocus({uf8::Domain::BusComp, 0});
             }
+        },
+        nullptr
+    });
+
+    // Layer select (Phase B). param = target layer index (0..2). Press
+    // commits through bindings::setActiveLayer (persists to JSON +
+    // invalidates any pending mixer auto-save). LED feedback is pushed
+    // immediately so the radio moves on the same tick the user presses;
+    // pushUf8GlobalLeds's dedup picks it up afterwards.
+    registerBuiltin("layer_select", BuiltinDescriptor{
+        [](bool firing, bool /*pressed*/, int param) {
+            if (!firing) return;
+            if (param < 0 || param > 2) return;
+            uf8::bindings::setActiveLayer(param);
+            pushLayerLeds(param);
         },
         nullptr
     });
