@@ -68,10 +68,17 @@ struct MixerWindow::Impl {
         // dimension args — passing raw ints (1280, 720) crashed because
         // the dylib's trampoline dereferenced them as pointers (= addr
         // 0x500). Must pass &int or nullptr. See learnings.md rule 17.
+        //
+        // Context name carries a version suffix so a fresh ReaImGui
+        // state file is allocated. Stale persisted state under the bare
+        // "Rea-Sixty" key prevented the window from reopening across
+        // recent debugging sessions — bumping the suffix forces v0.10
+        // to treat us as a brand-new context with no carried-over
+        // collapsed / off-screen / closed pose.
         int sizeW = 1280;
         int sizeH = 720;
         ctx = ImGui_CreateContext(
-            "Rea-Sixty",
+            "Rea-Sixty v2",
             &sizeW, &sizeH,
             /*pos_x*/ nullptr, /*pos_y*/ nullptr);
     }
@@ -93,20 +100,27 @@ void MixerWindow::onRunTick()
     impl_->ensureCtx();
     if (!impl_->ctx) return;  // CreateContext failed (ReaImGui not installed?)
 
-    // Force a sane size on first appearance so ReaImGui's persisted-pos
-    // state (left over from earlier sessions / a smaller schematic)
-    // can't trap the window off-screen or at zero size. Cond_FirstUseEver
-    // means user-driven resizes are still respected after the first show.
+    // Force a sane size + on-screen position the very first time the
+    // user opens the window in this session, then let user-driven
+    // moves / resizes stick afterwards. FirstUseEver means subsequent
+    // toggles don't snap back to defaults.
     {
         int condFirst = ImGui_Cond_FirstUseEver;
         ImGui_SetNextWindowSize(impl_->ctx, /*w*/ 1100, /*h*/ 760,
                                 &condFirst);
+        ImGui_SetNextWindowPos(impl_->ctx, /*x*/ 80, /*y*/ 80,
+                               &condFirst, /*pivot_x*/ nullptr,
+                               /*pivot_y*/ nullptr);
     }
 
     const int pushed = ThemeBridge::pushAll(impl_->ctx);
 
+    // Window display title hides the version suffix via "##" so the
+    // user just reads "Rea-Sixty"; the suffix is the unique-id portion
+    // ImGui uses internally and matches the renamed context — both
+    // change in lock-step so old persisted state is fully bypassed.
     bool open = true;
-    if (ImGui_Begin(impl_->ctx, "Rea-Sixty", &open, /*flags*/ nullptr)) {
+    if (ImGui_Begin(impl_->ctx, "Rea-Sixty##v2", &open, /*flags*/ nullptr)) {
 
         // -- Left rail: section list -------------------------------------
         double railW = kRailWidthPx;
