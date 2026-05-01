@@ -3732,6 +3732,43 @@ custom_action_register_t g_actionFrameTrace{
 };
 int g_cmdFrameTrace = 0;
 
+// Diagnostic — replay the EXACT byte sequence captured from SSL360
+// at uc1_40 t=8.700 (first indicator frame in the sweep). Bypasses
+// our build* functions entirely. If this still doesn't paint the
+// yellow indicator, we're missing a precursor setup frame SSL360
+// sent earlier; if it does paint, our slot-lookup / encoding has
+// a bug.
+void uc1FireTestIndicator()
+{
+    if (!g_uc1_dev || !g_uc1_dev->isOpen()) {
+        ShowConsoleMsg("Rea-Sixty UC1 test: device not open\n");
+        return;
+    }
+    // Verbatim from uc1_40 capture: banner(06) + header "Mix" +
+    // triple "PLUG-IN/COMP MIX/PAN" + value "99.3" + unit "%" +
+    // indicator FF FF FF (n=23 = max).
+    const std::vector<std::vector<uint8_t>> burst = {
+        {0xff,0x66,0x03,0x00,0x06,0x00,0x6f},                                                                   // banner
+        {0xff,0x66,0x04,0x01,0x4d,0x69,0x78,0x99},                                                              // header "Mix"
+        {0xff,0x66,0x2b,0x04,                                                                                    // triple — large 3-slot
+         0x50,0x4c,0x55,0x47,0x2d,0x49,0x4e, 0x00,0x00,0x00,0x00,0x00,0x00,0x00,                                // "PLUG-IN" + pad
+         0x43,0x4f,0x4d,0x50,0x20,0x4d,0x49,0x58, 0x00,0x00,0x00,0x00,0x00,0x00,                                // "COMP MIX" + pad
+         0x50,0x41,0x4e, 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,                                // "PAN" + pad
+         0xad},
+        {0xff,0x66,0x05,0x0e,0x39,0x39,0x2e,0x33,0x4c},                                                          // value "99.3"
+        {0xff,0x66,0x02,0x0f,0x25,0x9c},                                                                         // unit "%"
+        {0xff,0x66,0x04,0x0d,0xff,0xff,0xff,0x74},                                                               // indicator FF FF FF
+    };
+    for (const auto& f : burst) g_uc1_dev->send(f);
+    ShowConsoleMsg("Rea-Sixty UC1 test: replayed uc1_40 t=8.700 verbatim\n");
+}
+
+custom_action_register_t g_actionUc1TestIndicator{
+    0, "REASIXTY_UC1_TEST_INDICATOR",
+    "Rea-Sixty: UC1 test EXT_FUNCS indicator (debug)", nullptr,
+};
+int g_cmdUc1TestIndicator = 0;
+
 // Diagnostic: poll a battery of TrackFX_GetNamedConfigParm candidate
 // names against the focused track's CS plug-in and dump the returned
 // values to the REAPER console. Used to find the data source for Gate
@@ -3950,6 +3987,7 @@ bool hookCommand2(KbdSectionInfo* /*sec*/, int command,
     if (command == g_cmdProbeLed)       { probeNextLedCell();       return true; }
     if (command == g_cmdProbeLegacyLed) { probeNextLegacyLedCell(); return true; }
     if (command == g_cmdFrameTrace)     { toggleFrameTrace();       return true; }
+    if (command == g_cmdUc1TestIndicator) { uc1FireTestIndicator();  return true; }
     if (command == g_cmdProbeGateGr)    { probeGateGrSources();     return true; }
     if (command == g_cmdDumpParams)     { dumpCsPluginParams();     return true; }
     if (command == g_cmdDumpChunk)      { dumpCsChunk();            return true; }
@@ -4019,6 +4057,7 @@ extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(
     g_cmdProbeLed       = plugin_register("custom_action", &g_actionProbeLed);
     g_cmdProbeLegacyLed = plugin_register("custom_action", &g_actionProbeLegacyLed);
     g_cmdFrameTrace     = plugin_register("custom_action", &g_actionFrameTrace);
+    g_cmdUc1TestIndicator = plugin_register("custom_action", &g_actionUc1TestIndicator);
     g_cmdProbeGateGr    = plugin_register("custom_action", &g_actionProbeGateGr);
     g_cmdDumpParams     = plugin_register("custom_action", &g_actionDumpParams);
     g_cmdDumpChunk      = plugin_register("custom_action", &g_actionDumpChunk);

@@ -362,31 +362,45 @@ std::vector<uint8_t> buildLcdUnit(std::string_view text)
 
 std::vector<uint8_t> buildLcdRoundIndicator(double norm)
 {
-    // Decoded uc1_40 (2026-05-01, 224 indicator frames across the
-    // full SSL CS param sweep): the 3-byte payload is a SEGMENTED
-    // BITMASK, not a linear position. The arc has ~20 LED segments
-    // mapped as:
-    //   * bits  0..15 → b0 + b1   (16 segments fill linearly)
-    //   * bits 16..19 → b2 low nibble (4 more — caps at 0xCF)
-    //   * bits 20..23 → b2 high nibble shares with the colour-C
-    //                   marker (0xC0). Capture shows non-linear
-    //                   bit ordering past 0xCF (0xCF → 0xDF → 0xEF
-    //                   → 0xFF) — approximate by fixing upper nibble
-    //                   at 0xC. Small fidelity loss only at >91%
-    //                   unipolar.
-    // Bipolar params (Pan, Out Trim) fill from CENTRE outward in
-    // the capture; not yet handled — they'll show as low-end
-    // unipolar fill until refined in a follow-up.
+    // Re-decoded uc1_40 (2026-05-01) — every distinct frame in the
+    // sweep enumerated. Unipolar fill is 24 positions (n = 0..23):
+    //   n  0..8  → b0 = (1<<n)-1,        b1 = 0,    b2 = 0xC0
+    //   n  9..16 → b0 = 0xFF, b1 = (1<<(n-8))-1,    b2 = 0xC0
+    //   n 17..20 → b0 = 0xFF, b1 = 0xFF,
+    //              b2 = 0xC0 | ((1<<(n-16))-1)      i.e. C1 C3 C7 CF
+    //   n 21..23 → b0 = 0xFF, b1 = 0xFF,
+    //              b2 = 0xCF + (n-20)*0x10          i.e. DF EF FF
+    // The upper nibble of b2 acts as a 4-bit counter starting at
+    // 0xC; once the lower nibble fills (0xCF), each further step
+    // adds 0x10 (DF, EF, FF). The 0xC0 colour-C marker is therefore
+    // baked into the lowest counter value, not a separate OR mask.
+    //
+    // Bipolar params (Pan, Out Trim) fill from CENTRE outward —
+    // separate code path documented but not yet wired (TODO).
     if (norm < 0.0) norm = 0.0;
     if (norm > 1.0) norm = 1.0;
-    int n = static_cast<int>(norm * 24.0 + 0.5);
+    int n = static_cast<int>(norm * 23.0 + 0.5);
     if (n < 0)  n = 0;
-    if (n > 24) n = 24;
-    const uint32_t mask = (n >= 24) ? 0x00FFFFFFu
-                                    : ((1u << n) - 1u);
-    const uint8_t b0 = static_cast<uint8_t>( mask        & 0xFF);
-    const uint8_t b1 = static_cast<uint8_t>((mask >> 8)  & 0xFF);
-    const uint8_t b2 = static_cast<uint8_t>(((mask >> 16) & 0x0F) | 0xC0);
+    if (n > 23) n = 23;
+
+    uint8_t b0, b1, b2;
+    if (n <= 8) {
+        b0 = static_cast<uint8_t>((1u << n) - 1u);   // 0 → 0x00
+        b1 = 0x00;
+        b2 = 0xC0;
+    } else if (n <= 16) {
+        b0 = 0xFF;
+        b1 = static_cast<uint8_t>((1u << (n - 8)) - 1u);
+        b2 = 0xC0;
+    } else if (n <= 20) {
+        b0 = 0xFF;
+        b1 = 0xFF;
+        b2 = static_cast<uint8_t>(0xC0 | ((1u << (n - 16)) - 1u));
+    } else {
+        b0 = 0xFF;
+        b1 = 0xFF;
+        b2 = static_cast<uint8_t>(0xCF + (n - 20) * 0x10);
+    }
     const uint8_t data[4] = {0x0D, b0, b1, b2};
     return buildFrame(0x66, data);
 }

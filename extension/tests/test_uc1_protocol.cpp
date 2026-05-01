@@ -188,6 +188,23 @@ int main()
         EXPECT(ev->delta == +1);
     }
 
+    // --- LCD round indicator (FF 66 04 0D <b0> <b1> <b2> CK).
+    // Re-decoded uc1_40 2026-05-01: 24 distinct positions n=0..23.
+    // Test vectors taken directly from capture's distinct payloads.
+    EXPECT(hex(buildLcdRoundIndicator(0.0))                   == "ff66040d0000c037");  // n=0  empty
+    EXPECT(hex(buildLcdRoundIndicator(1.0/23.0))              == "ff66040d0100c038");  // n=1
+    EXPECT(hex(buildLcdRoundIndicator(8.0/23.0))              == "ff66040dff00c036");  // n=8
+    EXPECT(hex(buildLcdRoundIndicator(9.0/23.0))              == "ff66040dff01c037");  // n=9
+    EXPECT(hex(buildLcdRoundIndicator(16.0/23.0))             == "ff66040dffffc035");  // n=16
+    EXPECT(hex(buildLcdRoundIndicator(17.0/23.0))             == "ff66040dffffc136");  // n=17
+    EXPECT(hex(buildLcdRoundIndicator(20.0/23.0))             == "ff66040dffffcf44");  // n=20
+    EXPECT(hex(buildLcdRoundIndicator(21.0/23.0))             == "ff66040dffffdf54");  // n=21
+    EXPECT(hex(buildLcdRoundIndicator(22.0/23.0))             == "ff66040dffffef64");  // n=22
+    EXPECT(hex(buildLcdRoundIndicator(1.0))                   == "ff66040dffffff74");  // n=23 max
+    // Out-of-range clamping
+    EXPECT(hex(buildLcdRoundIndicator(-0.5))                  == "ff66040d0000c037");
+    EXPECT(hex(buildLcdRoundIndicator(2.0))                   == "ff66040dffffff74");
+
     std::printf("all UC1 protocol tests passed\n");
     return 0;
 }
