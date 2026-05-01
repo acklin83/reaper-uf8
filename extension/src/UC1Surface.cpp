@@ -1386,6 +1386,10 @@ void UC1Surface::renderExtFuncsSubscreen_()
     const auto& cur = kExtFuncs[idx];
     const auto& prev = kExtFuncs[(idx - 1 + kExtFuncsCount) % kExtFuncsCount];
     const auto& next = kExtFuncs[(idx + 1) % kExtFuncsCount];
+    // SSL360 re-sends the banner at the start of every scroll-step
+    // frame burst (uc1_37). Acts as a redraw signal — without it
+    // the firmware sometimes ignores the trailing indicator frames.
+    device_->send(buildCentralMode(CentralMode::ExtFuncs));
     device_->send(buildLcdHeader(cur.longLabel));
     device_->send(buildTrackNameTripleLarge(prev.shortLabel,
         cur.shortLabel, next.shortLabel));
@@ -1429,8 +1433,10 @@ void UC1Surface::renderExtFuncsSubscreen_()
             }
         }
     }
-    // commit: flag=0x01 lights the param name green when in Adjust.
-    device_->send(buildMenuCommit(extFuncsActive_));
+    // Commit (FF 66 02 09 <flag>) is NOT sent per scroll step —
+    // SSL360 only emits it on push toggles to flip the green-name
+    // active flag (uc1_37 vs uc1_39 difference). The Sec-Encoder
+    // push handler in handleButton_ owns the commit.
 }
 
 void UC1Surface::renderPresetsSubscreen_()
