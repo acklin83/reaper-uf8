@@ -782,10 +782,25 @@ namespace {
 // Strip a single space between the numeric part and the unit suffix.
 // REAPER's TrackFX_FormatParamValueNormalized returns "12.1 dB",
 // "102.5 Hz", "50.0 %", "0.12 s" — SSL 360°'s zone 0x05 format is the
-// same without the separator space ("12.1dB", "102.5Hz").
+// same without the separator space ("12.1dB", "102.5Hz"). Also folds
+// the UTF-8 infinity glyph (E2 88 9E) to ASCII "INF" before any unit
+// processing — Comp Ratio at max returns "∞:1", Output Gain at min
+// returns "-∞ dB"; without this the Latin-1 LCD renders the UTF-8
+// bytes as garbage like "-â**".
 std::string compactUnit(std::string_view s)
 {
     std::string r{s};
+    // ∞ → INF (UTF-8 → ASCII fold).
+    for (size_t p = 0; p + 2 < r.size(); ) {
+        if (static_cast<unsigned char>(r[p])     == 0xE2 &&
+            static_cast<unsigned char>(r[p + 1]) == 0x88 &&
+            static_cast<unsigned char>(r[p + 2]) == 0x9E) {
+            r.replace(p, 3, "INF");
+            p += 3;
+        } else {
+            ++p;
+        }
+    }
     static constexpr std::string_view units[] = {
         " dB", " Hz", " kHz", " ms", " s", " %", " :1",
     };
