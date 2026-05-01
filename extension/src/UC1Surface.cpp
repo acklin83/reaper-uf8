@@ -2270,9 +2270,28 @@ void UC1Surface::refresh()
     // tick regardless, so we don't need refresh() for that.
     if (mode_ != Uc1Mode::Main) return;
 
+    // Project-load guard. REAPER fires SetSurfaceSolo / SetSurfaceMute
+    // mid-project-load (TrackList_AdjustWindows → UpdateAllExternalSurfaces),
+    // which lands here while our cached focusedTrack_ still points at
+    // the previous project's freed MediaTrack. Reading P_NAME off the
+    // stale pointer crashed inside _platform_strlen — captured 21:51.
+    // ValidatePtr2 with proj=nullptr (current project) returns false
+    // for tracks that no longer belong to the active project; clear
+    // our cache in that case so subsequent ticks recover cleanly.
+    if (focusedTrack_ &&
+        !ValidatePtr2(nullptr, focusedTrack_, "MediaTrack*")) {
+        focusedTrack_ = nullptr;
+    }
+
     auto bindings = focusedTrack_ ? lookupBindingsOnTrack(focusedTrack_) : UC1Bindings{};
     // BC bindings live on the BC anchor (independent of CS focus).
+    // effectiveBcTrack_ also caches a pointer that may have been
+    // invalidated by a project load — same ValidatePtr2 guard.
     void* bcAnchorRaw_ = effectiveBcTrack_();
+    if (bcAnchorRaw_ &&
+        !ValidatePtr2(nullptr, bcAnchorRaw_, "MediaTrack*")) {
+        bcAnchorRaw_ = nullptr;
+    }
     MediaTrack* bcTr_ = static_cast<MediaTrack*>(bcAnchorRaw_);
     UC1Bindings bcBindings_ = bcAnchorRaw_
         ? ((bcAnchorRaw_ == focusedTrack_) ? bindings
@@ -2308,7 +2327,13 @@ void UC1Surface::refresh()
     // across CHANNEL-encoder scrolling). Falls back gracefully when
     // no BC track exists in the project.
     std::string csName = resolveTrackName();
+    // Re-validate the BC anchor here too — effectiveBcTrack_() can
+    // hand back a cached pointer that was invalidated by a project
+    // load between the earlier guard at the top of refresh() and now.
     void* bcAnchor = effectiveBcTrack_();
+    if (bcAnchor && !ValidatePtr2(nullptr, bcAnchor, "MediaTrack*")) {
+        bcAnchor = nullptr;
+    }
     std::string bcName;
     if (bcAnchor) {
         MediaTrack* bcTr = static_cast<MediaTrack*>(bcAnchor);
@@ -2325,17 +2350,19 @@ void UC1Surface::refresh()
         }
     }
 
-    // Diag — one-shot log of what we're pushing so the user can
-    // correlate with what the UC1 actually displays.
+    // Diag — first 8 refreshes only. Routed through a file log instead
+    // of ShowConsoleMsg: we already lost one session to a PC=0 fault
+    // on a ShowConsoleMsg call from REAPER's surface-callback path
+    // (see learnings.md), and refresh() is on that same path.
     {
         static int kDiagRemaining = 8;
         if (kDiagRemaining > 0) {
             --kDiagRemaining;
-            char line[128];
-            std::snprintf(line, sizeof(line),
-                "UC1 refresh  cs='%s' bc='%s'\n",
-                csName.c_str(), bcName.c_str());
-            ShowConsoleMsg(line);
+            if (FILE* f = std::fopen("/tmp/rea_sixty_uc1_refresh.log", "a")) {
+                std::fprintf(f, "UC1 refresh  cs='%s' bc='%s'\n",
+                             csName.c_str(), bcName.c_str());
+                std::fclose(f);
+            }
         }
     }
 
