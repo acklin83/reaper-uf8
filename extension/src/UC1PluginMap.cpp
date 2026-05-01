@@ -49,6 +49,28 @@ PluginBindings makeBusComp2Bindings()
     return b;
 }
 
+// ---- SSL 360 Link Bus Compressor (the wrapper variant) --------------------
+//
+// Same UC1 layout as Native BC 2 but vst3 indices line up 1:1 with the
+// SSL 360 Link strip (CompBypass at 0; Threshold/Makeup/Attack/Release/
+// Ratio/HPF/Mix at 1..7). See
+// docs/ssl-native-params/VST3__SSL_360_Link_Bus_Compressor_(SSL).md.
+
+PluginBindings makeSsl360LinkBcBindings()
+{
+    auto b = makeEmpty("SSL 360 Link Bus Compressor", "L-BC");
+    b.knobParam[knob::kBCThreshold] = 1;
+    b.knobParam[knob::kBCMakeup]    = 2;
+    b.knobParam[knob::kBCAttack]    = 3;
+    b.knobParam[knob::kBCRelease]   = 4;
+    b.knobParam[knob::kBCRatio]     = 5;
+    b.knobParam[knob::kBCScHpf]     = 6;
+    b.knobParam[knob::kBCMix]       = 7;
+    // BC IN button → "CompBypass" at vst3 0 on the wrapper.
+    b.bypassParam = 0;
+    return b;
+}
+
 // ---- Native SSL Channel Strip 2 --------------------------------------------
 //
 // VST3 param indices from kCs2Slots in PluginMap.cpp. All UC1 knobs that
@@ -118,6 +140,64 @@ PluginBindings makeChannelStrip2Bindings()
     b.bypassParam = 0;
 
     applyCsInversions(b);
+    return b;
+}
+
+// ---- SSL 360 Link (CS wrapper variant) -------------------------------------
+//
+// vst3 indices match the SSL 360 Link strip 1:1 (linkIdx == vst3). VST3
+// value semantic matches the 4K-series wrappers (NOT Native CS 2) for
+// the threshold/Q knobs — user confirmed 2026-05-01 that applying the
+// CS-2 inversions here flips Comp/Gate Threshold and HMF/LMF Q. So we
+// skip applyCsInversions. See
+// docs/ssl-native-params/VST3__SSL_360_Link_(SSL).md.
+
+PluginBindings makeSsl360LinkBindings()
+{
+    auto b = makeEmpty("SSL 360 Link", "Link");
+
+    b.knobParam[knob::kCSLowPass]   = 6;
+    b.knobParam[knob::kCSHighPass]  = 7;
+    b.knobParam[knob::kCSHfGain]    = 9;
+    b.knobParam[knob::kCSHfFreq]    = 10;
+    b.knobParam[knob::kCSHmfGain]   = 11;
+    b.knobParam[knob::kCSHmfFreq]   = 12;
+    b.knobParam[knob::kCSHmfQ]      = 13;
+    b.knobParam[knob::kCSLmfGain]   = 16;
+    b.knobParam[knob::kCSLmfFreq]   = 17;
+    b.knobParam[knob::kCSLmfQ]      = 18;
+    b.knobParam[knob::kCSLfFreq]    = 19;
+    b.knobParam[knob::kCSLfGain]    = 20;
+
+    // V-Pot repurposing when no Bus Comp present — wrapper has Input Trim
+    // at vst3 4 and Fader Level at vst3 1. Per the 2026-04-30 user
+    // instruction we route Plugin-mode fader to "Fader Level" (1), not
+    // the "Linkable Fader Level" alias (35).
+    b.knobParam[knob::kCSInputTrim]  = 4;
+    b.knobParam[knob::kCSFaderLevel] = 1;
+
+    b.knobParam[knob::kCSCompThreshold] = 27;
+    b.knobParam[knob::kCSCompRatio]     = 26;
+    b.knobParam[knob::kCSCompRelease]   = 28;
+    b.knobParam[knob::kCSGateThreshold] = 30;
+    b.knobParam[knob::kCSGateRange]     = 29;
+    b.knobParam[knob::kCSGateRelease]   = 31;
+    b.knobParam[knob::kCSGateHold]      = 32;
+
+    b.buttonParam[button::kHfBell]      = 8;   // HighEqBell
+    b.buttonParam[button::kEqType]      = 14;
+    b.buttonParam[button::kEqIn]        = 15;
+    b.buttonParam[button::kLfBell]      = 21;  // LowEqBell
+    b.buttonParam[button::kFastAttComp] = 24;  // CompFastAttack
+    b.buttonParam[button::kPeak]        = 25;  // CompPeak
+    b.buttonParam[button::kDynIn]       = 22;
+    b.buttonParam[button::kExpand]      = 33;  // GateExpander
+    b.buttonParam[button::kFastAttGate] = 34;  // GateAttack
+    b.buttonParam[button::kScListen]    = 36;  // Listen
+
+    // CS IN → wrapper's own Bypass at vst3 0 (matches Native CS 2 idiom).
+    b.bypassParam = 0;
+    // No applyCsInversions — see comment above.
     return b;
 }
 
@@ -249,21 +329,42 @@ PluginBindings make4kBBindings()
 // Channel Strip variants so ordering there isn't critical, but the 4K
 // series all contain "SSL" so putting the longer "4K G" before "4K E"
 // before "4K B" keeps lookupBindingsByName unambiguous.
-const PluginBindings& csReg() { static auto v = makeChannelStrip2Bindings(); return v; }
-const PluginBindings& bcReg() { static auto v = makeBusComp2Bindings();      return v; }
-const PluginBindings& e4Reg() { static auto v = make4kEBindings();           return v; }
-const PluginBindings& g4Reg() { static auto v = make4kGBindings();           return v; }
-const PluginBindings& b4Reg() { static auto v = make4kBBindings();           return v; }
+const PluginBindings& csReg()   { static auto v = makeChannelStrip2Bindings();   return v; }
+const PluginBindings& bcReg()   { static auto v = makeBusComp2Bindings();        return v; }
+const PluginBindings& linkReg() { static auto v = makeSsl360LinkBindings();      return v; }
+const PluginBindings& linkBcReg(){static auto v = makeSsl360LinkBcBindings();    return v; }
+const PluginBindings& e4Reg()   { static auto v = make4kEBindings();             return v; }
+const PluginBindings& g4Reg()   { static auto v = make4kGBindings();             return v; }
+const PluginBindings& b4Reg()   { static auto v = make4kBBindings();             return v; }
 
 const PluginBindings* kChannelStripCandidates[] = {
-    &csReg(), &g4Reg(), &e4Reg(), &b4Reg(),
+    &csReg(), &g4Reg(), &e4Reg(), &b4Reg(), &linkReg(),
 };
+
+// BC variants — order matters for substring matching: "SSL 360 Link Bus
+// Compressor" must come before "Bus Compressor 2" to win on its own
+// name. (And linkBcReg's match string is more specific than bcReg's.)
+const PluginBindings* kBusCompCandidates[] = {
+    &linkBcReg(), &bcReg(),
+};
+
+// True when this binding's plug-in is a Bus Compressor variant. The
+// older code identified BC by `shortName == "BC 2"`, which broke as
+// soon as the SSL 360 Link wrapper came in with its own shortName.
+bool isBusCompBinding(const PluginBindings* b)
+{
+    if (!b) return false;
+    for (const auto* c : kBusCompCandidates) if (c == b) return true;
+    return false;
+}
 
 } // namespace
 
 const PluginBindings* lookupBindingsByName(std::string_view fxName)
 {
-    if (fxName.find(bcReg().match) != std::string_view::npos) return &bcReg();
+    for (const auto* b : kBusCompCandidates) {
+        if (fxName.find(b->match) != std::string_view::npos) return b;
+    }
     for (const auto* b : kChannelStripCandidates) {
         if (fxName.find(b->match) != std::string_view::npos) return b;
     }
@@ -312,9 +413,11 @@ UC1Bindings lookupBindingsOnTrack(void* trackRaw)
         const PluginBindings* b = lookupBindingsByName(name);
         if (!b) continue;
 
-        // Bus Comp 2 is identified by its shortName == "BC 2"; everything
-        // else in the registry is a Channel Strip variant.
-        const bool isBusComp = (std::strcmp(b->shortName, "BC 2") == 0);
+        // BC variant identification — kBusCompCandidates lists every
+        // binding that should populate `result.busCompMap`. The older
+        // shortName == "BC 2" check broke on the SSL 360 Link Bus
+        // Compressor wrapper which carries shortName "L-BC".
+        const bool isBusComp = isBusCompBinding(b);
 
         if (isBusComp) {
             if (!result.busCompMap) {

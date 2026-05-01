@@ -261,6 +261,81 @@ constexpr LinkSlot k4kGSlots[] = {
     { 46, "GroupSense",                       "GroupSense",     "GRP",   52,  false },
 };
 
+// SSL 360 Link (the "thin" CS wrapper that bridges a DAW track to the
+// SSL 360° host application via shared memory). vst3Param == linkIdx
+// for all 47 standard slots (0..46) — see
+// docs/ssl-native-params/VST3__SSL_360_Link_(SSL).md. The wrapper does
+// NOT expose CS Native 2's ext::* extras (External S/C, routing
+// toggles, Auto Make-up, Pre/Mic, Width Mode/Freq), so those slots are
+// absent here — features depending on them silently no-op on tracks
+// that host the wrapper instead of the Native plug-in.
+constexpr LinkSlot kSsl360LinkSlots[] = {
+    {  0, "Bypass",             "Bypass",           "BYP",    0,  false },
+    {  1, "FaderLevel",         "Fader Level",      "FDR",    1,  false },
+    {  2, "Width",              "Width",            "WID",    2,  false },
+    {  3, "Pan",                "Pan",              "PAN",    3,  false },
+    {  4, "InputTrim",          "Input Trim",       "IN",     4,  false },
+    {  5, "Phase",              "Polarity",         "POL",    5,  false },
+    {  6, "LowPassFreq",        "LPF",              "LPF",    6,  false, 1.0 },
+    {  7, "HighPassFreq",       "HPF",              "HPF",    7,  false, 0.0 },
+    {  8, "HighEqBell",         "HF Type",          "BELL",   8,  false },
+    {  9, "HighEqGain",         "HF Gain",          "GAIN",   9,  false },
+    { 10, "HighEqFreq",         "HF Freq",          "FREQ",  10,  false },
+    { 11, "HighMidEqGain",      "HMF Gain",         "GAIN",  11,  false },
+    { 12, "HighMidEqFreq",      "HMF Freq",         "FREQ",  12,  false },
+    { 13, "HighMidEqQ",         "HMF Q",            "Q",     13,  false },
+    { 14, "EqType",             "EQ Type",          "TYPE",  14,  false },
+    { 15, "EqIn",               "EQ In",            "EQ",    15,  false },
+    { 16, "LowMidEqGain",       "LMF Gain",         "GAIN",  16,  false },
+    { 17, "LowMidEqFreq",       "LMF Freq",         "FREQ",  17,  false },
+    { 18, "LowMidEqQ",          "LMF Q",            "Q",     18,  false },
+    { 19, "LowEqFreq",          "LF Freq",          "FREQ",  19,  false },
+    { 20, "LowEqGain",          "LF Gain",          "GAIN",  20,  false },
+    { 21, "LowEqBell",          "LF Type",          "BELL",  21,  false },
+    { 22, "DynamicsIn",         "Dynamics In",      "DYN",   22,  false },
+    { 23, "CompMix",            "Comp Mix",         "MIX",   23,  false, 1.0 },
+    { 24, "CompFastAttack",     "Comp F.Atk",       "F.ATK", 24,  false },
+    { 25, "CompPeak",           "Comp Peak",        "PEAK",  25,  false },
+    { 26, "CompRatio",          "Comp Ratio",       "RATIO", 26,  false },
+    { 27, "CompThreshold",      "Comp Thr",         "THR",   27,  false, 1.0 },
+    { 28, "CompRelease",        "Comp Rel",         "REL",   28,  false },
+    { 29, "GateRange",          "Gate Range",       "RNG",   29,  false },
+    { 30, "GateThreshold",      "Gate Thr",         "THR",   30,  false },
+    { 31, "GateRelease",        "Gate Rel",         "REL",   31,  false },
+    { 32, "GateHold",           "Gate Hold",        "HOLD",  32,  false },
+    { 33, "GateExpander",       "Gate/Exp",         "G/E",   33,  false },
+    { 34, "GateAttack",         "Gate F.Atk",       "F.ATK", 34,  false },
+    { 36, "Listen",             "S/C Listen",       "LST",   36,  false },
+    { 37, "OutputTrim",         "Out Trim",         "OUT",   37,  false },
+    // SSL 360 Link wrapper-specific params (no Native CS 2 equivalent).
+    // linkIdx mirrors vst3 because the wrapper IS the linkIdx authority.
+    { 38, "QuickAccess1",       "Quick 1",          "QA1",   38,  false },
+    { 39, "QuickAccess2",       "Quick 2",          "QA2",   39,  false },
+    { 40, "QuickAccess3",       "Quick 3",          "QA3",   40,  false },
+    { 41, "QuickAccess4",       "Quick 4",          "QA4",   41,  false },
+    { 42, "QuickAccess5",       "Quick 5",          "QA5",   42,  false },
+    { 43, "QuickAccess6",       "Quick 6",          "QA6",   43,  false },
+    { 44, "SaturationAmount",   "Saturation",       "SAT",   44,  false },
+    { 45, "SaturationIn",       "Sat In",           "SAT.I", 45,  false },
+    { 46, "GroupSense",         "GroupSense",       "GRP",   46,  false },
+};
+
+// SSL 360 Link Bus Compressor — the thin BC wrapper. 9 SSL params
+// (vst3 0..8) plus REAPER's wrap params (Bypass/Wet/Delta at 9..11
+// which we ignore). Mirror kBusComp2Slots's id/name/legend so soft-key
+// banks and EXT_FUNCS resolve identically across BC variants.
+constexpr LinkSlot kSsl360LinkBcSlots[] = {
+    { 0, "CompBypass",   "Bypass",    "BYP",   0, false },
+    { 1, "Threshold",    "Threshold", "THR",   1, false },
+    { 2, "MakeupGain",   "Makeup",    "MAKE",  2, false },
+    { 3, "Attack",       "Attack",    "ATK",   3, false },
+    { 4, "Release",      "Release",   "REL",   4, false },
+    { 5, "Ratio",        "Ratio",     "RATIO", 5, false },
+    { 6, "SidechainHPF", "S/C HPF",   "HPF",   6, false },
+    { 7, "DryWetMix",    "Mix",       "MIX",   7, false },
+    { 46, "GroupSense",  "GroupSense","GRP",   8, false },
+};
+
 // Bus Compressor 2 — virtual strip has 7 slots (idx 1..7) plus a Bypass
 // at linkIdx 0 (the BC 360 Link wrapper exposes "CompBypass" at vst3
 // idx 0; on the standalone Native Bus Compressor 2 plug-in, the same
@@ -290,11 +365,16 @@ constexpr LinkSlot kBusComp2Slots[] = {
 // against these `match` strings.
 
 constexpr PluginMap kMaps[] = {
-    { "Channel Strip 2",    "CS 2",  Domain::ChannelStrip, kCs2Slots       },
-    { "4K G",               "4K G",  Domain::ChannelStrip, k4kGSlots       },
-    { "4K E",               "4K E",  Domain::ChannelStrip, k4kESlots       },
-    { "4K B",               "4K B",  Domain::ChannelStrip, k4kBSlots       },
-    { "Bus Compressor 2",   "BC 2",  Domain::BusComp,      kBusComp2Slots  },
+    { "Channel Strip 2",        "CS 2",  Domain::ChannelStrip, kCs2Slots          },
+    { "4K G",                   "4K G",  Domain::ChannelStrip, k4kGSlots          },
+    { "4K E",                   "4K E",  Domain::ChannelStrip, k4kESlots          },
+    { "4K B",                   "4K B",  Domain::ChannelStrip, k4kBSlots          },
+    { "Bus Compressor 2",       "BC 2",  Domain::BusComp,      kBusComp2Slots     },
+    // Order: BC variant must come BEFORE the CS variant — first-hit
+    // substring matching means "SSL 360 Link" alone would otherwise
+    // claim the BC plug-in name "SSL 360 Link Bus Compressor".
+    { "SSL 360 Link Bus Compressor", "L-BC", Domain::BusComp,  kSsl360LinkBcSlots },
+    { "SSL 360 Link",           "Link",  Domain::ChannelStrip, kSsl360LinkSlots   },
 };
 
 } // namespace
