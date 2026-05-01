@@ -323,10 +323,14 @@ std::vector<uint8_t> buildPresetListScroll(std::string_view prev2,
                                            std::string_view next1,
                                            std::string_view next2);
 
-// Generic "render commit / redraw" sentinel frame the firmware needs
-// after every menu-content update. SSL360 sends this trailing every
-// PRESETS / EXT_FUNCS layout change. Frame: FF 66 02 09 00 CKSUM.
-std::vector<uint8_t> buildMenuCommit();
+// "Render commit / redraw" sentinel frame the firmware needs after
+// every menu-content update. SSL360 sends this trailing every PRESETS
+// / EXT_FUNCS layout change. The trailing byte also doubles as an
+// active/inactive flag for the EXT_FUNCS Adjust state — when 0x01
+// the firmware paints the current item's name in green (decoded
+// uc1_39 t=2.762324 vs t=7.501492). 0x00 = list / inactive; 0x01 =
+// adjust / active. Frame: FF 66 02 09 <flag> CKSUM.
+std::vector<uint8_t> buildMenuCommit(bool active = false);
 
 // Auxiliary indicator frame seen in PRESETS browse (uc1_38 t=8.478103):
 // FF 66 02 08 00 CKSUM. Likely "scroll position" or similar; sent

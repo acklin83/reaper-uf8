@@ -377,10 +377,11 @@ std::vector<uint8_t> buildPresetListScroll(std::string_view prev2,
     return buildFrame(0x66, data);
 }
 
-std::vector<uint8_t> buildMenuCommit()
+std::vector<uint8_t> buildMenuCommit(bool active)
 {
-    // FF 66 02 09 00 CKSUM.
-    const uint8_t data[2] = {0x09, 0x00};
+    // FF 66 02 09 <flag> CKSUM. flag=0x01 lights the current item's
+    // name green (EXT_FUNCS Adjust mode); flag=0x00 = normal.
+    const uint8_t data[2] = {0x09, static_cast<uint8_t>(active ? 0x01 : 0x00)};
     return buildFrame(0x66, data);
 }
 

@@ -830,6 +830,11 @@ void UC1Surface::handleButton_(const ButtonEvent& ev)
             extFuncsActive_ = false;  // always start in list mode
             renderExtFuncsSubscreen_();
         }
+        // Returning to MAIN re-runs refresh() so the carousel + central
+        // label repaint over the menu-mode LCD layout. refresh() is
+        // gated to MAIN-only (added when EXT_FUNCS leaked BC carousel),
+        // so we must call it explicitly here on the upward transition.
+        if (m == Uc1Mode::Main) refresh();
     };
     if (ev.id == button::kBack) {
         if (ev.pressed) {
@@ -1414,7 +1419,8 @@ void UC1Surface::renderExtFuncsSubscreen_()
             }
         }
     }
-    device_->send(buildMenuCommit());
+    // commit: flag=0x01 lights the param name green when in Adjust.
+    device_->send(buildMenuCommit(extFuncsActive_));
 }
 
 void UC1Surface::renderPresetsSubscreen_()
