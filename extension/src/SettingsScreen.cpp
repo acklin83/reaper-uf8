@@ -298,7 +298,7 @@ void line_(VCanvas& c, float x1, float y1, float x2, float y2,
 // (numbered controls).
 void drawUf8Vector(ImGui_Context* ctx, ButtonId& sel)
 {
-    constexpr float W = 1000, H = 460;
+    constexpr float W = 1000, H = 470;
 
     double oxd = 0, oyd = 0;
     ImGui_GetCursorScreenPos(ctx, &oxd, &oyd);
@@ -399,69 +399,81 @@ void drawUf8Vector(ImGui_Context* ctx, ButtonId& sel)
     }
 
     // ---- Left panel ----
-    drawGroupLabel(16, 8, "LAYER");
-    drawGroupLabel(56, 8, "QUICK");
-    drawHwBtn(15, 22, 35, 22, ButtonId::Layer1, "1");
-    drawHwBtn(15, 48, 35, 22, ButtonId::Layer2, "2");
-    drawHwBtn(15, 74, 35, 22, ButtonId::Layer3, "3");
-    drawHwBtn(55, 22, 35, 22, ButtonId::Quick1, "1");
-    drawHwBtn(55, 48, 35, 22, ButtonId::Quick2, "2");
-    drawHwBtn(55, 74, 35, 22, ButtonId::Quick3, "3");
+    // Group labels need a >= 14 px vertical gap to the button row below
+    // (default font height ≈ 13 — anything tighter clips the descenders
+    // into the button border).
+    drawGroupLabel(20, 6, "LAYER");
+    drawGroupLabel(64, 6, "QUICK");
+    drawHwBtn(15, 22, 36, 22, ButtonId::Layer1, "1");
+    drawHwBtn(15, 48, 36, 22, ButtonId::Layer2, "2");
+    drawHwBtn(15, 74, 36, 22, ButtonId::Layer3, "3");
+    drawHwBtn(57, 22, 36, 22, ButtonId::Quick1, "1");
+    drawHwBtn(57, 48, 36, 22, ButtonId::Quick2, "2");
+    drawHwBtn(57, 74, 36, 22, ButtonId::Quick3, "3");
 
-    drawHwBtn(15, 108, 75, 24, ButtonId::Btn360, "360\xC2\xB0");
+    drawHwBtn(15, 108, 78, 24, ButtonId::Btn360, "360\xC2\xB0");
 
-    drawGroupLabel(16, 138, "SEND / PLUGIN");
+    drawGroupLabel(15, 136, "SEND / PLUGIN");
     char buf[8];
     for (int row = 0; row < 4; ++row) {
         for (int col = 0; col < 2; ++col) {
             std::snprintf(buf, sizeof(buf), "%d", row * 2 + col + 1);
-            drawLocked(15 + col * 40, 152 + row * 26, 35, 22, buf);
+            drawLocked(13 + col * 42, 152 + row * 26, 38, 22, buf);
         }
     }
 
-    drawHwBtn(15, 260, 35, 22, ButtonId::PluginBtn, "PLUGIN");
-    drawLocked(55, 260, 35, 22, "CHANNEL");
+    // PLUGIN / CHANNEL — wider buttons so their silk-screen labels fit.
+    // CHANNEL is locked in v1 (DAW-mode-only on the real UF8) but the
+    // schematic shows it for layout fidelity.
+    drawHwBtn(13, 260, 50, 22, ButtonId::PluginBtn, "PLUGIN");
+    drawLocked(67, 260, 50, 22, "CHANNEL");
 
-    drawGroupLabel(30, 286, "PAGE");
-    drawHwBtn(15, 296, 35, 22, ButtonId::PageLeft,  "\xE2\x97\x82");
-    drawHwBtn(55, 296, 35, 22, ButtonId::PageRight, "\xE2\x96\xB8");
+    // PAGE — label sits 18 px above the arrow row so the descenders
+    // don't touch the button frame.
+    drawGroupLabel(48, 282, "PAGE");
+    drawHwBtn(13, 300, 50, 22, ButtonId::PageLeft,  "\xE2\x97\x82");
+    drawHwBtn(67, 300, 50, 22, ButtonId::PageRight, "\xE2\x96\xB8");
 
-    drawHwBtn(15, 322, 75, 22, ButtonId::Flip, "FLIP");
+    drawHwBtn(13, 326, 104, 22, ButtonId::Flip, "FLIP");
 
-    drawGroupLabel(16, 350, "AUTOMATION");
-    drawHwBtn(12, 364, 28, 22, ButtonId::AutoOff,   "OFF");
-    drawHwBtn(42, 364, 28, 22, ButtonId::AutoRead,  "READ");
-    drawHwBtn(72, 364, 28, 22, ButtonId::AutoWrite, "WRITE");
-    drawHwBtn(12, 388, 28, 22, ButtonId::AutoTrim,  "TRIM");
-    drawHwBtn(42, 388, 28, 22, ButtonId::AutoLatch, "LATCH");
-    drawHwBtn(72, 388, 28, 22, ButtonId::AutoTouch, "TOUCH");
+    drawGroupLabel(36, 354, "AUTOMATION");
+    // 3 columns × 2 rows. 33-wide buttons fit "WRITE" / "LATCH" / "TOUCH"
+    // without overflow at the default ImGui font.
+    drawHwBtn(13,  372, 33, 22, ButtonId::AutoOff,   "OFF");
+    drawHwBtn(48,  372, 33, 22, ButtonId::AutoRead,  "READ");
+    drawHwBtn(83,  372, 33, 22, ButtonId::AutoWrite, "WRITE");
+    drawHwBtn(13,  396, 33, 22, ButtonId::AutoTrim,  "TRIM");
+    drawHwBtn(48,  396, 33, 22, ButtonId::AutoLatch, "LATCH");
+    drawHwBtn(83,  396, 33, 22, ButtonId::AutoTouch, "TOUCH");
 
     // ---- Right panel ----
-    drawGroupLabel(850, 8, "SOFT KEYS");
-    drawLocked(850, 22, 30, 20, "V-POT");
-    drawLocked(884, 22, 25, 20, "1");
-    drawLocked(911, 22, 25, 20, "2");
-    drawLocked(850, 44, 30, 20, "3");
-    drawLocked(884, 44, 25, 20, "4");
-    drawLocked(911, 44, 25, 20, "5");
+    // Top cluster: SOFT KEYS (locked) on the left, PAN / FINE on the right.
+    drawGroupLabel(850, 6, "SOFT KEYS");
+    drawLocked(850, 22, 32, 20, "V-POT");
+    drawLocked(886, 22, 26, 20, "1");
+    drawLocked(916, 22, 26, 20, "2");
+    drawLocked(850, 44, 32, 20, "3");
+    drawLocked(886, 44, 26, 20, "4");
+    drawLocked(916, 44, 26, 20, "5");
 
-    drawHwBtn(940, 22, 45, 20, ButtonId::Pan,  "PAN");
-    drawHwBtn(940, 44, 45, 20, ButtonId::Fine, "FINE");
+    drawHwBtn(945, 22, 40, 20, ButtonId::Pan,  "PAN");
+    drawHwBtn(945, 44, 40, 20, ButtonId::Fine, "FINE");
 
-    drawGroupLabel(856, 76, "SELECTION MODE");
-    drawLocked(855, 90,  40, 22, "NORM");
-    drawLocked(898, 90,  40, 22, "REC");
-    drawLocked(941, 90,  40, 22, "AUTO");
+    drawGroupLabel(852, 70, "SELECTION MODE");
+    drawLocked(852, 88,  43, 20, "NORM");
+    drawLocked(899, 88,  43, 20, "REC");
+    drawLocked(946, 88,  39, 20, "AUTO");
 
-    // CHANNEL encoder — large notched dial
+    // CHANNEL label sits ABOVE the encoder so it never collides with the
+    // NAV / NUDGE / FOCUS row beneath. Encoder shrunk slightly so the
+    // whole right column fits cleanly into the new 470 px canvas height.
+    drawGroupLabel(902, 120, "CHANNEL");
     {
-        constexpr float cx = 920, cy = 175, r = 38;
+        constexpr float cx = 918, cy = 168, r = 32;
         circle_(c, cx, cy, r,        0x14181EFF, 0x4A5060FF);
         circle_(c, cx, cy, r - 3,    0x252A33FF, 0x555A66FF);
         circle_(c, cx, cy, r * 0.78f, 0x383C44FF, 0x6A6E78FF);
-        // Top tick
         line_(c, cx, cy - r * 0.95f, cx, cy - r * 0.62f, 0xE0E0E0FF, 2.5);
-        // Notches around the circumference
         for (int k = 0; k < 24; ++k) {
             const float ang = (k / 24.0f) * 6.2831853f - 1.5707963f;
             const float r0 = r - 4, r1 = r - 1;
@@ -471,37 +483,38 @@ void drawUf8Vector(ImGui_Context* ctx, ButtonId& sel)
             const float y2 = cy + std::sin(ang) * r1;
             line_(c, x1, y1, x2, y2, 0x555A66FF, 1.0);
         }
-        drawTextCentered_(c, cx, cy + r + 11, 0x9CA0AAFF, "CHANNEL");
     }
 
-    drawHwBtn(855, 226, 40, 22, ButtonId::Nav,      "NAV");
-    drawHwBtn(898, 226, 40, 22, ButtonId::Nudge,    "NUDGE");
-    drawHwBtn(941, 226, 40, 22, ButtonId::EncFocus, "FOCUS");
+    // NAV / NUDGE / FOCUS — each button widened to 44 so all three labels
+    // breathe at the default font weight.
+    drawHwBtn(852, 210, 44, 22, ButtonId::Nav,      "NAV");
+    drawHwBtn(898, 210, 44, 22, ButtonId::Nudge,    "NUDGE");
+    drawHwBtn(944, 210, 41, 22, ButtonId::EncFocus, "FOCUS");
 
-    drawHwBtn(855, 252, 126, 18, ButtonId::ChannelPush, "ENCODER PUSH");
+    drawHwBtn(852, 236, 133, 18, ButtonId::ChannelPush, "ENCODER PUSH");
 
-    drawGroupLabel(884, 280, "BANK");
-    drawHwBtn(870, 292, 38, 22, ButtonId::BankLeft,  "\xE2\x97\x82");
-    drawHwBtn(922, 292, 38, 22, ButtonId::BankRight, "\xE2\x96\xB8");
+    drawGroupLabel(902, 264, "BANK");
+    drawHwBtn(870, 282, 42, 22, ButtonId::BankLeft,  "\xE2\x97\x82");
+    drawHwBtn(922, 282, 42, 22, ButtonId::BankRight, "\xE2\x96\xB8");
 
-    // Zoom pad — cross
+    // Zoom pad — cross. Shifted down to follow the encoder column.
     {
-        constexpr float cx = 920;
-        constexpr float baseY = 340;
-        drawHwBtn(cx - 15, baseY - 30, 30, 24, ButtonId::ZoomUp,
+        constexpr float cx = 918;
+        constexpr float baseY = 348;
+        drawHwBtn(cx - 17, baseY - 32, 34, 26, ButtonId::ZoomUp,
                   "\xE2\x96\xB2");
-        drawHwBtn(cx - 50, baseY,      30, 24, ButtonId::ZoomLeft,
+        drawHwBtn(cx - 54, baseY,      34, 26, ButtonId::ZoomLeft,
                   "\xE2\x97\x82");
-        drawHwBtn(cx - 15, baseY,      30, 24, ButtonId::ZoomCenter,
+        drawHwBtn(cx - 17, baseY,      34, 26, ButtonId::ZoomCenter,
                   "\xE2\x97\x8F");
-        drawHwBtn(cx + 20, baseY,      30, 24, ButtonId::ZoomRight,
+        drawHwBtn(cx + 20, baseY,      34, 26, ButtonId::ZoomRight,
                   "\xE2\x96\xB8");
-        drawHwBtn(cx - 15, baseY + 28, 30, 24, ButtonId::ZoomDown,
+        drawHwBtn(cx - 17, baseY + 32, 34, 26, ButtonId::ZoomDown,
                   "\xE2\x96\xBC");
     }
 
     // Brand line (silk-screen)
-    drawTextCentered_(c, 500, 438, 0x9CA0AAFF, "Solid State Logic");
+    drawTextCentered_(c, 500, 448, 0x9CA0AAFF, "Solid State Logic");
 }
 
 // Editor panel for the currently-selected button. Reads the binding
