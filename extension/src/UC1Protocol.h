@@ -310,6 +310,14 @@ std::vector<uint8_t> buildLcdSubHeader(std::string_view text);
 // item's current parameter value.
 std::vector<uint8_t> buildLcdValue(std::string_view text);
 
+// Round-indicator (yellow value-arc around the value field) position
+// frame. Decoded from uc1_37 EXT_FUNCS scroll. Frame:
+//   FF 66 04 0D <pos_lo> <pos_hi> <theme> CKSUM
+// Position is 12-bit (0..0xFFF) split across pos_lo and the lower 4
+// bits of pos_hi. Theme byte 0xC0 = yellow arc (the only value
+// observed so far). norm in [0,1] maps to 0..0xFFF.
+std::vector<uint8_t> buildLcdRoundIndicator(double norm);
+
 // 5-slot scrollable list rendered in the PRESETS browse subscreen
 // (and likely other menu drill-downs). Frame:
 //   FF 66 4C 06 <slot0 14B+\0> <slot1 14B+\0> <slot2 14B+\0>

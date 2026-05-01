@@ -347,6 +347,18 @@ std::vector<uint8_t> buildLcdValue(std::string_view text)
     return buildFrame(0x66, data);
 }
 
+std::vector<uint8_t> buildLcdRoundIndicator(double norm)
+{
+    if (norm < 0.0) norm = 0.0;
+    if (norm > 1.0) norm = 1.0;
+    const int pos = static_cast<int>(norm * 0xFFF + 0.5);
+    const uint8_t b0 = static_cast<uint8_t>(pos & 0xFF);
+    const uint8_t b1 = static_cast<uint8_t>((pos >> 8) & 0x0F);
+    const uint8_t b2 = 0xC0;  // theme byte — only value observed
+    const uint8_t data[4] = {0x0D, b0, b1, b2};
+    return buildFrame(0x66, data);
+}
+
 std::vector<uint8_t> buildPresetListScroll(std::string_view prev2,
                                            std::string_view prev1,
                                            std::string_view curr,

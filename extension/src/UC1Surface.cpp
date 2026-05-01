@@ -1407,13 +1407,20 @@ void UC1Surface::renderExtFuncsSubscreen_()
                     TrackFX_FormatParamValueNormalized(
                         static_cast<MediaTrack*>(focusedTrack_),
                         match.fxIndex, s.vst3Param, v, buf, sizeof(buf));
-                    // Truncate to a manageable display length; SSL360
-                    // splits unit into a separate frame but for v0 we
-                    // just push the full string (incl. unit) as one
-                    // value frame — most fit cleanly.
+                    // Strip the unit suffix (" dB", " Hz", " %"). User
+                    // 2026-05-01: round indicator displays the number
+                    // only — unit is implicit from the param name.
+                    // Take chars before the first space (or whole
+                    // string if no space). Trim leading whitespace
+                    // first so "+5.0 dB" stays as "+5.0".
                     std::string val{buf};
-                    if (val.size() > 12) val.resize(12);
+                    while (!val.empty() && val.front() == ' ') val.erase(0, 1);
+                    const size_t sp = val.find(' ');
+                    if (sp != std::string::npos) val.erase(sp);
+                    if (val.size() > 8) val.resize(8);
                     device_->send(buildLcdValue(val));
+                    // Round indicator (yellow arc around the value).
+                    device_->send(buildLcdRoundIndicator(v));
                     break;
                 }
             }
