@@ -714,6 +714,10 @@ REAIMGUIAPI_EXTERN ReaImGuiEnum ImGui_WindowFlags_NoResize REAIMGUIAPI_INIT("ImG
 REAIMGUIAPI_EXTERN ReaImGuiEnum ImGui_WindowFlags_NoScrollWithMouse REAIMGUIAPI_INIT("ImGui_WindowFlags_NoScrollWithMouse");
 REAIMGUIAPI_EXTERN ReaImGuiEnum ImGui_WindowFlags_NoScrollbar REAIMGUIAPI_INIT("ImGui_WindowFlags_NoScrollbar");
 REAIMGUIAPI_EXTERN ReaImGuiEnum ImGui_WindowFlags_NoTitleBar REAIMGUIAPI_INIT("ImGui_WindowFlags_NoTitleBar");
+// Patched 2026-05-01 — vendored header was missing this enum even though
+// the installed dylib exports it. Used by Rea-Sixty to keep ImGui from
+// persisting "previously closed" state for our window across toggles.
+REAIMGUIAPI_EXTERN ReaImGuiEnum ImGui_WindowFlags_NoSavedSettings REAIMGUIAPI_INIT("ImGui_WindowFlags_NoSavedSettings");
 REAIMGUIAPI_EXTERN ReaImGuiEnum ImGui_WindowFlags_None REAIMGUIAPI_INIT("ImGui_WindowFlags_None");
 REAIMGUIAPI_EXTERN ReaImGuiEnum ImGui_WindowFlags_UnsavedDocument REAIMGUIAPI_INIT("ImGui_WindowFlags_UnsavedDocument");
 

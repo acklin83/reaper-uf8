@@ -110,75 +110,86 @@ void MixerWindow::onRunTick()
     impl_->ensureCtx();
     if (!impl_->ctx) return;  // CreateContext failed (ReaImGui not installed?)
 
-    // ReaImGui v0.10 garbage-collects unused objects between defer
-    // cycles ("valid as long as it is used in each defer cycle unless
-    // attached to a context" — verified via the dylib's embedded docs).
-    // Skipping Begin/End on closed frames had the GC reap our context,
-    // so the next open silently rendered nothing. We now ALWAYS call
-    // Begin/End to keep the context "in use"; *p_open toggles whether
-    // the OS window is shown. End must follow Begin regardless.
-    //
-    // Pin a sane size + position on the very first frame the window
-    // becomes visible (Cond_Appearing reapplies on every closed→open),
-    // so a stuck-off-screen pose can't trap us.
-    int condAppearing = ImGui_Cond_Appearing;
+    // ReaImGui v0.10 GCs objects that don't get touched each defer
+    // cycle (the dylib's embedded docs spell it out: "valid as long as
+    // it is used in each defer cycle unless attached to a context").
+    // We must call into the context every tick or it dies; we must
+    // also call End() exactly once for each Begin() that returned true
+    // (modern ImGui rule, RAPID uses the same pattern). When the user
+    // wants the window hidden, we still tick the context but skip
+    // Begin entirely — that's fine because we ALSO touch the context
+    // through the SetNextWindowSize / SetNextWindowPos calls above
+    // and through ThemeBridge::pushAll, all of which count as "use".
+    int condFirst = ImGui_Cond_FirstUseEver;
     ImGui_SetNextWindowSize(impl_->ctx, /*w*/ 1100, /*h*/ 760,
-                            &condAppearing);
+                            &condFirst);
     ImGui_SetNextWindowPos(impl_->ctx, /*x*/ 80, /*y*/ 80,
-                           &condAppearing, /*pivot_x*/ nullptr,
+                           &condFirst, /*pivot_x*/ nullptr,
                            /*pivot_y*/ nullptr);
 
     const int pushed = ThemeBridge::pushAll(impl_->ctx);
 
-    // Window display title is just "Rea-Sixty"; the "##session_N"
-    // suffix is the ImGui id-only tail and bumps every closed→open so
-    // each session is a brand-new ImGui window. Together with always-
-    // Begin this gives a clean re-open path even after the user closes
-    // via the title bar X.
+    // NoSavedSettings tells ImGui not to persist closed/collapsed/
+    // off-screen pose for this window across toggles — without it,
+    // a single X-click leaves the window's "open=false" state stuck
+    // in ImGui's internal storage on the same id, so the very next
+    // *p_open=true couldn't override and the window silently failed
+    // to reopen. Combined with the per-session id suffix this gives
+    // a guaranteed-fresh window every open.
+    int winFlags = ImGui_WindowFlags_NoSavedSettings;
     char winId[64];
     std::snprintf(winId, sizeof(winId),
                   "Rea-Sixty##session_%d", impl_->sessionGen);
     bool open = impl_->visible;
-    if (ImGui_Begin(impl_->ctx, winId, &open, /*flags*/ nullptr)
-        && impl_->visible) {
-
-        // -- Left rail: section list -------------------------------------
-        double railW = kRailWidthPx;
-        if (ImGui_BeginChild(impl_->ctx, "rail", &railW, /*size_h*/ nullptr,
-                             /*border*/ nullptr, /*flags*/ nullptr)) {
-            for (const RailEntry& e : kRail) {
-                if (e.separatorBefore) ImGui_Separator(impl_->ctx);
-                bool isSelected = (impl_->selected == e.section);
-                if (ImGui_Selectable(impl_->ctx, e.label, &isSelected,
-                                     /*flags*/ nullptr,
-                                     /*size_w*/ nullptr, /*size_h*/ nullptr)) {
-                    impl_->selected = e.section;
+    if (impl_->visible) {
+        // Modern ImGui idiom: call End() ONLY when Begin() returned
+        // true. RAPID uses the same pattern. Begin's body still
+        // renders only if visible was true on entry; we don't need
+        // the extra `&& impl_->visible` guard because we already
+        // skip Begin entirely in the !visible branch.
+        if (ImGui_Begin(impl_->ctx, winId, &open, &winFlags)) {
+            // -- Left rail: section list ---------------------------------
+            double railW = kRailWidthPx;
+            if (ImGui_BeginChild(impl_->ctx, "rail", &railW,
+                                 /*size_h*/ nullptr, /*border*/ nullptr,
+                                 /*flags*/ nullptr)) {
+                for (const RailEntry& e : kRail) {
+                    if (e.separatorBefore) ImGui_Separator(impl_->ctx);
+                    bool isSelected = (impl_->selected == e.section);
+                    if (ImGui_Selectable(impl_->ctx, e.label, &isSelected,
+                                         /*flags*/ nullptr,
+                                         /*size_w*/ nullptr,
+                                         /*size_h*/ nullptr)) {
+                        impl_->selected = e.section;
+                    }
                 }
             }
-        }
-        ImGui_EndChild(impl_->ctx);
+            ImGui_EndChild(impl_->ctx);
 
-        ImGui_SameLine(impl_->ctx, /*offset_from_start_x*/ nullptr,
-                       /*spacing*/ nullptr);
+            ImGui_SameLine(impl_->ctx, /*offset_from_start_x*/ nullptr,
+                           /*spacing*/ nullptr);
 
-        // -- Right content pane ------------------------------------------
-        if (ImGui_BeginChild(impl_->ctx, "content", /*size_w*/ nullptr,
-                             /*size_h*/ nullptr, /*border*/ nullptr,
-                             /*flags*/ nullptr)) {
-            for (const RailEntry& e : kRail) {
-                if (e.section == impl_->selected) { e.draw(impl_->ctx); break; }
+            // -- Right content pane --------------------------------------
+            if (ImGui_BeginChild(impl_->ctx, "content", /*size_w*/ nullptr,
+                                 /*size_h*/ nullptr, /*border*/ nullptr,
+                                 /*flags*/ nullptr)) {
+                for (const RailEntry& e : kRail) {
+                    if (e.section == impl_->selected) {
+                        e.draw(impl_->ctx);
+                        break;
+                    }
+                }
             }
+            ImGui_EndChild(impl_->ctx);
+
+            ImGui_End(impl_->ctx);
         }
-        ImGui_EndChild(impl_->ctx);
+        // Mirror ImGui's title-bar X click back to our flag so the
+        // next 360 toggle correctly moves false→true.
+        impl_->visible = open;
     }
-    ImGui_End(impl_->ctx);
 
     ThemeBridge::popAll(impl_->ctx, pushed);
-
-    // X-click in the title bar sets *p_open=false during Begin. Mirror
-    // back to our visibility flag so the next 360-toggle correctly
-    // moves false→true.
-    impl_->visible = open;
 }
 
 } // namespace uf8
