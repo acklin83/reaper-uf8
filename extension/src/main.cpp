@@ -3732,6 +3732,72 @@ custom_action_register_t g_actionFrameTrace{
 };
 int g_cmdFrameTrace = 0;
 
+// Diagnostic: poll a battery of TrackFX_GetNamedConfigParm candidate
+// names against the focused track's CS plug-in and dump the returned
+// values to the REAPER console. Used to find the data source for Gate
+// GR (currently no known parmname; SSL CS2 only documents combined
+// "GainReduction_dB"). User runs the action while moving the Gate
+// Range knob — whichever name returns a non-zero value that varies
+// with Range is our Gate GR API.
+void probeGateGrSources()
+{
+    MediaTrack* tr = GetSelectedTrack(nullptr, 0);
+    if (!tr) {
+        ShowConsoleMsg("Gate-GR probe: no selected track\n");
+        return;
+    }
+    auto match = uf8::lookupPluginOnTrack(tr, uf8::Domain::ChannelStrip);
+    if (!match.map) {
+        ShowConsoleMsg("Gate-GR probe: focused track has no CS plug-in\n");
+        return;
+    }
+    // Candidate parmnames — PreSonus VST3 conventions + likely SSL
+    // extensions. Anything that returns a non-empty buffer is logged.
+    static constexpr const char* kCandidates[] = {
+        "GainReduction_dB",
+        "GateReduction_dB",
+        "GateGainReduction_dB",
+        "GateGR_dB",
+        "GR_dB",
+        "GR_Gate_dB",
+        "GainReductionGate_dB",
+        "Gate_dB",
+        "ExpReduction_dB",
+        "ExpansionReduction_dB",
+        "GateAttenuation_dB",
+        "InputGainReduction_dB",
+        "OutputGainReduction_dB",
+        "ParamValue_GateRange",
+        "GateRangeApplied_dB",
+    };
+    char header[128];
+    std::snprintf(header, sizeof(header),
+        "Gate-GR probe — track=%s fx=%d\n",
+        match.map->displayShort, match.fxIndex);
+    ShowConsoleMsg(header);
+    char buf[128];
+    for (auto* name : kCandidates) {
+        buf[0] = '\0';
+        const bool ok = TrackFX_GetNamedConfigParm(
+            tr, match.fxIndex, name, buf, sizeof(buf));
+        char line[256];
+        if (ok) {
+            std::snprintf(line, sizeof(line),
+                "  [%s] = %s\n", name, buf);
+        } else {
+            std::snprintf(line, sizeof(line),
+                "  [%s] not exposed\n", name);
+        }
+        ShowConsoleMsg(line);
+    }
+}
+
+custom_action_register_t g_actionProbeGateGr{
+    0, "REASIXTY_PROBE_GATE_GR",
+    "Rea-Sixty: Probe Gate GR sources on focused CS plug-in", nullptr,
+};
+int g_cmdProbeGateGr = 0;
+
 // hookcommand2 is the correct hook for custom_action dispatch per SDK
 // note at reaper_plugin.h:1086. hookcommand (v1) only catches actions
 // triggered via menu/keyboard, not custom_action registered entries.
@@ -3745,6 +3811,7 @@ bool hookCommand2(KbdSectionInfo* /*sec*/, int command,
     if (command == g_cmdProbeLed)       { probeNextLedCell();       return true; }
     if (command == g_cmdProbeLegacyLed) { probeNextLegacyLedCell(); return true; }
     if (command == g_cmdFrameTrace)     { toggleFrameTrace();       return true; }
+    if (command == g_cmdProbeGateGr)    { probeGateGrSources();     return true; }
     return false;
 }
 
@@ -3810,6 +3877,7 @@ extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(
     g_cmdProbeLed       = plugin_register("custom_action", &g_actionProbeLed);
     g_cmdProbeLegacyLed = plugin_register("custom_action", &g_actionProbeLegacyLed);
     g_cmdFrameTrace     = plugin_register("custom_action", &g_actionFrameTrace);
+    g_cmdProbeGateGr    = plugin_register("custom_action", &g_actionProbeGateGr);
     plugin_register("hookcommand2", reinterpret_cast<void*>(hookCommand2));
 
     return 1;
