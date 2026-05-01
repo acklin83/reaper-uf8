@@ -304,6 +304,12 @@ std::vector<uint8_t> buildLcdHeader(std::string_view text);
 // format otherwise: FF 66 <len> 07 <text> CKSUM.
 std::vector<uint8_t> buildLcdSubHeader(std::string_view text);
 
+// Value-text frame rendered next to the item's name in EXT_FUNCS list.
+// Frame: FF 66 <len> 0E <text> CKSUM. Decoded from uc1_37 EXT_FUNCS
+// scroll: SSL360 sends "On", "20.0", "+35", etc. for each scrolled
+// item's current parameter value.
+std::vector<uint8_t> buildLcdValue(std::string_view text);
+
 // 5-slot scrollable list rendered in the PRESETS browse subscreen
 // (and likely other menu drill-downs). Frame:
 //   FF 66 4C 06 <slot0 14B+\0> <slot1 14B+\0> <slot2 14B+\0>

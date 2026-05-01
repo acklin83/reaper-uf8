@@ -336,6 +336,17 @@ std::vector<uint8_t> buildLcdSubHeader(std::string_view text)
     return buildFrame(0x66, data);
 }
 
+std::vector<uint8_t> buildLcdValue(std::string_view text)
+{
+    // FF 66 <len> 0E <text> CKSUM. Used in EXT_FUNCS scroll to show
+    // each item's current parameter value left of the name.
+    std::vector<uint8_t> data;
+    data.reserve(1 + text.size());
+    data.push_back(0x0E);
+    for (char c : text) data.push_back(static_cast<uint8_t>(c));
+    return buildFrame(0x66, data);
+}
+
 std::vector<uint8_t> buildPresetListScroll(std::string_view prev2,
                                            std::string_view prev1,
                                            std::string_view curr,

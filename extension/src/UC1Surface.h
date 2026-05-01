@@ -234,6 +234,11 @@ private:
     // EXT_FUNCS scroll cursor — index into the kExtFuncs list (defined
     // inline in UC1Surface.cpp). Reset to 0 on every entry to EXT_FUNCS.
     int            extFuncsIdx_ = 0;
+    // EXT_FUNCS adjust state. False = scrolling list (encoder rotation
+    // cycles cursor); true = parameter is "live" (encoder rotation
+    // changes the param value via TrackFX_SetParamNormalized). Toggled
+    // by Sec-Encoder push.
+    bool           extFuncsActive_ = false;
 
     std::mutex               queueMu_;
     std::deque<ButtonEvent>  buttonQueue_;

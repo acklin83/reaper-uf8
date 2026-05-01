@@ -321,10 +321,46 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
         static std::chrono::steady_clock::time_point extLastT{};
         const int step = stepFromAccumulator(extAcc, extLastT, 3);
         if (step == 0) { ++stats_.knobEventsHandled; return; }
-        // Wrap to match SSL360's continuous-scroll feel.
-        extFuncsIdx_ += step;
-        while (extFuncsIdx_ < 0)              extFuncsIdx_ += kExtFuncsCount;
-        while (extFuncsIdx_ >= kExtFuncsCount) extFuncsIdx_ -= kExtFuncsCount;
+        if (!extFuncsActive_) {
+            // Inactive (list) mode — rotate cursor with wrap.
+            extFuncsIdx_ += step;
+            while (extFuncsIdx_ < 0)               extFuncsIdx_ += kExtFuncsCount;
+            while (extFuncsIdx_ >= kExtFuncsCount) extFuncsIdx_ -= kExtFuncsCount;
+            renderExtFuncsSubscreen_();
+            ++stats_.knobEventsHandled;
+            return;
+        }
+        // Active (adjust) mode — change the focused item's param value.
+        if (!focusedTrack_) {
+            ++stats_.knobEventsHandled;
+            return;
+        }
+        auto match = uf8::lookupPluginOnTrack(focusedTrack_,
+                                              uf8::Domain::ChannelStrip);
+        if (!match.map) {
+            ++stats_.knobEventsHandled;
+            return;
+        }
+        const auto& cur = kExtFuncs[extFuncsIdx_];
+        for (const auto& s : match.map->slots) {
+            if (!s.id || std::strcmp(s.id, cur.slotId) != 0) continue;
+            if (s.vst3Param < 0) break;
+            const double curN = TrackFX_GetParamNormalized(
+                static_cast<MediaTrack*>(focusedTrack_),
+                match.fxIndex, s.vst3Param);
+            // 1% per detent; Fine modifier shrinks to 0.1%. Toggles
+            // and stepped enums snap to their nearest values via the
+            // plug-in's quantisation.
+            const double scale = fineMode_.load(std::memory_order_relaxed)
+                                   ? 0.001 : 0.01;
+            double next = curN + step * scale;
+            if (next < 0.0) next = 0.0;
+            if (next > 1.0) next = 1.0;
+            TrackFX_SetParamNormalized(
+                static_cast<MediaTrack*>(focusedTrack_),
+                match.fxIndex, s.vst3Param, next);
+            break;
+        }
         renderExtFuncsSubscreen_();
         ++stats_.knobEventsHandled;
         return;
@@ -791,6 +827,7 @@ void UC1Surface::handleButton_(const ButtonEvent& ev)
         if (m == Uc1Mode::Presets) renderPresetsSubscreen_();
         if (m == Uc1Mode::ExtFuncs) {
             extFuncsIdx_ = 0;
+            extFuncsActive_ = false;  // always start in list mode
             renderExtFuncsSubscreen_();
         }
     };
@@ -884,7 +921,14 @@ void UC1Surface::handleButton_(const ButtonEvent& ev)
                         setMode(Uc1Mode::Main);
                     }
                     break;
-                case Uc1Mode::ExtFuncs:  /* Phase B: toggle scroll/adjust */ break;
+                case Uc1Mode::ExtFuncs:
+                    // Toggle list / active (= adjust). Renders the
+                    // value frame regardless — list-mode also shows
+                    // the current value, active-mode just makes the
+                    // encoder rotate the value instead of scrolling.
+                    extFuncsActive_ = !extFuncsActive_;
+                    renderExtFuncsSubscreen_();
+                    break;
                 case Uc1Mode::Routing:   /* nop */ break;
             }
             ++stats_.buttonEventsHandled;
@@ -1337,12 +1381,39 @@ void UC1Surface::renderExtFuncsSubscreen_()
     const auto& cur = kExtFuncs[idx];
     const auto& prev = kExtFuncs[(idx - 1 + kExtFuncsCount) % kExtFuncsCount];
     const auto& next = kExtFuncs[(idx + 1) % kExtFuncsCount];
-    // Frame sequence per uc1_37 EXT_FUNCS scroll: header (long label)
-    // + 3-slot triple (prev/curr/next short labels) + commit. Banner
-    // 0x06 already set by setMode().
     device_->send(buildLcdHeader(cur.longLabel));
     device_->send(buildTrackNameTripleLarge(prev.shortLabel,
         cur.shortLabel, next.shortLabel));
+    // Read the current item's parameter value via PluginMap slot
+    // lookup → TrackFX_FormatParamValueNormalized. Display in the
+    // value field (FF 66 <len> 0E). Skip silently if no plug-in /
+    // entry isn't on the focused plug-in.
+    if (focusedTrack_) {
+        auto match = uf8::lookupPluginOnTrack(focusedTrack_,
+                                              uf8::Domain::ChannelStrip);
+        if (match.map) {
+            for (const auto& s : match.map->slots) {
+                if (s.id && std::strcmp(s.id, cur.slotId) == 0
+                         && s.vst3Param >= 0) {
+                    char buf[64] = {};
+                    const double v = TrackFX_GetParamNormalized(
+                        static_cast<MediaTrack*>(focusedTrack_),
+                        match.fxIndex, s.vst3Param);
+                    TrackFX_FormatParamValueNormalized(
+                        static_cast<MediaTrack*>(focusedTrack_),
+                        match.fxIndex, s.vst3Param, v, buf, sizeof(buf));
+                    // Truncate to a manageable display length; SSL360
+                    // splits unit into a separate frame but for v0 we
+                    // just push the full string (incl. unit) as one
+                    // value frame — most fit cleanly.
+                    std::string val{buf};
+                    if (val.size() > 12) val.resize(12);
+                    device_->send(buildLcdValue(val));
+                    break;
+                }
+            }
+        }
+    }
     device_->send(buildMenuCommit());
 }
 
