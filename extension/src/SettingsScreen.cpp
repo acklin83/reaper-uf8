@@ -1,6 +1,17 @@
 #include "SettingsScreen.h"
 
+#include <cstdio>
+
 #include "reaper_imgui_functions.h"
+
+// Forward declarations of accessors defined in main.cpp. Same pattern as
+// reasixty_followSelectedInMixer / reasixty_toggleMixerWindow — keeps the
+// anonymous-namespace globals owned by main.cpp while letting the UI read
+// runtime state. Called only from the main thread (via onTimer → ImGui).
+bool reasixty_uf8Connected();
+bool reasixty_uc1Connected();
+int  reasixty_brightnessLevel();
+void reasixty_setBrightnessLevel(int level);
 
 namespace uf8 {
 
@@ -21,12 +32,49 @@ namespace uf8 {
 //     recent extension log, USB device tree.
 void SettingsScreen::drawDevice(ImGui_Context* ctx)
 {
-    ImGui_Text(ctx, "Device");
-    ImGui_Text(ctx, "  TODO: connected-device list (serial #, USB status dot, drag-to-reorder)");
-    ImGui_Text(ctx, "  TODO: Identify Unit button per device (LCD flash via existing frame protocol)");
-    ImGui_Text(ctx, "  TODO: LED brightness slider (writes global-brightness frame)");
-    ImGui_Text(ctx, "  TODO: scribble brightness slider");
-    ImGui_Text(ctx, "  TODO: meter ballistic selector (PPM/VU/RMS)");
+    ImGui_Text(ctx, "Connected devices");
+    ImGui_Separator(ctx);
+
+    char line[64];
+    std::snprintf(line, sizeof(line), "  UF8   %s",
+                  reasixty_uf8Connected() ? "[connected]" : "[not connected]");
+    ImGui_Text(ctx, line);
+    std::snprintf(line, sizeof(line), "  UC1   %s",
+                  reasixty_uc1Connected() ? "[connected]" : "[not connected]");
+    ImGui_Text(ctx, line);
+
+    ImGui_Spacing(ctx);
+    ImGui_Spacing(ctx);
+
+    ImGui_Text(ctx, "Brightness");
+    ImGui_Separator(ctx);
+
+    // 5 SSL-equivalent steps: dark / dim / half / bright / full.
+    // SliderInt's required pointer args (vInOut, v_min, v_max) match the
+    // v0.10 ABI as-is — verified via `nm | c++filt`. Format string omitted
+    // (the optional pointer arg) because we render the level name below.
+    int level = reasixty_brightnessLevel();
+    if (ImGui_SliderInt(ctx, "##brightness", &level,
+                        /*v_min*/ 0, /*v_max*/ 4,
+                        /*format*/ nullptr, /*flags*/ nullptr)) {
+        reasixty_setBrightnessLevel(level);
+    }
+    static const char* kLevelNames[5] = {
+        "Dark", "Dim", "Half", "Bright", "Full"
+    };
+    if (level >= 0 && level <= 4) {
+        std::snprintf(line, sizeof(line), "  %s", kLevelNames[level]);
+        ImGui_Text(ctx, line);
+    }
+
+    ImGui_Spacing(ctx);
+    ImGui_Spacing(ctx);
+    ImGui_Text(ctx, "Pending");
+    ImGui_Separator(ctx);
+    ImGui_Text(ctx, "  TODO: serial # + drag-to-reorder for multi-UF8 setups");
+    ImGui_Text(ctx, "  TODO: Identify Unit button per device (LCD flash)");
+    ImGui_Text(ctx, "  TODO: separate scribble-strip brightness");
+    ImGui_Text(ctx, "  TODO: meter ballistic selector (PPM / VU / RMS)");
     ImGui_Text(ctx, "  TODO: SEL-follows-track-color toggle");
     ImGui_Text(ctx, "  TODO: Export Diagnostic Report button (.zip to Desktop)");
 }

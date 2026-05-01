@@ -4059,6 +4059,35 @@ void reasixty_toggleMixerWindow()
     g_mixerToggleRequest.store(true);
 }
 
+// Settings-screen accessors. SettingsScreen.cpp is a separate TU and
+// must not reach into the anonymous-namespace globals directly; these
+// wrappers are the only legal hook into runtime state from the UI side.
+// All called from the main thread (onTimer → ImGui → these), so plain
+// non-atomic loads are fine where the underlying state is atomic anyway.
+
+bool reasixty_uf8Connected()
+{
+    return g_dev && g_dev->isOpen();
+}
+
+bool reasixty_uc1Connected()
+{
+    return g_uc1_dev && g_uc1_dev->isOpen();
+}
+
+int reasixty_brightnessLevel()
+{
+    return g_brightness.load();
+}
+
+void reasixty_setBrightnessLevel(int level)
+{
+    if (level < BL_Dark) level = BL_Dark;
+    if (level > BL_Full) level = BL_Full;
+    g_brightness.store(level);
+    applyBrightness();
+}
+
 extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(
     REAPER_PLUGIN_HINSTANCE hInstance, reaper_plugin_info_t* rec)
 {
