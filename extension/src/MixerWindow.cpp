@@ -100,7 +100,18 @@ void MixerWindow::toggle()
 {
     const bool wasOpen = impl_->visible;
     impl_->visible = !wasOpen;
-    if (impl_->visible) ++impl_->sessionGen;
+    if (impl_->visible) {
+        ++impl_->sessionGen;
+        // Drop the old context pointer so ensureCtx() creates a brand
+        // new ImGui_Context on the next onRunTick. ReaImGui v0.10 GCs
+        // contexts that go unused for a defer cycle (per its embedded
+        // docs), so the orphaned previous context cleans up on its
+        // own — we don't have DestroyContext available in v0.10. A
+        // fresh ctx per open guarantees zero state carry-over from
+        // any prior session: no remembered id-stack, no stale window
+        // pose, no half-popped style stack.
+        impl_->ctx = nullptr;
+    }
 }
 
 bool MixerWindow::isOpen() const { return impl_->visible; }
