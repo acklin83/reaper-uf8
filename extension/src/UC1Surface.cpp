@@ -281,6 +281,59 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
         return;
     }
 
+    // BC encoder — context-dependent on UC1 Mode (User Guide p.18-21):
+    //   * MAIN     → jump to next/prev BC-bearing track (BC anchor scroll).
+    //   * PRESETS  → live-preview navigate the focused CS plug-in's
+    //                preset list one preset per detent.
+    //   * ROUTING  → cycle the SSL routing-order chunk attribute (A3, TBD).
+    //   * EXT_FUNCS→ scroll/adjust the Extended Functions menu (Phase B).
+    //   * TRANSPORT→ scrub the playhead (A2, TBD — needs encoder-push id).
+    if (ev.id == knob::kBcEncoder && mode_ == Uc1Mode::Presets) {
+        static int presetAcc = 0;
+        static std::chrono::steady_clock::time_point presetLastT{};
+        const int step = stepFromAccumulator(presetAcc, presetLastT, 3);
+        if (step == 0) { ++stats_.knobEventsHandled; return; }
+        if (!focusedTrack_) {
+            ++stats_.knobEventsHandled;
+            return;
+        }
+        // Default to the focused track's CS plug-in. CS/BC subselector
+        // (manual p.20 — "Push to Confirm | CHANNEL STRIP / BUS COMP")
+        // is deferred — most preset use is on the channel strip plug-in
+        // anyway. Fall back to BC if no CS is loaded.
+        auto match = uf8::lookupPluginOnTrack(focusedTrack_,
+                                              uf8::Domain::ChannelStrip);
+        if (!match.map) {
+            match = uf8::lookupPluginOnTrack(focusedTrack_,
+                                             uf8::Domain::BusComp);
+        }
+        if (!match.map) {
+            ShowConsoleMsg("UC1 Presets: focused track has no SSL plug-in\n");
+            ++stats_.knobEventsHandled;
+            return;
+        }
+        // Walk preset list `step` times. NavigatePresets loads each
+        // intermediate preset (REAPER doesn't expose a name-only read
+        // of the next preset without loading) — that's the live-preview
+        // model the SSL360 Presets UX uses anyway.
+        const int dir = step > 0 ? 1 : -1;
+        const int abs = step > 0 ? step : -step;
+        for (int k = 0; k < abs; ++k) {
+            TrackFX_NavigatePresets(static_cast<MediaTrack*>(focusedTrack_),
+                                    match.fxIndex, dir);
+        }
+        char name[128] = {};
+        TrackFX_GetPreset(static_cast<MediaTrack*>(focusedTrack_),
+                          match.fxIndex, name, sizeof(name));
+        char line[160];
+        std::snprintf(line, sizeof(line),
+            "UC1 Preset: %s (%s)\n",
+            name[0] ? name : "<no name>", match.map->displayShort);
+        ShowConsoleMsg(line);
+        ++stats_.knobEventsHandled;
+        return;
+    }
+
     // BC encoder — jump to the next/prev track (relative to the
     // current BC anchor) that has a plugin targeted by the Bus-Comp
     // section. "Next" = first BC track whose project index is
@@ -572,7 +625,31 @@ void UC1Surface::handleButton_(const ButtonEvent& ev)
                 case Uc1Mode::Main:      /* nop */ break;
                 case Uc1Mode::ExtFuncs:  /* B: confirm selection */ break;
                 case Uc1Mode::Routing:   /* nop */ break;
-                case Uc1Mode::Presets:   /* A4: load preset */ break;
+                case Uc1Mode::Presets:
+                    // Live-preview model: every encoder detent already
+                    // loaded the preset. Confirm = "I'll keep this one,
+                    // back to MAIN."
+                    if (focusedTrack_) {
+                        auto match = uf8::lookupPluginOnTrack(
+                            focusedTrack_, uf8::Domain::ChannelStrip);
+                        if (!match.map) {
+                            match = uf8::lookupPluginOnTrack(
+                                focusedTrack_, uf8::Domain::BusComp);
+                        }
+                        if (match.map) {
+                            char name[128] = {};
+                            TrackFX_GetPreset(
+                                static_cast<MediaTrack*>(focusedTrack_),
+                                match.fxIndex, name, sizeof(name));
+                            char line[160];
+                            std::snprintf(line, sizeof(line),
+                                "UC1 Preset confirmed: %s\n",
+                                name[0] ? name : "<no name>");
+                            ShowConsoleMsg(line);
+                        }
+                    }
+                    setMode(Uc1Mode::Main);
+                    break;
                 case Uc1Mode::Transport: /* A2: PLAY via REAPER action */ break;
             }
             ++stats_.buttonEventsHandled;
