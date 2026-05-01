@@ -59,7 +59,6 @@ struct MixerWindow::Impl {
     // ReaImGui closes the OS window. Re-toggling resumes drawing.
     ImGui_Context* ctx = nullptr;
     bool           visible = false;
-    bool           focusOnNext = false;   // request ImGui to raise window
     int            selected = kSecMixer;
 
     void ensureCtx()
@@ -84,12 +83,6 @@ MixerWindow::~MixerWindow() { delete impl_; }
 void MixerWindow::toggle()
 {
     impl_->visible = !impl_->visible;
-    // Coming OUT of "closed": next onRunTick must explicitly raise the
-    // ReaImGui window so the OS-side window actually appears. Without
-    // SetNextWindowFocus, re-Begin'ing after a frame skip silently
-    // no-op'd in v0.10 — the original "360 toggle dies after one
-    // open/close cycle" bug.
-    if (impl_->visible) impl_->focusOnNext = true;
 }
 
 bool MixerWindow::isOpen() const { return impl_->visible; }
@@ -100,13 +93,14 @@ void MixerWindow::onRunTick()
     impl_->ensureCtx();
     if (!impl_->ctx) return;  // CreateContext failed (ReaImGui not installed?)
 
-    // After a closed→open transition, explicitly raise the window so
-    // ReaImGui v0.10 re-creates / focuses the OS-side window. Without
-    // this, the second toggle-on after a previous close silently
-    // no-op'd visually.
-    if (impl_->focusOnNext) {
-        ImGui_SetNextWindowFocus(impl_->ctx);
-        impl_->focusOnNext = false;
+    // Force a sane size on first appearance so ReaImGui's persisted-pos
+    // state (left over from earlier sessions / a smaller schematic)
+    // can't trap the window off-screen or at zero size. Cond_FirstUseEver
+    // means user-driven resizes are still respected after the first show.
+    {
+        int condFirst = ImGui_Cond_FirstUseEver;
+        ImGui_SetNextWindowSize(impl_->ctx, /*w*/ 1100, /*h*/ 760,
+                                &condFirst);
     }
 
     const int pushed = ThemeBridge::pushAll(impl_->ctx);
