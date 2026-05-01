@@ -557,17 +557,26 @@ std::array<std::vector<uint8_t>, 2> buildSelColour(uint8_t strip, uint8_t byteA,
 }
 
 // Cell + colour table for global UF8 buttons. Decoded in cap35 + cap36.
-// Buttons that are plain white use only 'on' colour with off=`11 F1` dim.
-// Buttons with a custom colour use that colour for ON and the same dim
-// off pattern (firmware appears to ignore colour when both bytes are
-// the dim sentinel, so we don't need per-button OFF colours).
+// Each global LED stores a full LedColour (bright AND dim byte pairs)
+// — same encoding as the SEL DAW-Colour palette. Dim mode preserves the
+// hue at low intensity instead of falling back to white-dim, so e.g.
+// inactive AutoRead stays green, inactive AutoTouch stays yellow.
+// Plain-white buttons just store the universal white-dim sentinel.
+//
+// Bright/dim byte pairs are derived from `kSelPalette` (Protocol.cpp).
 namespace {
 struct Uf8GlobalLedDef {
-    uint8_t cell;
-    uint8_t aBright;
-    uint8_t bBright;
-    bool    legacy = false;  // true → use FF 3B 03 mono frame (Send/Plugin row)
+    uint8_t   cell;
+    LedColour colour;
+    bool      legacy = false;  // true → use FF 3B 03 mono frame (Send/Plugin row)
 };
+// Colour shorthands — dim variants from `kSelPalette` so each colour
+// keeps its hue at low intensity rather than falling back to white-dim.
+constexpr LedColour kColourWhite  {0xFF, 0xFF, 0x11, 0xF1};
+constexpr LedColour kColourGreen  {0xF0, 0xF0, 0x10, 0xF0};
+constexpr LedColour kColourRed    {0x0F, 0xF0, 0x01, 0xF0};
+constexpr LedColour kColourOrange {0x3F, 0xF0, 0x12, 0xF0};
+constexpr LedColour kColourYellow {0xEF, 0xF0, 0x11, 0xF0};
 constexpr Uf8GlobalLedDef kUf8GlobalLedTable[] = {
     // Layer / Quick / 360 cells fully confirmed via probe 2026-04-30:
     // physical button order along the row (left → right) is
@@ -576,61 +585,61 @@ constexpr Uf8GlobalLedDef kUf8GlobalLedTable[] = {
     // — descending button-position vs ascending cell-id. Earlier
     // cap35/36 decoding put Layer 1/2 at 0x39/0x3A which turned out
     // to be 360/Quick3.
-    /* Layer1       */ {0x3F, 0xFF, 0xFF},
-    /* Layer2       */ {0x3E, 0xFF, 0xFF},
-    /* Layer3       */ {0x3D, 0xFF, 0xFF},
-    /* Quick1       */ {0x3C, 0xFF, 0xFF},
-    /* Quick2       */ {0x3B, 0xFF, 0xFF},
-    /* Quick3       */ {0x3A, 0xFF, 0xFF},
-    /* Channel      */ {0x2E, 0xFF, 0xFF},
-    /* Btn360       */ {0x39, 0xFF, 0xFF},
+    /* Layer1       */ {0x3F, kColourWhite},
+    /* Layer2       */ {0x3E, kColourWhite},
+    /* Layer3       */ {0x3D, kColourWhite},
+    /* Quick1       */ {0x3C, kColourWhite},
+    /* Quick2       */ {0x3B, kColourWhite},
+    /* Quick3       */ {0x3A, kColourWhite},
+    /* Channel      */ {0x2E, kColourWhite},
+    /* Btn360       */ {0x39, kColourWhite},
     // Send/Plugin 1..8 row uses the legacy mono-LED path (FF 3B 03 <id>
     // 00 <state>) — verified via probe 2026-04-30. Cells 0x37 (SP1) →
     // 0x30 (SP8), so id descends as button index ascends. The colour-pair
     // FF 38/39 04 family does not address these LEDs at all.
-    /* SendPlugin1  */ {0x37, 0xFF, 0xFF, true},
-    /* SendPlugin2  */ {0x36, 0xFF, 0xFF, true},
-    /* SendPlugin3  */ {0x35, 0xFF, 0xFF, true},
-    /* SendPlugin4  */ {0x34, 0xFF, 0xFF, true},
-    /* SendPlugin5  */ {0x33, 0xFF, 0xFF, true},
-    /* SendPlugin6  */ {0x32, 0xFF, 0xFF, true},
-    /* SendPlugin7  */ {0x31, 0xFF, 0xFF, true},
-    /* SendPlugin8  */ {0x30, 0xFF, 0xFF, true},
-    /* Plugin       */ {0x2F, 0xFF, 0xFF, true},   // 3-state legacy LED
+    /* SendPlugin1  */ {0x37, kColourWhite, true},
+    /* SendPlugin2  */ {0x36, kColourWhite, true},
+    /* SendPlugin3  */ {0x35, kColourWhite, true},
+    /* SendPlugin4  */ {0x34, kColourWhite, true},
+    /* SendPlugin5  */ {0x33, kColourWhite, true},
+    /* SendPlugin6  */ {0x32, kColourWhite, true},
+    /* SendPlugin7  */ {0x31, kColourWhite, true},
+    /* SendPlugin8  */ {0x30, kColourWhite, true},
+    /* Plugin       */ {0x2F, kColourWhite, true},   // 3-state legacy LED
     // Page Left / Page Right both 3-state LEDs (off/dim/bright) requiring
     // colour-pair + legacy mono frames together — verified via cap48
     // 2026-04-30. PageRight at 0x2C was never lit by colour-pair alone in
     // the probe sweeps because SSL360 always primes with the legacy frame.
-    /* PageLeft     */ {0x2D, 0xFF, 0xFF, true},
-    /* PageRight    */ {0x2C, 0xFF, 0xFF, true},
-    /* Flip         */ {0x2B, 0xFF, 0xFF},
-    /* AutoOff      */ {0x27, 0xFF, 0xFF},  // confirmed via probe 2026-04-30
-    /* AutoRead     */ {0x26, 0xF0, 0xF0},  // green
-    /* AutoWrite    */ {0x25, 0x0F, 0xF0},  // red
-    /* AutoTrim     */ {0x24, 0x3F, 0xF0},  // orange
-    /* AutoLatch    */ {0x23, 0x0F, 0xF0},  // red
-    /* AutoTouch    */ {0x22, 0xEF, 0xF0},  // yellow
-    /* VPotBank     */ {0x5F, 0xFF, 0xFF},
-    /* Soft1        */ {0x5E, 0xFF, 0xFF},
-    /* Soft2        */ {0x5D, 0xFF, 0xFF},
-    /* Soft3        */ {0x5C, 0xFF, 0xFF},
-    /* Soft4        */ {0x5B, 0xFF, 0xFF},
-    /* Soft5        */ {0x5A, 0xFF, 0xFF},
-    /* Pan          */ {0x59, 0xFF, 0xFF},
-    /* Fine         */ {0x58, 0xFF, 0xFF},
-    /* Norm         */ {0x57, 0xFF, 0xFF},
-    /* Rec          */ {0x56, 0x0F, 0xF0},  // red
-    /* Auto         */ {0x55, 0xFF, 0xFF},
-    /* Nav          */ {0x54, 0xFF, 0xFF},
-    /* Nudge        */ {0x53, 0xFF, 0xFF},
-    /* Focus        */ {0x52, 0xFF, 0xFF},
-    /* BankLeft     */ {0x4F, 0xFF, 0xFF},
-    /* BankRight    */ {0x4E, 0xFF, 0xFF},
-    /* ZoomUp       */ {0x4D, 0xF0, 0xF0},  // green
-    /* ZoomLeft     */ {0x4C, 0xFF, 0xFF},
-    /* ZoomCenter   */ {0x4B, 0x0F, 0xF0},  // red
-    /* ZoomRight    */ {0x4A, 0xFF, 0xFF},
-    /* ZoomDown     */ {0x49, 0xEF, 0xF0},  // yellow
+    /* PageLeft     */ {0x2D, kColourWhite, true},
+    /* PageRight    */ {0x2C, kColourWhite, true},
+    /* Flip         */ {0x2B, kColourWhite},
+    /* AutoOff      */ {0x27, kColourWhite},  // confirmed via probe 2026-04-30
+    /* AutoRead     */ {0x26, kColourGreen},
+    /* AutoWrite    */ {0x25, kColourRed},
+    /* AutoTrim     */ {0x24, kColourOrange},
+    /* AutoLatch    */ {0x23, kColourRed},
+    /* AutoTouch    */ {0x22, kColourYellow},
+    /* VPotBank     */ {0x5F, kColourWhite},
+    /* Soft1        */ {0x5E, kColourWhite},
+    /* Soft2        */ {0x5D, kColourWhite},
+    /* Soft3        */ {0x5C, kColourWhite},
+    /* Soft4        */ {0x5B, kColourWhite},
+    /* Soft5        */ {0x5A, kColourWhite},
+    /* Pan          */ {0x59, kColourWhite},
+    /* Fine         */ {0x58, kColourWhite},
+    /* Norm         */ {0x57, kColourWhite},
+    /* Rec          */ {0x56, kColourRed},
+    /* Auto         */ {0x55, kColourWhite},
+    /* Nav          */ {0x54, kColourWhite},
+    /* Nudge        */ {0x53, kColourWhite},
+    /* Focus        */ {0x52, kColourWhite},
+    /* BankLeft     */ {0x4F, kColourWhite},
+    /* BankRight    */ {0x4E, kColourWhite},
+    /* ZoomUp       */ {0x4D, kColourGreen},
+    /* ZoomLeft     */ {0x4C, kColourWhite},
+    /* ZoomCenter   */ {0x4B, kColourRed},
+    /* ZoomRight    */ {0x4A, kColourWhite},
+    /* ZoomDown     */ {0x49, kColourYellow},
 };
 } // namespace
 
@@ -640,18 +649,21 @@ LedColourFrames buildUf8GlobalLed(Uf8GlobalLed btn, GlobalLedState state)
     LedColourFrames out;
     switch (state) {
         case GlobalLedState::Bright:
-            out.ff38 = buildSelFrame(0x38, def.cell, def.aBright, def.bBright);
+            out.ff38 = buildSelFrame(0x38, def.cell,
+                                     def.colour.aBright, def.colour.bBright);
             out.ff39 = buildSelFrame(0x39, def.cell, 0x00, 0xF0);
             if (def.legacy) out.legacy = buildLedCommand(def.cell, true);
             break;
         case GlobalLedState::Dim:
-            // Dim: FF 38 == FF 39 = 11 F1 (low-intensity white). For
-            // legacy-family LEDs the FF 3B 03 frame must also fire with
-            // state=0x01 — without it the LED stays in legacy-OFF and
-            // the colour-pair has no visible effect (cap48 2026-04-30
-            // confirmed: SSL sends legacy ON alongside dim colour-pair).
-            out.ff38 = buildSelFrame(0x38, def.cell, 0x11, 0xF1);
-            out.ff39 = buildSelFrame(0x39, def.cell, 0x11, 0xF1);
+            // Dim mode keeps the button's hue at low intensity. Both FF 38
+            // and FF 39 carry the dim pair — same encoding the SEL palette
+            // uses for un-lit DAW-Colour LEDs (cap33). Legacy-family LEDs
+            // also need their FF 3B 03 frame fired to leave legacy-OFF,
+            // otherwise the colour-pair has no visible effect (cap48).
+            out.ff38 = buildSelFrame(0x38, def.cell,
+                                     def.colour.aDim, def.colour.bDim);
+            out.ff39 = buildSelFrame(0x39, def.cell,
+                                     def.colour.aDim, def.colour.bDim);
             if (def.legacy) out.legacy = buildLedCommand(def.cell, true);
             break;
         case GlobalLedState::Off:
