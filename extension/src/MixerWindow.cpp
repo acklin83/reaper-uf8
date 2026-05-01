@@ -12,8 +12,46 @@
 
 namespace uf8 {
 
+namespace {
+
+// Left-rail navigation. Mixer sits at the top; settings sections follow,
+// separated by a divider. Order chosen to put the high-frequency view
+// (Mixer) first and the static info (About) last.
+enum Section : int {
+    kSecMixer = 0,
+    kSecDevice,
+    kSecBindings,
+    kSecSoftKeyBanks,
+    kSecModes,
+    kSecSelectionSets,
+    kSecAbout,
+    kSecCount,
+};
+
+struct RailEntry {
+    const char* label;
+    Section     section;
+    bool        separatorBefore;
+    void (*draw)(ImGui_Context*);
+};
+
+constexpr RailEntry kRail[] = {
+    { "Mixer",          kSecMixer,         false, &MixerLayout::draw                 },
+    { "Device",         kSecDevice,        true,  &SettingsScreen::drawDevice        },
+    { "Bindings",       kSecBindings,      false, &SettingsScreen::drawBindings      },
+    { "Soft-Key Banks", kSecSoftKeyBanks,  false, &SettingsScreen::drawSoftKeyBanks  },
+    { "Modes",          kSecModes,         false, &SettingsScreen::drawModes         },
+    { "Selection Sets", kSecSelectionSets, false, &SettingsScreen::drawSelectionSets },
+    { "About",          kSecAbout,         true,  &SettingsScreen::drawAbout         },
+};
+
+constexpr double kRailWidthPx = 160.0;
+
+} // namespace
+
 struct MixerWindow::Impl {
     ImGui_Context* ctx = nullptr;
+    int            selected = kSecMixer;
 
     void create()
     {
@@ -53,20 +91,35 @@ void MixerWindow::onRunTick()
 
     bool open = true;
     if (ImGui_Begin(impl_->ctx, "Rea-Sixty", &open, /*flags*/ nullptr)) {
-        // Two-tab layout: Mixer ⇄ Settings. ReaImGui's TabBar persists the
-        // active tab automatically across frames, so no view-state field
-        // is needed in our struct.
-        if (ImGui_BeginTabBar(impl_->ctx, "main", /*flags*/ nullptr)) {
-            if (ImGui_BeginTabItem(impl_->ctx, "Mixer", /*p_open*/ nullptr, /*flags*/ nullptr)) {
-                MixerLayout::draw(impl_->ctx);
-                ImGui_EndTabItem(impl_->ctx);
+
+        // -- Left rail: section list -------------------------------------
+        double railW = kRailWidthPx;
+        if (ImGui_BeginChild(impl_->ctx, "rail", &railW, /*size_h*/ nullptr,
+                             /*border*/ nullptr, /*flags*/ nullptr)) {
+            for (const RailEntry& e : kRail) {
+                if (e.separatorBefore) ImGui_Separator(impl_->ctx);
+                bool isSelected = (impl_->selected == e.section);
+                if (ImGui_Selectable(impl_->ctx, e.label, &isSelected,
+                                     /*flags*/ nullptr,
+                                     /*size_w*/ nullptr, /*size_h*/ nullptr)) {
+                    impl_->selected = e.section;
+                }
             }
-            if (ImGui_BeginTabItem(impl_->ctx, "Settings", /*p_open*/ nullptr, /*flags*/ nullptr)) {
-                SettingsScreen::draw(impl_->ctx);
-                ImGui_EndTabItem(impl_->ctx);
-            }
-            ImGui_EndTabBar(impl_->ctx);
         }
+        ImGui_EndChild(impl_->ctx);
+
+        ImGui_SameLine(impl_->ctx, /*offset_from_start_x*/ nullptr,
+                       /*spacing*/ nullptr);
+
+        // -- Right content pane ------------------------------------------
+        if (ImGui_BeginChild(impl_->ctx, "content", /*size_w*/ nullptr,
+                             /*size_h*/ nullptr, /*border*/ nullptr,
+                             /*flags*/ nullptr)) {
+            for (const RailEntry& e : kRail) {
+                if (e.section == impl_->selected) { e.draw(impl_->ctx); break; }
+            }
+        }
+        ImGui_EndChild(impl_->ctx);
     }
     ImGui_End(impl_->ctx);
 

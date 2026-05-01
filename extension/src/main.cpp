@@ -36,6 +36,7 @@
 #include "FocusedParam.h"
 #include "HidDevice.h"
 #include "MidiBridge.h"
+#include "MixerWindow.h"
 #include "PluginChunkPatch.h"
 #include "PluginMap.h"
 #include "Protocol.h"
@@ -56,6 +57,10 @@ std::unique_ptr<uf8::HidDevice>   g_hid;
 // side.
 std::unique_ptr<uc1::UC1Device>   g_uc1_dev;
 std::unique_ptr<uc1::UC1Surface>  g_uc1_surface;
+
+// Plugin Mixer / Settings window (Phase 2.6 + 2.7). Toggled via custom
+// action; rendered from onTimer() so REAPER-API reads stay main-thread.
+uf8::MixerWindow g_mixerWindow;
 
 // IReaperControlSurface subclass registered as a full control surface
 // class ("Rea-Sixty") so users see and add it like any other surface.
@@ -3571,6 +3576,12 @@ void onTimer()
             lastStat = now;
         }
     }
+
+    // ImGui frame for the Plugin Mixer / Settings window. No-op while the
+    // window is closed; when open, drives the entire ReaImGui paint cycle
+    // for this tick. Kept last so any REAPER-API reads above (track
+    // peaks, GR, focus state) are settled before the UI samples them.
+    g_mixerWindow.onRunTick();
 }
 
 // Brightness custom actions — registered at plugin entry point. REAPER
@@ -3974,6 +3985,14 @@ custom_action_register_t g_actionDumpRouting{
 };
 int g_cmdDumpRouting = 0;
 
+// Custom action descriptor for the mixer-toggle. The instance itself is
+// declared earlier in this TU so onTimer() can call it; this block keeps
+// the action wiring next to its brightness siblings for readability.
+custom_action_register_t g_actionToggleMixer{
+    0, "REASIXTY_TOGGLE_MIXER", "Rea-Sixty: Toggle Plugin Mixer Window", nullptr,
+};
+int g_cmdToggleMixer = 0;
+
 // hookcommand2 is the correct hook for custom_action dispatch per SDK
 // note at reaper_plugin.h:1086. hookcommand (v1) only catches actions
 // triggered via menu/keyboard, not custom_action registered entries.
@@ -3992,6 +4011,7 @@ bool hookCommand2(KbdSectionInfo* /*sec*/, int command,
     if (command == g_cmdDumpParams)     { dumpCsPluginParams();     return true; }
     if (command == g_cmdDumpChunk)      { dumpCsChunk();            return true; }
     if (command == g_cmdDumpRouting)    { dumpRoutingFlags();       return true; }
+    if (command == g_cmdToggleMixer)    { g_mixerWindow.toggle();   return true; }
     return false;
 }
 
@@ -4062,6 +4082,7 @@ extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(
     g_cmdDumpParams     = plugin_register("custom_action", &g_actionDumpParams);
     g_cmdDumpChunk      = plugin_register("custom_action", &g_actionDumpChunk);
     g_cmdDumpRouting    = plugin_register("custom_action", &g_actionDumpRouting);
+    g_cmdToggleMixer    = plugin_register("custom_action", &g_actionToggleMixer);
     plugin_register("hookcommand2", reinterpret_cast<void*>(hookCommand2));
 
     return 1;

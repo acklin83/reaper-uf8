@@ -4,9 +4,7 @@
 
 namespace uf8 {
 
-namespace {
-
-// ---- Tab: Device ----------------------------------------------------------
+// ---- Device ---------------------------------------------------------------
 // Per docs/plan-settings-ui.md §"Tab: Device" + SSL HOME equivalent (see
 // docs/ssl-360-settings-inventory.md):
 //   - Connected devices list with USB status dots (UF8 #N, UC1 #N, …)
@@ -20,9 +18,8 @@ namespace {
 //   - SEL-follows-track-color toggle (needs SEL-color frame capture)
 //   - Export Diagnostic Report button — produces
 //     ~/Desktop/rea_sixty_diag_<date>.zip with build hash, REAPER version,
-//     recent extension log, USB device tree. Pays for itself the first
-//     time we debug a remote user.
-void drawDeviceTab(ImGui_Context* ctx)
+//     recent extension log, USB device tree.
+void SettingsScreen::drawDevice(ImGui_Context* ctx)
 {
     ImGui_Text(ctx, "Device");
     ImGui_Text(ctx, "  TODO: connected-device list (serial #, USB status dot, drag-to-reorder)");
@@ -34,26 +31,21 @@ void drawDeviceTab(ImGui_Context* ctx)
     ImGui_Text(ctx, "  TODO: Export Diagnostic Report button (.zip to Desktop)");
 }
 
-// ---- Tab: Bindings --------------------------------------------------------
+// ---- Bindings -------------------------------------------------------------
 // Consolidates docs/bindings.md §"Config UI Sketch (ReaImGui)" + §"Binding
 // Types" + §"Builtin Action Catalogue (v1)", augmented with SSL-equivalent
 // rows from docs/ssl-360-settings-inventory.md.
 //
 // Persistence: ~/Library/Application Support/REAPER/rea_sixty/bindings.json
-// Sections (single scroll inside the tab):
+// Sections (single scroll):
 //   - Per-strip buttons       (Select / Mute / Solo / Rec / V-Pot press)
 //   - Transport               (Play / Stop / Rec / RW / FF — REAPER actions)
 //   - Global buttons          (Bank L/R, Channel L/R, Flip, Layer cycle)
-//   - 3 Quick Keys            (UF8 left-side QUICK row; default-bound to
-//                              CS-mode / BC-mode / Metering on SSL — we
-//                              repurpose to layer switches by default)
-//   - 2 Foot-switches         (UF8 has the physical jacks; same binding
-//                              model as buttons. Depends on USB foot-switch
-//                              event decode — placeholder if not yet
-//                              detected, doesn't block the rest of the tab)
+//   - 3 Quick Keys            (UF8 left-side QUICK row)
+//   - 2 Foot-switches         (UF8 jacks; placeholder until USB event decode)
 //   - Layer-scoped soft-keys  (per active layer)
 //   - Learn button (top right)
-void drawBindingsTab(ImGui_Context* ctx)
+void SettingsScreen::drawBindings(ImGui_Context* ctx)
 {
     ImGui_Text(ctx, "Bindings");
     ImGui_Text(ctx, "  TODO: per-strip target editor (select/mute/solo/rec/vpot_press)");
@@ -66,15 +58,14 @@ void drawBindingsTab(ImGui_Context* ctx)
     ImGui_Text(ctx, "  TODO: import / export / reset-to-defaults");
 }
 
-// ---- Tab: Soft-Key Banks --------------------------------------------------
+// ---- Soft-Key Banks -------------------------------------------------------
 // Per memory uf8-softkey-banks.md: CS = 6 banks (V-POT + 1..5),
-// BC = 2 banks (V-POT + 1). Display authoritative bank tables from
-// main.cpp's `softkey::` namespace; let users wire `kNoSlot` positions
-// to raw VST3 params (not in the SSL 360 Link map) or arbitrary REAPER
-// actions with user-defined label + colour.
+// BC = 2 banks (V-POT + 1). Authoritative bank tables live in main.cpp's
+// `softkey::` namespace. kNoSlot positions await raw VST3 / REAPER action
+// wiring.
 //
-// Authoritative source: SSL UF8 User Guide p.180-181.
-void drawSoftKeyBanksTab(ImGui_Context* ctx)
+// Source: SSL UF8 User Guide p.180-181.
+void SettingsScreen::drawSoftKeyBanks(ImGui_Context* ctx)
 {
     ImGui_Text(ctx, "Soft-Key Banks (UF8 PM mode)");
     ImGui_Text(ctx, "  TODO: ChannelStrip 6-bank grid (V-POT + Bank 1..5)");
@@ -84,19 +75,16 @@ void drawSoftKeyBanksTab(ImGui_Context* ctx)
     ImGui_Text(ctx, "  TODO: bank-follow-focus toggle (default ON)");
 }
 
-// ---- Tab: Modes -----------------------------------------------------------
+// ---- Modes ----------------------------------------------------------------
 // Phase 2.5 features per ROADMAP.md §"Phase 2.5":
 //   2.5a Folder Mode          — long-press SEL toggles parent expand
 //   2.5b Show Only Selected   — 8 selection slots persisted by GUID
 //   2.5c Show Sends/Receives  — focus-variant Send Layer
 //   2.5d Generic FX-param map — Learn-mode for any V-Pot/soft-button
-// Plus V-Pot Behaviour subsection (independent of Phase 2.5 — ships in
-// 2.7d alongside the rest of this tab):
-//   - Always Fine Pan         — V-Pot enters fine mode automatically for pan
-//   - Always Fine Sends       — same for send levels
-//   - Show Auto State         — scribble surfaces GetTrackAutomationMode()
+// Plus V-Pot Behaviour (ships in 2.7d alongside the rest of this section):
+//   - Always Fine Pan, Always Fine Sends, Show Auto State
 // All three SSL-equivalent toggles per docs/ssl-360-settings-inventory.md.
-void drawModesTab(ImGui_Context* ctx)
+void SettingsScreen::drawModes(ImGui_Context* ctx)
 {
     ImGui_Text(ctx, "Modes");
     ImGui_Text(ctx, "");
@@ -112,12 +100,11 @@ void drawModesTab(ImGui_Context* ctx)
     ImGui_Text(ctx, "  TODO: Show Auto State on scribble (GetTrackAutomationMode)");
 }
 
-// ---- Tab: Selection Sets --------------------------------------------------
+// ---- Selection Sets -------------------------------------------------------
 // Per ROADMAP.md §"2.5b" + plan-settings-ui.md §"Tab: Selection Sets":
 // 8 slots each holding a list of Track GUIDs. Project-scoped via
-// SetProjExtState("rea_sixty", "selset_N", …). Editor lets user prune
-// missing tracks manually and "save current selection" buttons.
-void drawSelectionSetsTab(ImGui_Context* ctx)
+// SetProjExtState("rea_sixty", "selset_N", …).
+void SettingsScreen::drawSelectionSets(ImGui_Context* ctx)
 {
     ImGui_Text(ctx, "Selection Sets");
     ImGui_Text(ctx, "  TODO: 8-slot grid (Slot 1..8)");
@@ -126,8 +113,8 @@ void drawSelectionSetsTab(ImGui_Context* ctx)
     ImGui_Text(ctx, "  TODO: missing-track pruning UI");
 }
 
-// ---- Tab: About -----------------------------------------------------------
-void drawAboutTab(ImGui_Context* ctx)
+// ---- About ----------------------------------------------------------------
+void SettingsScreen::drawAbout(ImGui_Context* ctx)
 {
     ImGui_Text(ctx, "Rea-Sixty");
     ImGui_Text(ctx, "  Open-source SSL 360° replacement for UF8 / UC1");
@@ -136,37 +123,6 @@ void drawAboutTab(ImGui_Context* ctx)
     ImGui_Text(ctx, "  TODO: REAPER + ReaImGui versions");
     ImGui_Text(ctx, "  TODO: links — repo, ReaPack URL, issue tracker");
     ImGui_Text(ctx, "  TODO: log-file location button (reveals in Finder)");
-}
-
-struct Tab {
-    const char* label;
-    void (*draw)(ImGui_Context*);
-};
-
-constexpr Tab kTabs[] = {
-    { "Device",         drawDeviceTab        },
-    { "Bindings",       drawBindingsTab      },
-    { "Soft-Key Banks", drawSoftKeyBanksTab  },
-    { "Modes",          drawModesTab         },
-    { "Selection Sets", drawSelectionSetsTab },
-    { "About",          drawAboutTab         },
-};
-
-} // namespace
-
-void SettingsScreen::draw(ImGui_Context* ctx)
-{
-    if (!ImGui_BeginTabBar(ctx, "settings_tabs", /*flags*/ nullptr))
-        return;
-
-    for (const Tab& t : kTabs) {
-        if (ImGui_BeginTabItem(ctx, t.label, /*p_open*/ nullptr, /*flags*/ nullptr)) {
-            t.draw(ctx);
-            ImGui_EndTabItem(ctx);
-        }
-    }
-
-    ImGui_EndTabBar(ctx);
 }
 
 } // namespace uf8
