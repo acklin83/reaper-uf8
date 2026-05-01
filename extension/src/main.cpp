@@ -26,7 +26,10 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <ctime>
 #include <string>
+
+#include <sys/stat.h>
 
 #ifdef __APPLE__
 #include <ApplicationServices/ApplicationServices.h>
@@ -4330,6 +4333,97 @@ void reasixty_setSelFollowsColor(bool follow)
     // Force a per-strip SEL re-push so the new colour mode lands without
     // requiring the user to bank-shift or click around.
     g_bankDirty.store(true);
+}
+
+// Build a diagnostic .zip on the user's Desktop with extension state +
+// any of our existing trace logs (frame trace, ColorSync log) so a user
+// can email us a single archive when something misbehaves. Cheap; runs
+// synchronously on the click. macOS-only path for now (Desktop convention
+// + system zip CLI). Cross-platform variant when we tackle Win/Linux.
+void reasixty_exportDiagnostic()
+{
+    char resultPath[512];
+    resultPath[0] = '\0';
+
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t t = std::chrono::system_clock::to_time_t(now);
+    std::tm local{};
+#if defined(_WIN32)
+    localtime_s(&local, &t);
+#else
+    localtime_r(&t, &local);
+#endif
+    char ts[32];
+    std::strftime(ts, sizeof(ts), "%Y%m%d_%H%M%S", &local);
+
+    char tmpDir[256];
+    std::snprintf(tmpDir, sizeof(tmpDir), "/tmp/rea_sixty_diag_%s", ts);
+    if (mkdir(tmpDir, 0755) != 0 && errno != EEXIST) {
+        char emsg[256];
+        std::snprintf(emsg, sizeof(emsg),
+                      "Could not create temp dir:\n%s", tmpDir);
+        ShowMessageBox(emsg, "Rea-Sixty diagnostic", 0);
+        return;
+    }
+
+    char infoPath[512];
+    std::snprintf(infoPath, sizeof(infoPath), "%s/info.txt", tmpDir);
+    if (FILE* f = std::fopen(infoPath, "w")) {
+        std::fprintf(f, "Rea-Sixty diagnostic report\n");
+        std::fprintf(f, "Generated: %s\n", ts);
+        std::fprintf(f, "Build: %s %s\n", __DATE__, __TIME__);
+        std::fprintf(f, "REAPER: %s\n", GetAppVersion());
+        std::fprintf(f, "\n--- Devices ---\n");
+        std::fprintf(f, "UF8 connected: %s\n",
+                     (g_dev && g_dev->isOpen()) ? "yes" : "no");
+        std::fprintf(f, "UF8 serial:    %s\n",
+                     g_dev ? g_dev->serial().c_str() : "");
+        std::fprintf(f, "UC1 connected: %s\n",
+                     (g_uc1_dev && g_uc1_dev->isOpen()) ? "yes" : "no");
+        std::fprintf(f, "UC1 serial:    %s\n",
+                     g_uc1_dev ? g_uc1_dev->serial().c_str() : "");
+        std::fprintf(f, "\n--- Settings ---\n");
+        std::fprintf(f, "Brightness LED:      %d\n", g_brightness.load());
+        std::fprintf(f, "Brightness scribble: %d\n", g_scribbleBrightness.load());
+        std::fprintf(f, "SEL follows colour:  %s\n",
+                     g_selFollowsColor.load() ? "yes" : "no");
+        std::fprintf(f, "Ballistic mode:      %d  (0=Peak 1=VU 2=RMS)\n",
+                     g_ballisticMode.load());
+        std::fclose(f);
+    }
+
+    // Pull in our existing trace logs if they exist. Best-effort; missing
+    // files don't fail the report.
+    char cmd[1024];
+    std::snprintf(cmd, sizeof(cmd),
+        "cp /tmp/reaper_uf8_frames.log %s/ 2>/dev/null; "
+        "cp /tmp/reaper_uf8_colors.log %s/ 2>/dev/null",
+        tmpDir, tmpDir);
+    std::system(cmd);
+
+    const char* home = std::getenv("HOME");
+    if (!home || !*home) home = "/tmp";
+    std::snprintf(resultPath, sizeof(resultPath),
+                  "%s/Desktop/rea_sixty_diag_%s.zip", home, ts);
+
+    std::snprintf(cmd, sizeof(cmd),
+        "cd /tmp && /usr/bin/zip -r '%s' 'rea_sixty_diag_%s' >/dev/null 2>&1",
+        resultPath, ts);
+    const int zipRc = std::system(cmd);
+
+    // Always clean tmp dir, success or not.
+    std::snprintf(cmd, sizeof(cmd), "rm -rf '%s'", tmpDir);
+    std::system(cmd);
+
+    char msg[1024];
+    if (zipRc == 0) {
+        std::snprintf(msg, sizeof(msg),
+                      "Diagnostic report written:\n\n%s", resultPath);
+    } else {
+        std::snprintf(msg, sizeof(msg),
+                      "Diagnostic report failed (zip rc=%d).", zipRc);
+    }
+    ShowMessageBox(msg, "Rea-Sixty diagnostic", 0);
 }
 
 int reasixty_ballisticMode()

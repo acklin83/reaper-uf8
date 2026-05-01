@@ -22,6 +22,7 @@ bool reasixty_selFollowsColor();
 void reasixty_setSelFollowsColor(bool follow);
 int  reasixty_ballisticMode();
 void reasixty_setBallisticMode(int mode);
+void reasixty_exportDiagnostic();  // shows confirmation dialog itself
 
 namespace uf8 {
 
@@ -141,10 +142,22 @@ void SettingsScreen::drawDevice(ImGui_Context* ctx)
 
     ImGui_Spacing(ctx);
     ImGui_Spacing(ctx);
+    ImGui_Text(ctx, "Diagnostic");
+    ImGui_Separator(ctx);
+    if (ImGui_Button(ctx, "Export diagnostic report",
+                     /*size_w*/ nullptr, /*size_h*/ nullptr)) {
+        reasixty_exportDiagnostic();
+    }
+    ImGui_Text(ctx, "  Bundles version + state + recent traces into a .zip");
+    ImGui_Text(ctx, "  on your Desktop. Attach this when reporting bugs.");
+
+    ImGui_Spacing(ctx);
+    ImGui_Spacing(ctx);
     ImGui_Text(ctx, "Pending");
     ImGui_Separator(ctx);
-    ImGui_Text(ctx, "  TODO: serial # + drag-to-reorder for multi-UF8 setups");
-    ImGui_Text(ctx, "  TODO: Export Diagnostic Report button (.zip to Desktop)");
+    ImGui_Text(ctx, "  Drag-to-reorder for multi-UF8 setups: deferred");
+    ImGui_Text(ctx, "  (codebase has no multi-UF8 support yet — single-device assumption");
+    ImGui_Text(ctx, "  in the bank-shift / colour-sync / VU-meter paths).");
 }
 
 // ---- Bindings -------------------------------------------------------------
