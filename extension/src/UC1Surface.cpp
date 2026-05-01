@@ -23,6 +23,34 @@ namespace uc1 {
 
 namespace {
 
+// EXTENDED FUNCTIONS list — params NOT on the main soft-key bank that
+// SSL360 exposes via the BACK button drill-down (manual p.19). Entry
+// labels are tuned to fit the 14-char slot width SSL360 uses (decoded
+// from uc1_37 scroll capture).
+//
+// slotId resolves against PluginMap::slots so the same list works
+// across CS variants (CS 2 / 4K E / 4K G / 4K B). Entries whose slotId
+// isn't present on the current plug-in are silently skipped (TBD —
+// initial scroll is full list regardless of plug-in availability).
+struct ExtFuncsEntry {
+    const char* slotId;
+    const char* shortLabel;   // <= 14 chars for the 3-slot triple
+    const char* longLabel;    // header text
+};
+constexpr ExtFuncsEntry kExtFuncs[] = {
+    { "AutoMakeup",   "AUTO MKP",  "Auto Makeup"     },
+    { "WidthFreq",    "WIDTH FQ",  "Width Frequency" },
+    { "WidthMode",    "WIDTH MD",  "Width Mode"      },
+    { "FiltersIn",    "FILT IN",   "Filters In"      },
+    { "OutputTrim",   "OUT TRIM",  "Output Trim"     },
+    { "Width",        "WIDTH",     "Width"           },
+    { "Pan",          "PAN",       "Pan"             },
+    { "Pre",          "PRE",       "Pre"             },
+    { "MicDrive",     "MIC DRV",   "Mic / Drive"     },
+    { "CompMix",      "COMP MIX",  "Comp Mix"        },
+};
+constexpr int kExtFuncsCount = sizeof(kExtFuncs) / sizeof(kExtFuncs[0]);
+
 // Label for the zone-0x03/0x05 readout based on which knob was touched.
 // Kept short here — the surface clips/pads to 22 chars before sending.
 // Matches the labels SSL 360° pushes in our captures (uc1_04 etc.).
@@ -288,6 +316,19 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
     //   * ROUTING  → cycle the SSL routing-order chunk attribute (A3, TBD).
     //   * EXT_FUNCS→ scroll/adjust the Extended Functions menu (Phase B).
     //   * TRANSPORT→ scrub the playhead (A2, TBD — needs encoder-push id).
+    if (ev.id == knob::kBcEncoder && mode_ == Uc1Mode::ExtFuncs) {
+        static int extAcc = 0;
+        static std::chrono::steady_clock::time_point extLastT{};
+        const int step = stepFromAccumulator(extAcc, extLastT, 3);
+        if (step == 0) { ++stats_.knobEventsHandled; return; }
+        // Wrap to match SSL360's continuous-scroll feel.
+        extFuncsIdx_ += step;
+        while (extFuncsIdx_ < 0)              extFuncsIdx_ += kExtFuncsCount;
+        while (extFuncsIdx_ >= kExtFuncsCount) extFuncsIdx_ -= kExtFuncsCount;
+        renderExtFuncsSubscreen_();
+        ++stats_.knobEventsHandled;
+        return;
+    }
     if (ev.id == knob::kBcEncoder && mode_ == Uc1Mode::Transport) {
         // Sec-Encoder rotation in TRANSPORT scrubs the playhead. ~0.5s
         // per detent (musical "feels-right" baseline; can tune later).
@@ -744,10 +785,14 @@ void UC1Surface::handleButton_(const ButtonEvent& ev)
         for (auto& f : buildMenuDot(kCellPresetsDot, m == Uc1Mode::Presets)) {
             device_->send(f);
         }
-        // Render Presets subscreen content immediately on entry —
-        // header + selector triple — so the user sees CS/BC choice
-        // (matches SSL360's behaviour at uc1_38 t=0.6).
+        // Render menu-mode subscreen content immediately on entry so
+        // the user sees something rather than a blank LCD waiting for
+        // their first encoder click.
         if (m == Uc1Mode::Presets) renderPresetsSubscreen_();
+        if (m == Uc1Mode::ExtFuncs) {
+            extFuncsIdx_ = 0;
+            renderExtFuncsSubscreen_();
+        }
     };
     if (ev.id == button::kBack) {
         if (ev.pressed) {
@@ -1279,6 +1324,26 @@ void UC1Surface::pushFocusedParamReadout_()
     // value" display convention. Zone 0x03 stays reserved for button
     // status text (S/C Listen On, Solo On, ...).
     device_->send(buildDisplayText(zone::kBusCompReadout, readout, readout.size()));
+}
+
+void UC1Surface::renderExtFuncsSubscreen_()
+{
+    if (!device_ || mode_ != Uc1Mode::ExtFuncs) return;
+    // Wrap idx into bounds — defensive against drift.
+    int idx = extFuncsIdx_;
+    if (idx < 0) idx = 0;
+    if (idx >= kExtFuncsCount) idx = kExtFuncsCount - 1;
+    extFuncsIdx_ = idx;
+    const auto& cur = kExtFuncs[idx];
+    const auto& prev = kExtFuncs[(idx - 1 + kExtFuncsCount) % kExtFuncsCount];
+    const auto& next = kExtFuncs[(idx + 1) % kExtFuncsCount];
+    // Frame sequence per uc1_37 EXT_FUNCS scroll: header (long label)
+    // + 3-slot triple (prev/curr/next short labels) + commit. Banner
+    // 0x06 already set by setMode().
+    device_->send(buildLcdHeader(cur.longLabel));
+    device_->send(buildTrackNameTripleLarge(prev.shortLabel,
+        cur.shortLabel, next.shortLabel));
+    device_->send(buildMenuCommit());
 }
 
 void UC1Surface::renderPresetsSubscreen_()

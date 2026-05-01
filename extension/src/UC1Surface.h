@@ -198,6 +198,13 @@ private:
     // submode switch within PRESETS. No-op outside PRESETS.
     void renderPresetsSubscreen_();
 
+    // Render the EXTENDED FUNCTIONS list LCD content. Long-label header
+    // for the currently-selected entry + 3-slot triple showing
+    // prev/curr/next short labels. Sec-Encoder rotation moves the
+    // cursor, BACK exits to MAIN. Adjust-mode (push to enter, rotate
+    // to change value) is Phase B.1 — TBD pending capture data.
+    void renderExtFuncsSubscreen_();
+
     // --- state ---
     UC1Device* device_ = nullptr;
     void*      focusedTrack_ = nullptr;  // MediaTrack*
@@ -223,6 +230,10 @@ private:
     };
     PresetsSubMode presetsSub_ = PresetsSubMode::Selector;
     bool           presetsSelectCs_ = true;  // false = BC selected
+
+    // EXT_FUNCS scroll cursor — index into the kExtFuncs list (defined
+    // inline in UC1Surface.cpp). Reset to 0 on every entry to EXT_FUNCS.
+    int            extFuncsIdx_ = 0;
 
     std::mutex               queueMu_;
     std::deque<ButtonEvent>  buttonQueue_;
