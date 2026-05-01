@@ -990,7 +990,19 @@ namespace {
 //              Comp Ratio. Decoded from uc1_28/29/31/32 captures
 //              showing bank-0x02 states {0x00, 0x19, 0x4C, 0xFF}.
 enum class RingMode : uint8_t { Position = 0, Gradient = 1 };
-struct RingDef { const uint8_t* cells; int nCells; RingMode mode = RingMode::Position; };
+// Most rings use a uniform byte5 (the section "role" byte) for every
+// cell. A few have a quirk LED whose byte5 differs — e.g. BC Release
+// LED 7/7 lives at cell 0x00 byte5=0x01 (decoded from uc1_34 sweep)
+// because cell 0x00 byte5=0x00 is taken by the hundreds 7-seg
+// segment 'a'. `b5Override` is an optional parallel array — when
+// non-null, b5Override[i] supersedes the knob-default byte5 for
+// cell i. Keep it null for rings without quirks.
+struct RingDef {
+    const uint8_t* cells;
+    int            nCells;
+    RingMode       mode = RingMode::Position;
+    const uint8_t* b5Override = nullptr;
+};
 
 // ---- EQ section (12 knobs) ----
 // All rings contiguous 11 cells. Earlier guess that the centre cell of
@@ -1046,14 +1058,13 @@ constexpr uint8_t kCompRatioCells[]     = {0x3A,0x3B,0x3C,0x3D,0x3E,0x3F,0x40,0x
 constexpr uint8_t kBcRatioCells[]    = {0xD6,0xD7,0xD8,0xD9,0xDA,0xDB,0xDC};
 constexpr uint8_t kBcScHpfCells[]    = {0xCB,0xCC,0xCD,0xCE,0xCF,0xD0,0xD1,0xD2,0xD3,0xD4,0xD5};
 constexpr uint8_t kBcAttackCells[]   = {0xDD,0xDE,0xDF,0xE0,0xE1,0xE2,0xE3};
-// BC Release: 7 LEDs total per user, but only 6 cells decoded so far
-// (0xFA..0xFF byte5=0x00). Wrap candidates 0x00 and 0x07 both turned
-// out to be 7-seg hundreds-digit cells (0x00 = segment 'a', 0x07 =
-// decimal point). LED 7/7 lights at Auto-release on SSL360; finding
-// its cell needs a fresh probe capture sweeping through Auto.
-// Until then, ship 6 cells — LED 7/7 stays dark, but at least the
-// 7-seg display stays correct.
-constexpr uint8_t kBcReleaseCells[]  = {0xFA,0xFB,0xFC,0xFD,0xFE,0xFF};
+// BC Release: 7 LEDs. First 6 at byte5=0x00 (0xFA..0xFF). LED 7/7
+// (Auto position, full-CW) lives at cell 0x00 byte5=0x01 — quirk
+// decoded from uc1_34_bc_release_sweep at t=4.08s. Cell 0x00 at
+// byte5=0x00 is the hundreds 7-seg segment 'a', so SSL360 routes
+// the wrap LED through the byte5=0x01 address space instead.
+constexpr uint8_t kBcReleaseCells[]      = {0xFA,0xFB,0xFC,0xFD,0xFE,0xFF,0x00};
+constexpr uint8_t kBcReleaseB5Override[] = {0x00,0x00,0x00,0x00,0x00,0x00,0x01};
 // BC Threshold: 11 LEDs (user 2026-05-01) — extend CW past previous 10-cell map.
 constexpr uint8_t kBcThresholdCells[]= {0xE4,0xE5,0xE6,0xE7,0xE8,0xE9,0xEA,0xEB,0xEC,0xED,0xEE};
 // BC Makeup: 11 LEDs (user 2026-05-01) — extend CCW past previous 10-cell map.
@@ -1091,7 +1102,7 @@ const RingDef* ringFor(uint8_t knobId)
     static const RingDef kBcRatio   {kBcRatioCells,     7, P};
     static const RingDef kBcScHpf   {kBcScHpfCells,    11, P};
     static const RingDef kBcAttack  {kBcAttackCells,    7, P};
-    static const RingDef kBcRelease {kBcReleaseCells,   6, P};
+    static const RingDef kBcRelease {kBcReleaseCells,   7, P, kBcReleaseB5Override};
     static const RingDef kBcThr     {kBcThresholdCells,11, G};
     static const RingDef kBcMakeup  {kBcMakeupCells,   11, G};
     static const RingDef kBcMix     {kBcMixCells,      11, G};
@@ -1273,10 +1284,10 @@ void UC1Surface::pushKnobRing_(uint8_t knobId, double normalized, bool dim)
     // The two byte5 values address distinct LED groups on bank 0x01/0x02
     // — they are NOT the same physical LEDs, even when cell numbers
     // overlap. Writing the wrong byte5 hits a non-displayed register.
-    const uint8_t b5 = (knobId == knob::kBCMix
+    const uint8_t b5Default = (knobId == knob::kBCMix
                         || knobId == knob::kCSFaderLevel
                         || (knobId >= 0x17 && knobId <= 0x1D)) ? 0x01 : 0x00;
-    auto make = [b5](uint8_t bank, uint8_t cell, uint8_t state) {
+    auto make = [](uint8_t bank, uint8_t cell, uint8_t b5, uint8_t state) {
         std::vector<uint8_t> f;
         f.reserve(8);
         f.push_back(0xFF);
@@ -1302,8 +1313,10 @@ void UC1Surface::pushKnobRing_(uint8_t knobId, double normalized, bool dim)
         if (last[i] == want) continue;
         last[i] = want;
         const uint8_t cell = def->cells[i];
-        device_->send(make(0x01, cell, selState));
-        device_->send(make(0x02, cell, brTarget[i]));
+        // Per-cell byte5 override for quirks (e.g. BC Release LED 7/7).
+        const uint8_t b5 = def->b5Override ? def->b5Override[i] : b5Default;
+        device_->send(make(0x01, cell, b5, selState));
+        device_->send(make(0x02, cell, b5, brTarget[i]));
     }
 }
 
