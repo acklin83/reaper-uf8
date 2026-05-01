@@ -288,6 +288,107 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
     //   * ROUTING  → cycle the SSL routing-order chunk attribute (A3, TBD).
     //   * EXT_FUNCS→ scroll/adjust the Extended Functions menu (Phase B).
     //   * TRANSPORT→ scrub the playhead (A2, TBD — needs encoder-push id).
+    if (ev.id == knob::kBcEncoder && mode_ == Uc1Mode::Routing) {
+        static int routingAcc = 0;
+        static std::chrono::steady_clock::time_point routingLastT{};
+        const int step = stepFromAccumulator(routingAcc, routingLastT, 3);
+        if (step == 0) { ++stats_.knobEventsHandled; return; }
+        if (!focusedTrack_) {
+            ++stats_.knobEventsHandled;
+            return;
+        }
+        auto match = uf8::lookupPluginOnTrack(focusedTrack_,
+                                              uf8::Domain::ChannelStrip);
+        if (!match.map) {
+            ++stats_.knobEventsHandled;
+            return;
+        }
+        // Routing-preset table — 10 main 4-tuples (FiltIn, FiltSC, EqSC,
+        // DynPreEq) the SSL CS plug-in's routing GUI cycles through
+        // (decoded from user's 2026-05-01 dump-routing-flags sequence
+        // covering manual Orders 1..9 + a 10th non-manual reachable
+        // combo; manual Order 10 "EQ → Dyn → Filters" is unreachable
+        // in this plug-in's routing UI). ExtSC adds the b-variant for
+        // each preset (20 total cycle positions = idx 0..19).
+        struct Preset { uint8_t filtIn, filtSC, eqSC, dynPreEq; };
+        static constexpr Preset kPresets[10] = {
+            { 1, 0, 0, 0 },  // Order 1:  F → E → D
+            { 0, 0, 0, 0 },  // Order 2:  E → F → D (Filters off main)
+            { 0, 0, 0, 1 },  // Order 3:  D → E → F (Filters off main)
+            { 1, 0, 0, 1 },  // Order 4:  F → D → E
+            { 1, 1, 0, 1 },  // Order 5:  F → D → E (Filt → S/C)
+            { 1, 0, 1, 0 },  // Order 6:  F → E → D (EQ → S/C)
+            { 1, 1, 0, 0 },  // Order 7:  F → E → D (Filt → S/C)
+            { 1, 1, 1, 0 },  // Order 8:  E → F → D (Filt+EQ → S/C)
+            { 0, 0, 1, 0 },  // Order 9:  E → F → D (EQ → S/C)
+            { 0, 1, 1, 1 },  // Order 10: alt (D → E + Filt+EQ S/C)
+        };
+        // Read current flags to find which preset position we're at —
+        // gives the user a stable starting point if they entered the
+        // routing GUI at any combo, including dialed-by-hand. -1 if
+        // current combo isn't one of the 10 presets (jump to 0).
+        auto readFlag = [&](const char* slotId) -> int {
+            for (const auto& s : match.map->slots) {
+                if (s.id && std::strcmp(s.id, slotId) == 0 && s.vst3Param >= 0) {
+                    return TrackFX_GetParamNormalized(
+                        static_cast<MediaTrack*>(focusedTrack_),
+                        match.fxIndex, s.vst3Param) >= 0.5 ? 1 : 0;
+                }
+            }
+            return 0;
+        };
+        const int curFiltIn   = readFlag("FiltersToInput");
+        const int curFiltSC   = readFlag("FiltersToSC");
+        const int curEqSC     = readFlag("EqToSC");
+        const int curDynPreEq = readFlag("DynamicsPreEq");
+        const int curExtSC    = readFlag("ExternalSC");
+        int curPresetIdx = -1;
+        for (int i = 0; i < 10; ++i) {
+            if (kPresets[i].filtIn   == curFiltIn   &&
+                kPresets[i].filtSC   == curFiltSC   &&
+                kPresets[i].eqSC     == curEqSC     &&
+                kPresets[i].dynPreEq == curDynPreEq) {
+                curPresetIdx = i;
+                break;
+            }
+        }
+        // Combined index 0..19: even = main preset, odd = b-variant.
+        // Cycle wraps (no clamp) — matches SSL360's continuous scroll.
+        int combinedIdx = (curPresetIdx >= 0)
+            ? curPresetIdx * 2 + curExtSC
+            : 0;
+        int newCombined = combinedIdx + step;
+        while (newCombined < 0)   newCombined += 20;
+        while (newCombined >= 20) newCombined -= 20;
+        const int newPresetIdx = newCombined / 2;
+        const int newExtSC     = newCombined % 2;
+        const Preset& p = kPresets[newPresetIdx];
+        // Apply the preset.
+        auto setFlag = [&](const char* slotId, int v) {
+            for (const auto& s : match.map->slots) {
+                if (s.id && std::strcmp(s.id, slotId) == 0 && s.vst3Param >= 0) {
+                    TrackFX_SetParamNormalized(
+                        static_cast<MediaTrack*>(focusedTrack_),
+                        match.fxIndex, s.vst3Param, v ? 1.0 : 0.0);
+                    return;
+                }
+            }
+        };
+        setFlag("FiltersToInput", p.filtIn);
+        setFlag("FiltersToSC",    p.filtSC);
+        setFlag("EqToSC",         p.eqSC);
+        setFlag("DynamicsPreEq",  p.dynPreEq);
+        setFlag("ExternalSC",     newExtSC);
+        // LCD routing-order indicator: byte 0x01..0x0A for main, 0x80
+        // OR'd in for b-variants.
+        const uint8_t orderByte = static_cast<uint8_t>(
+            (newPresetIdx + 1) | (newExtSC ? 0x80 : 0x00));
+        if (device_) {
+            device_->send(buildRoutingOrderIndicator(orderByte));
+        }
+        ++stats_.knobEventsHandled;
+        return;
+    }
     if (ev.id == knob::kBcEncoder && mode_ == Uc1Mode::Presets) {
         static int presetAcc = 0;
         static std::chrono::steady_clock::time_point presetLastT{};
