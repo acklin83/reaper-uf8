@@ -1,5 +1,6 @@
 #include "SettingsScreen.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -185,182 +186,322 @@ namespace {
 
 using uf8::bindings::ButtonId;
 
-// Short button-face label shown on the schematic (≈ what's printed on
-// the physical UF8). Falls back to the canonical snake_case name if a
-// button slips through without an entry.
+// Short button-face label shown over the schematic (≈ what's printed on
+// the physical UF8 silk-screen). Used by the editor header too.
 const char* hwFaceLabel(ButtonId id)
 {
     switch (id) {
-        case ButtonId::BankLeft:    return "Bank ←";
-        case ButtonId::BankRight:   return "Bank →";
-        case ButtonId::PageLeft:    return "Page ←";
-        case ButtonId::PageRight:   return "Page →";
-        case ButtonId::Layer1:      return "Layer 1";
-        case ButtonId::Layer2:      return "Layer 2";
-        case ButtonId::Layer3:      return "Layer 3";
-        case ButtonId::Quick1:      return "Quick 1";
-        case ButtonId::Quick2:      return "Quick 2";
-        case ButtonId::Quick3:      return "Quick 3";
-        case ButtonId::PluginBtn:   return "Plugin";
-        case ButtonId::Flip:        return "Flip";
-        case ButtonId::Pan:         return "Pan";
-        case ButtonId::Fine:        return "Fine";
-        case ButtonId::Btn360:      return "360";
-        case ButtonId::AutoOff:     return "Off";
-        case ButtonId::AutoRead:    return "Read";
-        case ButtonId::AutoWrite:   return "Write";
-        case ButtonId::AutoTrim:    return "Trim";
-        case ButtonId::AutoLatch:   return "Latch";
-        case ButtonId::AutoTouch:   return "Touch";
-        case ButtonId::ZoomUp:      return "Zoom ↑";
-        case ButtonId::ZoomDown:    return "Zoom ↓";
-        case ButtonId::ZoomLeft:    return "Zoom ←";
-        case ButtonId::ZoomRight:   return "Zoom →";
-        case ButtonId::ZoomCenter:  return "Fit";
-        case ButtonId::Nav:         return "Nav";
-        case ButtonId::Nudge:       return "Nudge";
-        case ButtonId::EncFocus:    return "Focus";
-        case ButtonId::ChannelPush: return "Encoder ⏷";
+        case ButtonId::BankLeft:    return "BANK \xE2\x97\x82";
+        case ButtonId::BankRight:   return "BANK \xE2\x96\xB8";
+        case ButtonId::PageLeft:    return "PAGE \xE2\x97\x82";
+        case ButtonId::PageRight:   return "PAGE \xE2\x96\xB8";
+        case ButtonId::Layer1:      return "1";
+        case ButtonId::Layer2:      return "2";
+        case ButtonId::Layer3:      return "3";
+        case ButtonId::Quick1:      return "1";
+        case ButtonId::Quick2:      return "2";
+        case ButtonId::Quick3:      return "3";
+        case ButtonId::PluginBtn:   return "PLUGIN";
+        case ButtonId::Flip:        return "FLIP";
+        case ButtonId::Pan:         return "PAN";
+        case ButtonId::Fine:        return "FINE";
+        case ButtonId::Btn360:      return "360\xC2\xB0";
+        case ButtonId::AutoOff:     return "OFF";
+        case ButtonId::AutoRead:    return "READ";
+        case ButtonId::AutoWrite:   return "WRITE";
+        case ButtonId::AutoTrim:    return "TRIM";
+        case ButtonId::AutoLatch:   return "LATCH";
+        case ButtonId::AutoTouch:   return "TOUCH";
+        case ButtonId::ZoomUp:      return "\xE2\x96\xB2";
+        case ButtonId::ZoomDown:    return "\xE2\x96\xBC";
+        case ButtonId::ZoomLeft:    return "\xE2\x97\x82";
+        case ButtonId::ZoomRight:   return "\xE2\x96\xB8";
+        case ButtonId::ZoomCenter:  return "\xE2\x97\x8F";
+        case ButtonId::Nav:         return "NAV";
+        case ButtonId::Nudge:       return "NUDGE";
+        case ButtonId::EncFocus:    return "FOCUS";
+        case ButtonId::ChannelPush: return "ENC PUSH";
         default:                    return uf8::bindings::toName(id);
     }
 }
 
-// One clickable hardware-face button. Highlighted when selected. On
-// click, sets `sel`. Width default 70, height 26 — keeps the row
-// compact while still readable. The button label is the hardware face
-// (Bank ←, FLIP, etc.); the actual binding is shown in the editor below.
-void drawHwButton(ImGui_Context* ctx, ButtonId id, ButtonId& sel,
-                  double w = 70, double h = 26)
-{
-    const bool selected = (id == sel);
-    if (selected) {
-        // Soft blue highlight, only on the button itself (PushStyleColor
-        // is auto-popped by the matching PopStyleColor below).
-        ImGui_PushStyleColor(ctx, ImGui_Col_Button,        0x4477CCFF);
-        ImGui_PushStyleColor(ctx, ImGui_Col_ButtonHovered, 0x5588DDFF);
-        ImGui_PushStyleColor(ctx, ImGui_Col_ButtonActive,  0x6699EEFF);
-    }
-    ImGui_PushID(ctx, uf8::bindings::toName(id));
-    if (ImGui_Button(ctx, hwFaceLabel(id), &w, &h)) {
-        sel = id;
-    }
-    ImGui_PopID(ctx);
-    if (selected) {
-        int n = 3;
-        ImGui_PopStyleColor(ctx, &n);
-    }
-}
-
-// Greyed, non-clickable button — used for hardware buttons that exist
-// on the UF8 but aren't bindable in v1 (per-strip Sel/Cut/Solo, V-Pot
-// push, top soft-keys, soft-key bank selectors). Shown so the user
-// sees the full hardware layout in context.
-void drawLockedButton(ImGui_Context* ctx, const char* label,
-                      double w = 70, double h = 26)
-{
-    ImGui_PushStyleColor(ctx, ImGui_Col_Button,        0x33333355);
-    ImGui_PushStyleColor(ctx, ImGui_Col_ButtonHovered, 0x33333355);
-    ImGui_PushStyleColor(ctx, ImGui_Col_ButtonActive,  0x33333355);
-    ImGui_PushStyleColor(ctx, ImGui_Col_Text,          0x88888888);
-    ImGui_Button(ctx, label, &w, &h);
-    int n = 4;
-    ImGui_PopStyleColor(ctx, &n);
-}
-
+// Convenience for ImGui_SameLine with default args.
 void sameLine(ImGui_Context* ctx)
 {
     ImGui_SameLine(ctx, /*offset_from_start_x*/ nullptr, /*spacing*/ nullptr);
 }
 
-// Schematic of the UF8 — mirrors the physical layout loosely. Per-strip
-// area is locked (v1 design); the right-hand control panel hosts the
-// bindable globals. Click any active button to select it for editing.
-void drawUf8Schematic(ImGui_Context* ctx, ButtonId& sel)
+// Vector-graphics canvas for the UF8 schematic — drawn into the
+// surrounding ImGui window's draw list. Coordinates are in the
+// schematic's local 0..W × 0..H space; ox/oy translate to screen.
+struct VCanvas {
+    ImGui_Context*  ctx;
+    ImGui_DrawList* dl;
+    float           ox, oy;
+};
+
+void drawText_(VCanvas& c, float x, float y, uint32_t col, const char* text)
 {
-    // ---- Strip area (8 columns × 5 row-groups, all locked in v1) ----
-    ImGui_Text(ctx, "Strips (per-strip controls — hardcoded in v1):");
-    char buf[16];
-    auto stripRow = [&](const char* prefix) {
-        for (int i = 0; i < 8; ++i) {
-            std::snprintf(buf, sizeof(buf), "%s %d", prefix, i + 1);
-            drawLockedButton(ctx, buf, /*w*/ 70, /*h*/ 22);
-            if (i < 7) sameLine(ctx);
-        }
-    };
-    stripRow("Soft");      // 0x18..0x1F
-    stripRow("V-Pot");     // 0x08..0x0F
-    stripRow("Sel");       // 0x22..0x37 (sel)
-    stripRow("Cut");       //   "         (cut)
-    stripRow("Solo");      //   "         (solo)
+    ImGui_DrawList_AddText(c.dl, c.ox + x, c.oy + y, col, text);
+}
 
-    ImGui_Spacing(ctx);
-    ImGui_Text(ctx, "Soft-key banks (hardcoded):");
-    drawLockedButton(ctx, "V-POT");  sameLine(ctx);
-    drawLockedButton(ctx, "Bank 1"); sameLine(ctx);
-    drawLockedButton(ctx, "Bank 2"); sameLine(ctx);
-    drawLockedButton(ctx, "Bank 3"); sameLine(ctx);
-    drawLockedButton(ctx, "Bank 4"); sameLine(ctx);
-    drawLockedButton(ctx, "Bank 5");
+void drawTextCentered_(VCanvas& c, float cx, float cy, uint32_t col,
+                       const char* text)
+{
+    double tw = 0, th = 0;
+    ImGui_CalcTextSize(c.ctx, text, &tw, &th, /*hide_after_##*/ nullptr,
+                       /*wrap_width*/ nullptr);
+    drawText_(c, cx - float(tw) / 2.0f, cy - float(th) / 2.0f, col, text);
+}
 
-    ImGui_Spacing(ctx);
-    ImGui_Separator(ctx);
-    ImGui_Spacing(ctx);
-
-    // ---- Bindable globals — laid out roughly like the UF8 right panel ----
-    ImGui_Text(ctx, "Top row — modes & layers:");
-    drawHwButton(ctx, ButtonId::Btn360,  sel); sameLine(ctx);
-    drawHwButton(ctx, ButtonId::Quick3,  sel); sameLine(ctx);
-    drawHwButton(ctx, ButtonId::Quick2,  sel); sameLine(ctx);
-    drawHwButton(ctx, ButtonId::Quick1,  sel); sameLine(ctx);
-    drawHwButton(ctx, ButtonId::Layer3,  sel); sameLine(ctx);
-    drawHwButton(ctx, ButtonId::Layer2,  sel); sameLine(ctx);
-    drawHwButton(ctx, ButtonId::Layer1,  sel);
-
-    ImGui_Spacing(ctx);
-    ImGui_Text(ctx, "Plugin / Page / Flip:");
-    drawHwButton(ctx, ButtonId::PluginBtn, sel); sameLine(ctx);
-    drawHwButton(ctx, ButtonId::PageLeft,  sel); sameLine(ctx);
-    drawHwButton(ctx, ButtonId::PageRight, sel); sameLine(ctx);
-    drawHwButton(ctx, ButtonId::Flip,      sel);
-
-    ImGui_Spacing(ctx);
-    ImGui_Text(ctx, "Pan / Fine:");
-    drawHwButton(ctx, ButtonId::Pan,  sel); sameLine(ctx);
-    drawHwButton(ctx, ButtonId::Fine, sel);
-
-    ImGui_Spacing(ctx);
-    ImGui_Text(ctx, "Automation:");
-    drawHwButton(ctx, ButtonId::AutoOff,   sel); sameLine(ctx);
-    drawHwButton(ctx, ButtonId::AutoRead,  sel); sameLine(ctx);
-    drawHwButton(ctx, ButtonId::AutoWrite, sel); sameLine(ctx);
-    drawHwButton(ctx, ButtonId::AutoTrim,  sel); sameLine(ctx);
-    drawHwButton(ctx, ButtonId::AutoLatch, sel); sameLine(ctx);
-    drawHwButton(ctx, ButtonId::AutoTouch, sel);
-
-    ImGui_Spacing(ctx);
-    ImGui_Text(ctx, "Encoder & bank scroll:");
-    drawHwButton(ctx, ButtonId::Nav,         sel); sameLine(ctx);
-    drawHwButton(ctx, ButtonId::Nudge,       sel); sameLine(ctx);
-    drawHwButton(ctx, ButtonId::EncFocus,    sel); sameLine(ctx);
-    drawHwButton(ctx, ButtonId::ChannelPush, sel); sameLine(ctx);
-    ImGui_Dummy(ctx, 16, 0); sameLine(ctx);
-    drawHwButton(ctx, ButtonId::BankLeft,    sel); sameLine(ctx);
-    drawHwButton(ctx, ButtonId::BankRight,   sel);
-
-    ImGui_Spacing(ctx);
-    ImGui_Text(ctx, "Zoom pad:");
-    {
-        // Fake a cross-pad with Dummy spacers.
-        ImGui_Dummy(ctx, 78, 0); sameLine(ctx);
-        drawHwButton(ctx, ButtonId::ZoomUp, sel);
-
-        drawHwButton(ctx, ButtonId::ZoomLeft,   sel); sameLine(ctx);
-        drawHwButton(ctx, ButtonId::ZoomCenter, sel); sameLine(ctx);
-        drawHwButton(ctx, ButtonId::ZoomRight,  sel);
-
-        ImGui_Dummy(ctx, 78, 0); sameLine(ctx);
-        drawHwButton(ctx, ButtonId::ZoomDown, sel);
+void rect_(VCanvas& c, float x, float y, float w, float h,
+           uint32_t fill, uint32_t border, double rounding = 3.0)
+{
+    const float x1 = c.ox + x, y1 = c.oy + y;
+    const float x2 = x1 + w,   y2 = y1 + h;
+    if (fill) {
+        ImGui_DrawList_AddRectFilled(c.dl, x1, y1, x2, y2, fill,
+                                     &rounding, /*flags*/ nullptr);
     }
+    if (border) {
+        ImGui_DrawList_AddRect(c.dl, x1, y1, x2, y2, border,
+                               &rounding, /*flags*/ nullptr,
+                               /*thickness*/ nullptr);
+    }
+}
+
+void circle_(VCanvas& c, float cx, float cy, float r,
+             uint32_t fill, uint32_t border)
+{
+    if (fill) {
+        ImGui_DrawList_AddCircleFilled(c.dl, c.ox + cx, c.oy + cy, r,
+                                       fill, /*num_segments*/ nullptr);
+    }
+    if (border) {
+        ImGui_DrawList_AddCircle(c.dl, c.ox + cx, c.oy + cy, r,
+                                 border, /*num_segments*/ nullptr,
+                                 /*thickness*/ nullptr);
+    }
+}
+
+void line_(VCanvas& c, float x1, float y1, float x2, float y2,
+           uint32_t col, double thickness = 1.0)
+{
+    ImGui_DrawList_AddLine(c.dl, c.ox + x1, c.oy + y1,
+                           c.ox + x2, c.oy + y2, col, &thickness);
+}
+
+// Render the full UF8 schematic. Click hit-test goes against the
+// canvas-wide InvisibleButton; per-rect hits are computed by comparing
+// the cached mouse-coords against each button's local rectangle.
+// `sel` is updated on click. Layout follows SSL UF8 User Guide page 14
+// (numbered controls).
+void drawUf8Vector(ImGui_Context* ctx, ButtonId& sel)
+{
+    constexpr float W = 1000, H = 460;
+
+    double oxd = 0, oyd = 0;
+    ImGui_GetCursorScreenPos(ctx, &oxd, &oyd);
+
+    // Reserve canvas layout space + provide a single hit target for
+    // click capture. Per-button hit-testing happens manually against
+    // the cached mouse position below.
+    ImGui_InvisibleButton(ctx, "uf8_canvas", W, H, /*flags*/ nullptr);
+    const bool canvasHovered = ImGui_IsItemHovered(ctx, /*flags*/ nullptr);
+    int leftBtn = 0;
+    const bool canvasClicked = ImGui_IsItemClicked(ctx, &leftBtn);
+
+    double mxd = 0, myd = 0;
+    ImGui_GetMousePos(ctx, &mxd, &myd);
+
+    VCanvas c {
+        ctx, ImGui_GetWindowDrawList(ctx),
+        static_cast<float>(oxd), static_cast<float>(oyd)
+    };
+    const float mx = static_cast<float>(mxd) - c.ox;
+    const float my = static_cast<float>(myd) - c.oy;
+
+    auto inside = [&](float x, float y, float w, float h) {
+        return canvasHovered
+            && mx >= x && mx <= x + w
+            && my >= y && my <= y + h;
+    };
+
+    // Bindable button: hit-tests against the canvas mouse, draws a
+    // hardware-face rectangle, highlights on hover/select.
+    auto drawHwBtn = [&](float x, float y, float w, float h,
+                         ButtonId id, const char* label)
+    {
+        const bool hot      = inside(x, y, w, h);
+        const bool selected = (id == sel);
+        if (hot && canvasClicked && leftBtn == 0) sel = id;
+
+        const uint32_t fill   = selected ? 0x4477CCFF
+                                : hot     ? 0x3A4253FF
+                                          : 0x252A33FF;
+        const uint32_t border = selected ? 0xAACCFFFF : 0x4A5060FF;
+        const uint32_t txt    = selected ? 0xFFFFFFFF : 0xD0D4DAFF;
+        rect_(c, x, y, w, h, fill, border, /*rounding*/ 3.5);
+        drawTextCentered_(c, x + w / 2.0f, y + h / 2.0f, txt, label);
+    };
+
+    // Locked (non-bindable in v1) button — flatter colour, no hover.
+    auto drawLocked = [&](float x, float y, float w, float h,
+                          const char* label)
+    {
+        rect_(c, x, y, w, h, 0x1A1E24FF, 0x383C44FF, 3.0);
+        drawTextCentered_(c, x + w / 2.0f, y + h / 2.0f, 0x70747CFF, label);
+    };
+
+    // Group label — small all-caps text painted on the chassis above
+    // a related cluster of controls (mirrors the SSL silk-screen).
+    auto drawGroupLabel = [&](float x, float y, const char* text) {
+        drawText_(c, x, y, 0x9CA0AAFF, text);
+    };
+
+    // ---- Chassis ----
+    rect_(c, 4, 4, W - 8, H - 8, 0x14181EFF, 0x2A3038FF, /*rounding*/ 8.0);
+
+    // ---- Centre: 8 strips ----
+    constexpr float kStripX0 = 138, kStripW = 80, kStripGap = 7;
+    for (int i = 0; i < 8; ++i) {
+        const float sx = kStripX0 + i * (kStripW + kStripGap);
+        // Top soft-key (LED bar) — locked in v1
+        rect_(c, sx + 6, 18, kStripW - 12, 14, 0x252A33FF, 0x4A5060FF, 2.0);
+        // Scribble LCD with placeholder logo
+        rect_(c, sx + 4, 38, kStripW - 8, 60, 0x080C12FF, 0x444A55FF, 2.0);
+        drawTextCentered_(c, sx + kStripW / 2.0f, 60, 0x4488DDFF, "SSL");
+        drawTextCentered_(c, sx + kStripW / 2.0f, 78, 0x4488DDFF, "UF8");
+        // V-Pot (large dial with notch)
+        const float vx = sx + kStripW / 2.0f, vy = 124;
+        circle_(c, vx, vy, 18, 0x14181EFF, 0x4A5060FF);
+        circle_(c, vx, vy, 14, 0x2A3038FF, 0x555A66FF);
+        line_(c, vx, vy - 16, vx, vy - 8, 0xCCCCCCFF, 2.0);
+        // Solo / Cut / Sel (locked, per-strip)
+        drawLocked(sx + 8, 152, kStripW - 16, 16, "SOLO");
+        drawLocked(sx + 8, 172, kStripW - 16, 16, "CUT");
+        drawLocked(sx + 8, 192, kStripW - 16, 16, "SEL");
+        // Fader: scale ticks + track + cap
+        const float fx = sx + kStripW / 2.0f;
+        const float fyTop = 220, fyBot = 420;
+        // Scale tick marks (left side)
+        for (int t = 0; t <= 10; ++t) {
+            const float ty = fyTop + (fyBot - fyTop) * (t / 10.0f);
+            const float len = (t % 5 == 0) ? 6.0f : 3.0f;
+            line_(c, fx - 12, ty, fx - 12 + len, ty, 0x6A6E78FF, 1.0);
+        }
+        // Track
+        rect_(c, fx - 1.5f, fyTop, 3, fyBot - fyTop, 0x444B55FF, 0x000000FF, 1.0);
+        // Cap (fixed at unity-ish)
+        const float capY = fyTop + (fyBot - fyTop) * 0.40f;
+        rect_(c, fx - 12, capY - 7, 24, 14, 0x6A7080FF, 0x9CA0AAFF, 2.5);
+        line_(c, fx - 9, capY, fx + 9, capY, 0xE0E0E0FF, 1.5);
+    }
+
+    // ---- Left panel ----
+    drawGroupLabel(16, 8, "LAYER");
+    drawGroupLabel(56, 8, "QUICK");
+    drawHwBtn(15, 22, 35, 22, ButtonId::Layer1, "1");
+    drawHwBtn(15, 48, 35, 22, ButtonId::Layer2, "2");
+    drawHwBtn(15, 74, 35, 22, ButtonId::Layer3, "3");
+    drawHwBtn(55, 22, 35, 22, ButtonId::Quick1, "1");
+    drawHwBtn(55, 48, 35, 22, ButtonId::Quick2, "2");
+    drawHwBtn(55, 74, 35, 22, ButtonId::Quick3, "3");
+
+    drawHwBtn(15, 108, 75, 24, ButtonId::Btn360, "360\xC2\xB0");
+
+    drawGroupLabel(16, 138, "SEND / PLUGIN");
+    char buf[8];
+    for (int row = 0; row < 4; ++row) {
+        for (int col = 0; col < 2; ++col) {
+            std::snprintf(buf, sizeof(buf), "%d", row * 2 + col + 1);
+            drawLocked(15 + col * 40, 152 + row * 26, 35, 22, buf);
+        }
+    }
+
+    drawHwBtn(15, 260, 35, 22, ButtonId::PluginBtn, "PLUGIN");
+    drawLocked(55, 260, 35, 22, "CHANNEL");
+
+    drawGroupLabel(30, 286, "PAGE");
+    drawHwBtn(15, 296, 35, 22, ButtonId::PageLeft,  "\xE2\x97\x82");
+    drawHwBtn(55, 296, 35, 22, ButtonId::PageRight, "\xE2\x96\xB8");
+
+    drawHwBtn(15, 322, 75, 22, ButtonId::Flip, "FLIP");
+
+    drawGroupLabel(16, 350, "AUTOMATION");
+    drawHwBtn(12, 364, 28, 22, ButtonId::AutoOff,   "OFF");
+    drawHwBtn(42, 364, 28, 22, ButtonId::AutoRead,  "READ");
+    drawHwBtn(72, 364, 28, 22, ButtonId::AutoWrite, "WRITE");
+    drawHwBtn(12, 388, 28, 22, ButtonId::AutoTrim,  "TRIM");
+    drawHwBtn(42, 388, 28, 22, ButtonId::AutoLatch, "LATCH");
+    drawHwBtn(72, 388, 28, 22, ButtonId::AutoTouch, "TOUCH");
+
+    // ---- Right panel ----
+    drawGroupLabel(850, 8, "SOFT KEYS");
+    drawLocked(850, 22, 30, 20, "V-POT");
+    drawLocked(884, 22, 25, 20, "1");
+    drawLocked(911, 22, 25, 20, "2");
+    drawLocked(850, 44, 30, 20, "3");
+    drawLocked(884, 44, 25, 20, "4");
+    drawLocked(911, 44, 25, 20, "5");
+
+    drawHwBtn(940, 22, 45, 20, ButtonId::Pan,  "PAN");
+    drawHwBtn(940, 44, 45, 20, ButtonId::Fine, "FINE");
+
+    drawGroupLabel(856, 76, "SELECTION MODE");
+    drawLocked(855, 90,  40, 22, "NORM");
+    drawLocked(898, 90,  40, 22, "REC");
+    drawLocked(941, 90,  40, 22, "AUTO");
+
+    // CHANNEL encoder — large notched dial
+    {
+        constexpr float cx = 920, cy = 175, r = 38;
+        circle_(c, cx, cy, r,        0x14181EFF, 0x4A5060FF);
+        circle_(c, cx, cy, r - 3,    0x252A33FF, 0x555A66FF);
+        circle_(c, cx, cy, r * 0.78f, 0x383C44FF, 0x6A6E78FF);
+        // Top tick
+        line_(c, cx, cy - r * 0.95f, cx, cy - r * 0.62f, 0xE0E0E0FF, 2.5);
+        // Notches around the circumference
+        for (int k = 0; k < 24; ++k) {
+            const float ang = (k / 24.0f) * 6.2831853f - 1.5707963f;
+            const float r0 = r - 4, r1 = r - 1;
+            const float x1 = cx + std::cos(ang) * r0;
+            const float y1 = cy + std::sin(ang) * r0;
+            const float x2 = cx + std::cos(ang) * r1;
+            const float y2 = cy + std::sin(ang) * r1;
+            line_(c, x1, y1, x2, y2, 0x555A66FF, 1.0);
+        }
+        drawTextCentered_(c, cx, cy + r + 11, 0x9CA0AAFF, "CHANNEL");
+    }
+
+    drawHwBtn(855, 226, 40, 22, ButtonId::Nav,      "NAV");
+    drawHwBtn(898, 226, 40, 22, ButtonId::Nudge,    "NUDGE");
+    drawHwBtn(941, 226, 40, 22, ButtonId::EncFocus, "FOCUS");
+
+    drawHwBtn(855, 252, 126, 18, ButtonId::ChannelPush, "ENCODER PUSH");
+
+    drawGroupLabel(884, 280, "BANK");
+    drawHwBtn(870, 292, 38, 22, ButtonId::BankLeft,  "\xE2\x97\x82");
+    drawHwBtn(922, 292, 38, 22, ButtonId::BankRight, "\xE2\x96\xB8");
+
+    // Zoom pad — cross
+    {
+        constexpr float cx = 920;
+        constexpr float baseY = 340;
+        drawHwBtn(cx - 15, baseY - 30, 30, 24, ButtonId::ZoomUp,
+                  "\xE2\x96\xB2");
+        drawHwBtn(cx - 50, baseY,      30, 24, ButtonId::ZoomLeft,
+                  "\xE2\x97\x82");
+        drawHwBtn(cx - 15, baseY,      30, 24, ButtonId::ZoomCenter,
+                  "\xE2\x97\x8F");
+        drawHwBtn(cx + 20, baseY,      30, 24, ButtonId::ZoomRight,
+                  "\xE2\x96\xB8");
+        drawHwBtn(cx - 15, baseY + 28, 30, 24, ButtonId::ZoomDown,
+                  "\xE2\x96\xBC");
+    }
+
+    // Brand line (silk-screen)
+    drawTextCentered_(c, 500, 438, 0x9CA0AAFF, "Solid State Logic");
 }
 
 // Editor panel for the currently-selected button. Reads the binding
@@ -563,8 +704,8 @@ void SettingsScreen::drawBindings(ImGui_Context* ctx)
     ImGui_Separator(ctx);
     ImGui_Spacing(ctx);
 
-    // ---- Hardware schematic ----
-    drawUf8Schematic(ctx, s_selected);
+    // ---- Hardware schematic (vector, mirrors SSL UF8 page-14 layout) ----
+    drawUf8Vector(ctx, s_selected);
 
     ImGui_Spacing(ctx);
     ImGui_Separator(ctx);
