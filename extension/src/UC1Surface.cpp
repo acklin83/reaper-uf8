@@ -341,6 +341,20 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
     // project index is smaller. Anchor seeds from the effective BC
     // track so subsequent scrolls advance from where the display
     // currently sits, not from the CS focus.
+    //
+    // Only active in MAIN mode — in ROUTING / EXT_FUNCS / TRANSPORT
+    // the rotation is reserved for menu navigation (cycling routing
+    // orders, scrolling param list, scrubbing playhead). Without this
+    // gate, entering any menu from the UC1 would still scroll BC
+    // tracks under the user's hand.
+    if (ev.id == knob::kBcEncoder && mode_ != Uc1Mode::Main) {
+        // Consume the event silently — mode-specific handlers (Presets
+        // branch above; Routing/ExtFuncs/Transport TBD) own the
+        // dispatch in their own modes. Fall-through would clobber the
+        // BC track focus on every detent.
+        ++stats_.knobEventsHandled;
+        return;
+    }
     if (ev.id == knob::kBcEncoder) {
         static int acc = 0;
         static std::chrono::steady_clock::time_point lastT{};
