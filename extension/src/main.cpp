@@ -4274,6 +4274,18 @@ bool reasixty_uc1Connected()
     return g_uc1_dev && g_uc1_dev->isOpen();
 }
 
+const char* reasixty_uf8Serial()
+{
+    if (!g_dev) return "";
+    return g_dev->serial().c_str();
+}
+
+const char* reasixty_uc1Serial()
+{
+    if (!g_uc1_dev) return "";
+    return g_uc1_dev->serial().c_str();
+}
+
 int reasixty_brightnessLevel()
 {
     return g_brightness.load();

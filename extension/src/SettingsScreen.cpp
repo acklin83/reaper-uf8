@@ -10,6 +10,8 @@
 // runtime state. Called only from the main thread (via onTimer → ImGui).
 bool reasixty_uf8Connected();
 bool reasixty_uc1Connected();
+const char* reasixty_uf8Serial();
+const char* reasixty_uc1Serial();
 int  reasixty_brightnessLevel();
 int  reasixty_scribbleBrightnessLevel();
 void reasixty_setBrightnessLevel(int level);
@@ -43,13 +45,22 @@ void SettingsScreen::drawDevice(ImGui_Context* ctx)
     ImGui_Text(ctx, "Connected devices");
     ImGui_Separator(ctx);
 
-    char line[64];
+    char line[128];
     const bool uf8On = reasixty_uf8Connected();
     const bool uc1On = reasixty_uc1Connected();
 
-    std::snprintf(line, sizeof(line), "  UF8   %s",
-                  uf8On ? "[connected]" : "[not connected]");
-    ImGui_Text(ctx, line);
+    auto deviceLine = [&](const char* name, bool on, const char* serial) {
+        if (on && serial && *serial) {
+            std::snprintf(line, sizeof(line), "  %s   [connected]   SN %s",
+                          name, serial);
+        } else {
+            std::snprintf(line, sizeof(line), "  %s   %s", name,
+                          on ? "[connected]" : "[not connected]");
+        }
+        ImGui_Text(ctx, line);
+    };
+
+    deviceLine("UF8", uf8On, reasixty_uf8Serial());
     if (uf8On) {
         ImGui_SameLine(ctx, /*offset_from_start_x*/ nullptr, /*spacing*/ nullptr);
         if (ImGui_Button(ctx, "Identify##uf8",
@@ -58,9 +69,7 @@ void SettingsScreen::drawDevice(ImGui_Context* ctx)
         }
     }
 
-    std::snprintf(line, sizeof(line), "  UC1   %s",
-                  uc1On ? "[connected]" : "[not connected]");
-    ImGui_Text(ctx, line);
+    deviceLine("UC1", uc1On, reasixty_uc1Serial());
     if (uc1On) {
         ImGui_SameLine(ctx, /*offset_from_start_x*/ nullptr, /*spacing*/ nullptr);
         if (ImGui_Button(ctx, "Identify##uc1",

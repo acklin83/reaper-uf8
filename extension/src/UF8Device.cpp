@@ -82,6 +82,24 @@ bool UF8Device::open()
         return false;
     }
 
+    // Read the iSerialNumber descriptor for Settings → Device display.
+    // Best-effort: if the device doesn't advertise one or the string read
+    // fails, leave serial_ empty rather than failing open(). Done before
+    // the init replay so it lands even if a later step has issues.
+    {
+        libusb_device_descriptor desc{};
+        if (libusb_device* d = libusb_get_device(handle_)) {
+            if (libusb_get_device_descriptor(d, &desc) >= 0
+                && desc.iSerialNumber != 0)
+            {
+                unsigned char sbuf[256] = {0};
+                const int n = libusb_get_string_descriptor_ascii(
+                    handle_, desc.iSerialNumber, sbuf, sizeof(sbuf));
+                if (n > 0) serial_.assign(reinterpret_cast<char*>(sbuf), n);
+            }
+        }
+    }
+
     // Clear any stall left by the prior owner (typically SSL360Core).
     libusb_clear_halt(handle_, kEpOut);
     libusb_clear_halt(handle_, kEpIn);

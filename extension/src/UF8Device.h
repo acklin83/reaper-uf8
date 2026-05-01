@@ -70,6 +70,11 @@ public:
 
     const std::string& lastError() const { return lastError_; }
 
+    // USB iSerialNumber string descriptor, populated on successful open().
+    // Empty when no descriptor was advertised or the read failed. Read on
+    // the main thread (UI accessor); never mutated after open() returns.
+    const std::string& serial() const { return serial_; }
+
     // Diagnostic — when on, every IN + OUT frame is appended to
     // /tmp/reaper_uf8_frames.log with a timestamp. Used to compare
     // Rea-Sixty's frame stream against an SSL360 baseline when the
@@ -93,6 +98,7 @@ private:
 
     libusb_context*       ctx_      = nullptr;
     libusb_device_handle* handle_   = nullptr;
+    std::string           serial_;
     std::atomic<bool>     shuttingDown_{false};
     std::atomic<bool>     frameTrace_{false};
     std::atomic<uint64_t> grBytes_{0};

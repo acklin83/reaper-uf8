@@ -71,6 +71,10 @@ public:
 
     const std::string& lastError() const { return lastError_; }
 
+    // USB iSerialNumber, populated on successful open(). See UF8Device.h
+    // for the same accessor.
+    const std::string& serial() const { return serial_; }
+
 private:
     void workerLoop_();
     void startBulkRead_();
@@ -81,6 +85,7 @@ private:
     std::atomic<bool>     shuttingDown_{false};
     std::thread           worker_;
     std::string           lastError_;
+    std::string           serial_;
     ButtonHandler         buttonHandler_;
     KnobHandler           knobHandler_;
     RawInputHandler       rawInputHandler_;

@@ -135,6 +135,23 @@ bool UC1Device::open()
         return false;
     }
 
+    // Read iSerialNumber for Settings → Device display. Best-effort —
+    // empty string on failure or absence. See UF8Device::open() for the
+    // identical pattern.
+    {
+        libusb_device_descriptor desc{};
+        if (libusb_device* d = libusb_get_device(handle_)) {
+            if (libusb_get_device_descriptor(d, &desc) >= 0
+                && desc.iSerialNumber != 0)
+            {
+                unsigned char sbuf[256] = {0};
+                const int n = libusb_get_string_descriptor_ascii(
+                    handle_, desc.iSerialNumber, sbuf, sizeof(sbuf));
+                if (n > 0) serial_.assign(reinterpret_cast<char*>(sbuf), n);
+            }
+        }
+    }
+
     libusb_clear_halt(handle_, kEpOut);
     libusb_clear_halt(handle_, kEpIn);
 
