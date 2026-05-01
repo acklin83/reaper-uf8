@@ -1284,19 +1284,9 @@ void UC1Surface::pushFocusedParamReadout_()
 void UC1Surface::renderPresetsSubscreen_()
 {
     if (!device_ || mode_ != Uc1Mode::Presets) return;
-    // SSL360 sends a FF 66 02 09 00 commit/redraw frame after every
-    // content update in PRESETS (and in EXT_FUNCS) — without it the
-    // firmware doesn't paint the new content even though the bytes
-    // arrived. Decoded uc1_38 t=0.646672 + t=8.478199.
-    auto sendCommit = [&]() {
-        const uint8_t data[2] = {0x09, 0x00};
-        std::vector<uint8_t> f{0xFF, 0x66, 0x02, data[0], data[1]};
-        uint32_t sum = 0;
-        for (size_t i = 1; i < f.size(); ++i) sum += f[i];
-        f.push_back(static_cast<uint8_t>(sum & 0xFF));
-        device_->send(std::move(f));
-    };
     if (presetsSub_ == PresetsSubMode::Selector) {
+        // Selector subscreen — 4 frames per uc1_38 t=0.6:
+        //   header "PRESETS" + 3-slot triple + commit.
         device_->send(buildLcdHeader("PRESETS"));
         if (presetsSelectCs_) {
             device_->send(buildTrackNameTripleLarge("",
@@ -1305,16 +1295,28 @@ void UC1Surface::renderPresetsSubscreen_()
             device_->send(buildTrackNameTripleLarge("",
                 "BUS COMP", "CHANNEL STRIP"));
         }
-        sendCommit();
+        device_->send(buildMenuCommit());
         return;
     }
-    // Browse subscreen — banner 0x02 + domain header + preset name.
+    // Browse subscreen — 6 frames per uc1_38 t=8.477:
+    //   banner 0x02 + main header (domain) + 5-slot list + sub-header
+    //   "PRESETS" + indicator 0x08 + commit 0x09.
     device_->send(buildCentralMode(CentralMode::PresetsSub));
+    // Manual writes the domain name with a trailing space ("CHANNEL
+    // STRIP " / "BUS COMP ") in capture — match exactly so firmware
+    // recognises the layout.
     device_->send(buildLcdHeader(presetsSelectCs_
-        ? "CHANNEL STRIP" : "BUS COMP"));
+        ? "CHANNEL STRIP " : "BUS COMP "));
+    auto sendListBody = [&](std::string_view prev2, std::string_view prev1,
+                            std::string_view curr, std::string_view next1,
+                            std::string_view next2) {
+        device_->send(buildPresetListScroll(prev2, prev1, curr, next1, next2));
+        device_->send(buildLcdSubHeader("PRESETS"));
+        device_->send(buildMenuIndicator08());
+        device_->send(buildMenuCommit());
+    };
     if (!focusedTrack_) {
-        device_->send(buildTrackNameTripleLarge("", "<no track>", ""));
-        sendCommit();
+        sendListBody("", "", "<no track>", "", "");
         return;
     }
     auto match = uf8::lookupPluginOnTrack(
@@ -1322,8 +1324,7 @@ void UC1Surface::renderPresetsSubscreen_()
         presetsSelectCs_ ? uf8::Domain::ChannelStrip
                          : uf8::Domain::BusComp);
     if (!match.map) {
-        device_->send(buildTrackNameTripleLarge("", "<no plug-in>", ""));
-        sendCommit();
+        sendListBody("", "", "<no plug-in>", "", "");
         return;
     }
     char name[128] = {};
@@ -1332,12 +1333,15 @@ void UC1Surface::renderPresetsSubscreen_()
     int numPresets = 0;
     const int curIdx = TrackFX_GetPresetIndex(
         static_cast<MediaTrack*>(focusedTrack_), match.fxIndex, &numPresets);
+    // REAPER's preset API doesn't expose names without navigating, so
+    // adjacent slots show "..." when more presets exist in that
+    // direction. Visually less rich than SSL360's full prev/next
+    // names but functional and avoids a destructive walk-and-restore.
     const std::string prev = (curIdx > 0) ? "..." : "";
     const std::string next = (curIdx + 1 < numPresets) ? "..." : "";
-    device_->send(buildTrackNameTripleLarge(prev,
+    sendListBody("", prev,
         name[0] ? std::string{name} : std::string{"<no name>"},
-        next));
-    sendCommit();
+        next, "");
 }
 
 void UC1Surface::pushKnobReadout_(uint8_t knobId, void* trackRaw, int fxIdx,
@@ -2069,6 +2073,13 @@ void UC1Surface::pollKnobRings_()
 void UC1Surface::refresh()
 {
     if (!device_) return;
+    // Menu modes (PRESETS / ROUTING / EXT_FUNCS / TRANSPORT) own the
+    // LCD content. refresh() repaints the MAIN-mode carousel + central
+    // label which would clobber the menu rendering on track focus
+    // changes. Skip everything when not in MAIN — pollKnobRings_ /
+    // pollButtonLeds_ continue to mirror plug-in state to LEDs every
+    // tick regardless, so we don't need refresh() for that.
+    if (mode_ != Uc1Mode::Main) return;
 
     auto bindings = focusedTrack_ ? lookupBindingsOnTrack(focusedTrack_) : UC1Bindings{};
     // BC bindings live on the BC anchor (independent of CS focus).

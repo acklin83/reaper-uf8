@@ -325,6 +325,61 @@ std::vector<uint8_t> buildLcdHeader(std::string_view text)
     return buildFrame(0x66, data);
 }
 
+std::vector<uint8_t> buildLcdSubHeader(std::string_view text)
+{
+    // FF 66 <len> 07 <text> CKSUM. Same as buildLcdHeader but with the
+    // 0x07 prefix byte instead of 0x01.
+    std::vector<uint8_t> data;
+    data.reserve(1 + text.size());
+    data.push_back(0x07);
+    for (char c : text) data.push_back(static_cast<uint8_t>(c));
+    return buildFrame(0x66, data);
+}
+
+std::vector<uint8_t> buildPresetListScroll(std::string_view prev2,
+                                           std::string_view prev1,
+                                           std::string_view curr,
+                                           std::string_view next1,
+                                           std::string_view next2)
+{
+    // FF 66 4C 06 + 5 × (14-char slot + \0) + CKSUM. Each slot is 15
+    // bytes total (14 ASCII + 1 null terminator). String shorter than
+    // 14 chars zero-pads to slot width; longer truncates.
+    constexpr size_t kSlotChars = 14;
+    constexpr size_t kSlotBytes = kSlotChars + 1;
+    std::vector<uint8_t> data(1 + 5 * kSlotBytes, 0x00);
+    data[0] = 0x06;
+    auto writeSlot_ = [&](size_t idx, std::string_view s) {
+        const size_t base = 1 + idx * kSlotBytes;
+        const size_t n = std::min(s.size(), kSlotChars);
+        for (size_t i = 0; i < n; ++i) {
+            data[base + i] = static_cast<uint8_t>(s[i]);
+        }
+        // Slot is zero-initialised; the trailing kSlotChars-n bytes
+        // plus the null terminator are already 0x00.
+    };
+    writeSlot_(0, prev2);
+    writeSlot_(1, prev1);
+    writeSlot_(2, curr);
+    writeSlot_(3, next1);
+    writeSlot_(4, next2);
+    return buildFrame(0x66, data);
+}
+
+std::vector<uint8_t> buildMenuCommit()
+{
+    // FF 66 02 09 00 CKSUM.
+    const uint8_t data[2] = {0x09, 0x00};
+    return buildFrame(0x66, data);
+}
+
+std::vector<uint8_t> buildMenuIndicator08()
+{
+    // FF 66 02 08 00 CKSUM.
+    const uint8_t data[2] = {0x08, 0x00};
+    return buildFrame(0x66, data);
+}
+
 std::vector<uint8_t> buildCentralLabel(std::string_view fourChars)
 {
     // FF 66 05 01 <4 ASCII> CKSUM

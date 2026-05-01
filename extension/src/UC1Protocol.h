@@ -298,6 +298,35 @@ std::vector<uint8_t> buildCentralLabel(std::string_view fourChars);
 // headers ("PRESETS", "CHANNEL STRIP ", "Auto Makeup Offset" …).
 std::vector<uint8_t> buildLcdHeader(std::string_view text);
 
+// Variant header with a different prefix byte (0x07 instead of 0x01)
+// — SSL360 sends this as a sub-header in the PRESETS browse view
+// (FF 66 08 07 "PRESETS" decoded from uc1_38 t=8.478015). Same wire
+// format otherwise: FF 66 <len> 07 <text> CKSUM.
+std::vector<uint8_t> buildLcdSubHeader(std::string_view text);
+
+// 5-slot scrollable list rendered in the PRESETS browse subscreen
+// (and likely other menu drill-downs). Frame:
+//   FF 66 4C 06 <slot0 14B+\0> <slot1 14B+\0> <slot2 14B+\0>
+//                <slot3 14B+\0> <slot4 14B+\0> CKSUM
+// = 1 prefix byte + 5×15 byte slots = 76 bytes payload. Slot 2 (the
+// middle) is the currently-selected entry; slots 0/1 are prev2/prev1
+// and 3/4 are next1/next2. Decoded from uc1_38 t=8.477832.
+std::vector<uint8_t> buildPresetListScroll(std::string_view prev2,
+                                           std::string_view prev1,
+                                           std::string_view curr,
+                                           std::string_view next1,
+                                           std::string_view next2);
+
+// Generic "render commit / redraw" sentinel frame the firmware needs
+// after every menu-content update. SSL360 sends this trailing every
+// PRESETS / EXT_FUNCS layout change. Frame: FF 66 02 09 00 CKSUM.
+std::vector<uint8_t> buildMenuCommit();
+
+// Auxiliary indicator frame seen in PRESETS browse (uc1_38 t=8.478103):
+// FF 66 02 08 00 CKSUM. Likely "scroll position" or similar; sent
+// alongside the commit by SSL360 in the browse path.
+std::vector<uint8_t> buildMenuIndicator08();
+
 // Central Control Panel mode banner (decoded uc1_37 + uc1_38 2026-05-01).
 // Frame: FF 66 03 00 <mode> 00 <chk>. Selects which top-of-LCD layout
 // the firmware renders. All six bytes confirmed against captures.
