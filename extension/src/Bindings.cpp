@@ -13,6 +13,7 @@
 #include "Bindings.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -177,6 +178,19 @@ std::unordered_map<std::string, BuiltinDescriptor> g_builtins;
 // we restore (or invalidate) this slot.
 int g_savedLayer = -1;
 
+// Long-press support — measured from press-edge to release-edge per
+// (layer, button-id). dispatch() runs single-threaded on the libusb
+// worker thread, so this map needs no locking. Threshold is 500 ms
+// (matches generic "tap vs hold" UX expectations).
+constexpr std::chrono::milliseconds kLongPressThreshold{500};
+std::unordered_map<uint32_t, std::chrono::steady_clock::time_point> g_pressStart;
+
+uint32_t pressKey(int layer, ButtonId id)
+{
+    return (static_cast<uint32_t>(layer) << 16)
+         | static_cast<uint32_t>(static_cast<uint16_t>(id));
+}
+
 // ---- Factory defaults -----------------------------------------------------
 
 Binding mkBuiltin(const char* name, Behavior b, const char* label,
@@ -322,7 +336,15 @@ std::string serialize(const Config& c)
             os << ", \"color\": ["
                << int(kv.second.color[0]) << ", "
                << int(kv.second.color[1]) << ", "
-               << int(kv.second.color[2]) << "]}";
+               << int(kv.second.color[2]) << "]";
+            if (kv.second.hasLongPress) {
+                os << ", \"long_press\": {";
+                os << "\"type\": ";    appendEscaped(os, actionTypeName(kv.second.longPressType));
+                os << ", \"action\": "; appendEscaped(os, kv.second.longPressAction);
+                os << ", \"param\": "  << kv.second.longPressParam;
+                os << "}";
+            }
+            os << "}";
         }
         if (!first) os << "\n      ";
         os << "}\n";
@@ -371,6 +393,17 @@ bool parseLayer_(wdl_json_element* lobj, Layer& out)
                     bd.color[k] = static_cast<uint8_t>(x);
                 }
             }
+        }
+        // Long-press is optional — omit means hasLongPress stays false,
+        // so older configs that predate this field still load cleanly.
+        if (auto* lp = be->get_item_by_name("long_press"); lp && lp->is_object()) {
+            bd.hasLongPress = true;
+            if (auto* v = lp->get_item_by_name("type"))
+                bd.longPressType = actionTypeFromName(v->get_string_value());
+            if (auto* v = lp->get_item_by_name("action"))
+                if (auto* s = v->get_string_value()) bd.longPressAction = s;
+            if (auto* v = lp->get_item_by_name("param"))
+                if (auto* s = v->get_string_value(true)) bd.longPressParam = std::atoi(s);
         }
         out.bindings[bid] = std::move(bd);
     }
@@ -489,6 +522,44 @@ const Config& get()
     return g_cfg;
 }
 
+namespace {
+
+// Run a single action immediately. Used both for the primary-binding path
+// and for the long-press secondary path. `firing` mirrors the behavior
+// semantics (press-edge for Momentary/Toggle, every edge for Hold) but
+// the long-press call always passes firing=true (it's an instantaneous
+// fire on release).
+void runAction_(ActionType type, const std::string& action, int param,
+                bool firing, bool pressed)
+{
+    switch (type) {
+        case ActionType::Noop:
+            break;
+        case ActionType::Reaper: {
+            if (!firing) break;
+            const int actionId = std::atoi(action.c_str());
+            if (actionId <= 0) break;
+            auto it = g_builtins.find("__reaper_action__");
+            if (it != g_builtins.end() && it->second.run) {
+                it->second.run(true, pressed, actionId);
+            }
+            break;
+        }
+        case ActionType::Keyboard:
+            // Phase D — needs platform key-event injection.
+            break;
+        case ActionType::Builtin: {
+            auto it = g_builtins.find(action);
+            if (it != g_builtins.end() && it->second.run) {
+                it->second.run(firing, pressed, param);
+            }
+            break;
+        }
+    }
+}
+
+} // namespace
+
 bool dispatch(ButtonId id, bool pressed)
 {
     if (id == ButtonId::None) return false;
@@ -504,51 +575,41 @@ bool dispatch(ButtonId id, bool pressed)
         bd = it->second;   // copy under lock so the rest runs lock-free
     }
 
-    // Per-behavior framing for the handler:
-    //   firing  = "this is the moment the action should run"
-    //             (press-edge for Momentary/Toggle; every edge for Hold)
-    //   pressed = current physical state of the button (matters for Hold,
-    //             and for builtins that drive LED feedback off the press
-    //             state regardless of action firing).
+    // Long-press support (Momentary primary only). Defer the primary-
+    // action fire until release-edge so we can choose between primary
+    // and long-press based on the held duration.
+    const bool longPressArmed =
+        bd.hasLongPress && bd.behavior == Behavior::Momentary;
+    if (longPressArmed) {
+        const uint32_t k = pressKey(layer, id);
+        if (pressed) {
+            g_pressStart[k] = std::chrono::steady_clock::now();
+        } else {
+            auto it = g_pressStart.find(k);
+            if (it != g_pressStart.end()) {
+                const auto held = std::chrono::steady_clock::now() - it->second;
+                g_pressStart.erase(it);
+                if (held >= kLongPressThreshold) {
+                    runAction_(bd.longPressType, bd.longPressAction,
+                               bd.longPressParam, /*firing*/ true,
+                               /*pressed*/ false);
+                } else {
+                    runAction_(bd.type, bd.action, bd.param,
+                               /*firing*/ true, /*pressed*/ false);
+                }
+            }
+        }
+        return true;
+    }
+
+    // Standard (no long-press) path — fire per behavior.
     bool firing;
     switch (bd.behavior) {
         case Behavior::Momentary: firing = pressed; break;
         case Behavior::Toggle:    firing = pressed; break;
         case Behavior::Hold:      firing = true;    break;
     }
-
-    // A binding to ActionType::Noop or to an unknown builtin is "consumed"
-    // (we still return true to suppress the legacy fallback) so explicit
-    // user binds override MCU passthrough as expected.
-    switch (bd.type) {
-        case ActionType::Noop:
-            break;
-        case ActionType::Reaper: {
-            if (firing) {
-                const int actionId = std::atoi(bd.action.c_str());
-                if (actionId > 0) {
-                    // Main_OnCommand must run on the main thread; we route
-                    // it through main.cpp's queueInput via a sentinel
-                    // builtin so this TU stays free of REAPER-API calls.
-                    auto it = g_builtins.find("__reaper_action__");
-                    if (it != g_builtins.end() && it->second.run) {
-                        it->second.run(true, pressed, actionId);
-                    }
-                }
-            }
-            break;
-        }
-        case ActionType::Keyboard:
-            // Phase C — paired with the binding-edit UI.
-            break;
-        case ActionType::Builtin: {
-            auto it = g_builtins.find(bd.action);
-            if (it != g_builtins.end() && it->second.run) {
-                it->second.run(firing, pressed, bd.param);
-            }
-            break;
-        }
-    }
+    runAction_(bd.type, bd.action, bd.param, firing, pressed);
     return true;
 }
 

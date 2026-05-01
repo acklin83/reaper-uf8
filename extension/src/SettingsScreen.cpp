@@ -298,7 +298,7 @@ void line_(VCanvas& c, float x1, float y1, float x2, float y2,
 // (numbered controls).
 void drawUf8Vector(ImGui_Context* ctx, ButtonId& sel)
 {
-    constexpr float W = 1000, H = 470;
+    constexpr float W = 1000, H = 490;
 
     double oxd = 0, oyd = 0;
     ImGui_GetCursorScreenPos(ctx, &oxd, &oyd);
@@ -366,10 +366,11 @@ void drawUf8Vector(ImGui_Context* ctx, ButtonId& sel)
     constexpr float kStripX0 = 138, kStripW = 80, kStripGap = 7;
     for (int i = 0; i < 8; ++i) {
         const float sx = kStripX0 + i * (kStripW + kStripGap);
-        // Top soft-key (LED bar) — locked in v1
-        rect_(c, sx + 6, 18, kStripW - 12, 14, 0x252A33FF, 0x4A5060FF, 2.0);
+        // Top soft-key — taller (22 px) so a future label-text frame can
+        // fit. Stays locked in v1.
+        rect_(c, sx + 6, 12, kStripW - 12, 22, 0x252A33FF, 0x4A5060FF, 2.0);
         // Scribble LCD with placeholder logo
-        rect_(c, sx + 4, 38, kStripW - 8, 60, 0x080C12FF, 0x444A55FF, 2.0);
+        rect_(c, sx + 4, 40, kStripW - 8, 58, 0x080C12FF, 0x444A55FF, 2.0);
         drawTextCentered_(c, sx + kStripW / 2.0f, 60, 0x4488DDFF, "SSL");
         drawTextCentered_(c, sx + kStripW / 2.0f, 78, 0x4488DDFF, "UF8");
         // V-Pot (large dial with notch)
@@ -383,7 +384,7 @@ void drawUf8Vector(ImGui_Context* ctx, ButtonId& sel)
         drawLocked(sx + 8, 192, kStripW - 16, 16, "SEL");
         // Fader: scale ticks + track + cap
         const float fx = sx + kStripW / 2.0f;
-        const float fyTop = 220, fyBot = 420;
+        const float fyTop = 220, fyBot = 440;
         // Scale tick marks (left side)
         for (int t = 0; t <= 10; ++t) {
             const float ty = fyTop + (fyBot - fyTop) * (t / 10.0f);
@@ -447,30 +448,42 @@ void drawUf8Vector(ImGui_Context* ctx, ButtonId& sel)
     drawHwBtn(83,  396, 33, 22, ButtonId::AutoTouch, "TOUCH");
 
     // ---- Right panel ----
-    // Top cluster: SOFT KEYS (locked) on the left, PAN / FINE on the right.
-    drawGroupLabel(850, 6, "SOFT KEYS");
-    drawLocked(850, 22, 32, 20, "V-POT");
-    drawLocked(886, 22, 26, 20, "1");
-    drawLocked(916, 22, 26, 20, "2");
-    drawLocked(850, 44, 32, 20, "3");
-    drawLocked(886, 44, 26, 20, "4");
-    drawLocked(916, 44, 26, 20, "5");
+    // SOFT KEYS — 2x3 grid spans the full right-panel width now that
+    // PAN / FINE moved underneath.
+    drawGroupLabel(852, 6, "SOFT KEYS");
+    drawLocked(852, 22, 42, 20, "V-POT");
+    drawLocked(898, 22, 42, 20, "1");
+    drawLocked(944, 22, 41, 20, "2");
+    drawLocked(852, 46, 42, 20, "3");
+    drawLocked(898, 46, 42, 20, "4");
+    drawLocked(944, 46, 41, 20, "5");
 
-    drawHwBtn(945, 22, 40, 20, ButtonId::Pan,  "PAN");
-    drawHwBtn(945, 44, 40, 20, ButtonId::Fine, "FINE");
+    // PAN + FINE — own row below SOFT KEYS, with breathing room.
+    drawHwBtn(852, 80, 64, 22, ButtonId::Pan,  "PAN");
+    drawHwBtn(921, 80, 64, 22, ButtonId::Fine, "FINE");
 
-    drawGroupLabel(852, 70, "SELECTION MODE");
-    drawLocked(852, 88,  43, 20, "NORM");
-    drawLocked(899, 88,  43, 20, "REC");
-    drawLocked(946, 88,  39, 20, "AUTO");
+    drawGroupLabel(852, 112, "SELECTION MODE");
+    drawLocked(852, 128, 43, 20, "NORM");
+    drawLocked(899, 128, 43, 20, "REC");
+    drawLocked(946, 128, 39, 20, "AUTO");
 
-    // CHANNEL label sits ABOVE the encoder so it never collides with the
-    // NAV / NUDGE / FOCUS row beneath. Encoder shrunk slightly so the
-    // whole right column fits cleanly into the new 470 px canvas height.
-    drawGroupLabel(902, 120, "CHANNEL");
+    // CHANNEL encoder — clickable hit-area covers the dial body so users
+    // can edit the encoder push binding directly from the schematic.
+    // Label centered over the dial.
     {
-        constexpr float cx = 918, cy = 168, r = 32;
-        circle_(c, cx, cy, r,        0x14181EFF, 0x4A5060FF);
+        constexpr float cx = 918, cy = 200, r = 32;
+        // Hit-area spans the dial bounds. Selecting drives the
+        // ChannelPush binding.
+        const float hbx = cx - r, hby = cy - r;
+        const float hbw = 2 * r, hbh = 2 * r;
+        const bool hot      = inside(hbx, hby, hbw, hbh);
+        const bool selected = (ButtonId::ChannelPush == sel);
+        if (hot && canvasClicked && leftBtn == 0) sel = ButtonId::ChannelPush;
+
+        const uint32_t edge = selected ? 0xAACCFFFF
+                              : hot     ? 0x6688AAFF
+                                        : 0x4A5060FF;
+        circle_(c, cx, cy, r,        0x14181EFF, edge);
         circle_(c, cx, cy, r - 3,    0x252A33FF, 0x555A66FF);
         circle_(c, cx, cy, r * 0.78f, 0x383C44FF, 0x6A6E78FF);
         line_(c, cx, cy - r * 0.95f, cx, cy - r * 0.62f, 0xE0E0E0FF, 2.5);
@@ -483,24 +496,27 @@ void drawUf8Vector(ImGui_Context* ctx, ButtonId& sel)
             const float y2 = cy + std::sin(ang) * r1;
             line_(c, x1, y1, x2, y2, 0x555A66FF, 1.0);
         }
+        // Centered CHANNEL label above the dial.
+        drawTextCentered_(c, cx, 158, 0x9CA0AAFF, "CHANNEL");
     }
 
-    // NAV / NUDGE / FOCUS — each button widened to 44 so all three labels
-    // breathe at the default font weight.
-    drawHwBtn(852, 210, 44, 22, ButtonId::Nav,      "NAV");
-    drawHwBtn(898, 210, 44, 22, ButtonId::Nudge,    "NUDGE");
-    drawHwBtn(944, 210, 41, 22, ButtonId::EncFocus, "FOCUS");
+    // NAV / NUDGE / FOCUS — sit below the encoder. Encoder Push has its
+    // own click target on the dial above (kept the labelled bar too so
+    // users still see the binding name explicitly).
+    drawHwBtn(852, 244, 44, 22, ButtonId::Nav,      "NAV");
+    drawHwBtn(898, 244, 44, 22, ButtonId::Nudge,    "NUDGE");
+    drawHwBtn(944, 244, 41, 22, ButtonId::EncFocus, "FOCUS");
 
-    drawHwBtn(852, 236, 133, 18, ButtonId::ChannelPush, "ENCODER PUSH");
+    drawHwBtn(852, 270, 133, 18, ButtonId::ChannelPush, "ENCODER PUSH");
 
-    drawGroupLabel(902, 264, "BANK");
-    drawHwBtn(870, 282, 42, 22, ButtonId::BankLeft,  "\xE2\x97\x82");
-    drawHwBtn(922, 282, 42, 22, ButtonId::BankRight, "\xE2\x96\xB8");
+    drawGroupLabel(902, 298, "BANK");
+    drawHwBtn(870, 314, 42, 22, ButtonId::BankLeft,  "\xE2\x97\x82");
+    drawHwBtn(922, 314, 42, 22, ButtonId::BankRight, "\xE2\x96\xB8");
 
     // Zoom pad — cross. Shifted down to follow the encoder column.
     {
         constexpr float cx = 918;
-        constexpr float baseY = 348;
+        constexpr float baseY = 372;
         drawHwBtn(cx - 17, baseY - 32, 34, 26, ButtonId::ZoomUp,
                   "\xE2\x96\xB2");
         drawHwBtn(cx - 54, baseY,      34, 26, ButtonId::ZoomLeft,
@@ -513,8 +529,8 @@ void drawUf8Vector(ImGui_Context* ctx, ButtonId& sel)
                   "\xE2\x96\xBC");
     }
 
-    // Brand line (silk-screen)
-    drawTextCentered_(c, 500, 448, 0x9CA0AAFF, "Solid State Logic");
+    // Brand line — replaces the SSL silk-screen with our product name.
+    drawTextCentered_(c, 500, 470, 0x9CA0AAFF, "Rea-Sixty");
 }
 
 // Editor panel for the currently-selected button. Reads the binding
@@ -643,7 +659,104 @@ void drawBindingEditor(ImGui_Context* ctx, int layer, ButtonId id)
         ImGui_PopItemWidth(ctx);
     }
 
+    // ---- Long-press secondary action (only for Momentary primary) ----
     ImGui_Spacing(ctx);
+    ImGui_Separator(ctx);
+    ImGui_Text(ctx, "Long-press (held > 0.5 s)");
+    if (bd.behavior != Behavior::Momentary) {
+        ImGui_Text(ctx, "  Long-press is only available for Momentary "
+                        "primary actions.");
+        if (bd.hasLongPress) {
+            // Behaviour was just switched away from Momentary — clear
+            // the dangling long-press payload so it doesn't surprise
+            // users when they switch back.
+            bd.hasLongPress = false;
+            dirty = true;
+        }
+    } else {
+        bool enabled = bd.hasLongPress;
+        if (ImGui_Checkbox(ctx, "Enable long-press action", &enabled)) {
+            bd.hasLongPress = enabled;
+            dirty = true;
+        }
+        if (bd.hasLongPress) {
+            // Type
+            int lt = static_cast<int>(bd.longPressType);
+            {
+                double w = 240;
+                ImGui_PushItemWidth(ctx, w);
+                if (ImGui_Combo(ctx, "Long-press type", &lt, kTypeItems,
+                                /*popup_max_height_in_items*/ nullptr)) {
+                    bd.longPressType = static_cast<ActionType>(lt);
+                    dirty = true;
+                }
+                ImGui_PopItemWidth(ctx);
+            }
+            // Argument
+            if (bd.longPressType == ActionType::Builtin) {
+                const std::string preview = bd.longPressAction.empty()
+                    ? std::string("<pick a built-in>")
+                    : builtinDisplayName(bd.longPressAction);
+                double w = 320;
+                ImGui_PushItemWidth(ctx, w);
+                if (ImGui_BeginCombo(ctx, "Long-press built-in",
+                                     preview.c_str(), /*flags*/ nullptr)) {
+                    for (auto& n : builtinNames()) {
+                        std::string label = builtinDisplayName(n);
+                        if (label != n) label += "   [" + n + "]";
+                        bool s = (n == bd.longPressAction);
+                        if (ImGui_Selectable(ctx, label.c_str(), &s,
+                                             nullptr, nullptr, nullptr)) {
+                            bd.longPressAction = n;
+                            dirty = true;
+                        }
+                    }
+                    ImGui_EndCombo(ctx);
+                }
+                ImGui_PopItemWidth(ctx);
+            } else if (bd.longPressType == ActionType::Reaper) {
+                char buf[128] = {0};
+                std::strncpy(buf, bd.longPressAction.c_str(), sizeof(buf) - 1);
+                double w = 320;
+                ImGui_PushItemWidth(ctx, w);
+                if (ImGui_InputTextWithHint(ctx, "Long-press Action ID",
+                                            "e.g. 40044",
+                                            buf, sizeof(buf), nullptr)) {
+                    bd.longPressAction = buf;
+                    dirty = true;
+                }
+                ImGui_PopItemWidth(ctx);
+            } else if (bd.longPressType == ActionType::Keyboard) {
+                char buf[128] = {0};
+                std::strncpy(buf, bd.longPressAction.c_str(), sizeof(buf) - 1);
+                double w = 320;
+                ImGui_PushItemWidth(ctx, w);
+                if (ImGui_InputTextWithHint(ctx, "Long-press key chord",
+                                            "e.g. ctrl+shift+s",
+                                            buf, sizeof(buf), nullptr)) {
+                    bd.longPressAction = buf;
+                    dirty = true;
+                }
+                ImGui_PopItemWidth(ctx);
+            }
+            // Param (only for builtins that read it)
+            if (bd.longPressType == ActionType::Builtin
+                && builtinUsesParam(bd.longPressAction)) {
+                double w = 100;
+                ImGui_PushItemWidth(ctx, w);
+                int p = bd.longPressParam;
+                if (ImGui_InputInt(ctx, "Long-press param", &p,
+                                   nullptr, nullptr, nullptr)) {
+                    bd.longPressParam = p;
+                    dirty = true;
+                }
+                ImGui_PopItemWidth(ctx);
+            }
+        }
+    }
+
+    ImGui_Spacing(ctx);
+    ImGui_Separator(ctx);
     if (ImGui_Button(ctx, "Clear binding (Do nothing)",
                      /*size_w*/ nullptr, /*size_h*/ nullptr)) {
         bd = Binding{};   // type=Noop, behavior=Momentary, no action

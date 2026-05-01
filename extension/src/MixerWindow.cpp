@@ -89,14 +89,22 @@ bool MixerWindow::isOpen() const { return impl_->visible; }
 
 void MixerWindow::onRunTick()
 {
-    if (!impl_->visible) return;
     impl_->ensureCtx();
     if (!impl_->ctx) return;  // CreateContext failed (ReaImGui not installed?)
 
+    // Always call Begin / End — even when "closed" — and let p_open drive
+    // the visibility. Skipping Begin entirely on closed frames left
+    // ReaImGui v0.10 stuck in a state where the next p_open=true did NOT
+    // re-open the window, manifesting as the 360-button toggling once
+    // open + once closed and then no-op'ing on every subsequent press.
+    // Begin's contract: if *p_open is false on entry, Begin returns
+    // false immediately (window stays hidden); if true, the window
+    // shows and the close-X button writes false to *p_open on click.
+    // Either way End must follow.
     const int pushed = ThemeBridge::pushAll(impl_->ctx);
 
-    bool open = true;
-    if (ImGui_Begin(impl_->ctx, "Rea-Sixty", &open, /*flags*/ nullptr)) {
+    bool open = impl_->visible;
+    if (ImGui_Begin(impl_->ctx, "Rea-Sixty", &open, /*flags*/ nullptr) && open) {
 
         // -- Left rail: section list -------------------------------------
         double railW = kRailWidthPx;
@@ -131,10 +139,8 @@ void MixerWindow::onRunTick()
 
     ThemeBridge::popAll(impl_->ctx, pushed);
 
-    // User clicked the OS close button → drop visibility. The context
-    // stays alive (no DestroyContext in v0.10); next toggle re-Begins and
-    // ReaImGui re-creates the OS window.
-    if (!open) impl_->visible = false;
+    // p_open carries through any X-click made by the user → sync our flag.
+    impl_->visible = open;
 }
 
 } // namespace uf8

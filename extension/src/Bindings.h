@@ -79,6 +79,16 @@ struct Binding {
     int         param    = 0;
     std::string label;
     uint8_t     color[3] = {0, 0, 0};
+
+    // Long-press secondary action. When `hasLongPress` is true AND the
+    // primary `behavior` is Momentary, holding the button longer than
+    // ~500 ms fires the long-press action instead of the primary action.
+    // Toggle / Hold primary behaviours ignore long-press (semantics are
+    // ambiguous; UI greys the long-press section out for those).
+    bool        hasLongPress     = false;
+    ActionType  longPressType    = ActionType::Noop;
+    std::string longPressAction;
+    int         longPressParam   = 0;
 };
 
 struct Layer {
