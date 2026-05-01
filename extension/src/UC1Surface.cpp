@@ -1603,38 +1603,13 @@ void UC1Surface::pollGainReduction_()
         if (b.channelMap) csCompGr = readGr(csTr, b.channelFxIdx);
     }
 
-    // CS Gate GR: SSL CS plug-in exposes NO real-time GR readback
-    // (verified 2026-05-01 via param-dump action: only Gate Range moves
-    // when sweeping the Range knob; PreSonus VST3 GainReduction_dB
-    // returns 0 even with Range fully open). SSL360 must read the
-    // value via a private SSL-internal IPC channel.
-    //
-    // Workaround: drive the Gate GR strip from the Gate Range parameter
-    // itself. With no audio, that exactly matches what the user sees on
-    // SSL360 (Range = max gate attenuation = displayed GR). With audio,
-    // it shows the worst-case attenuation rather than real-time gate
-    // activity — imperfect but more informative than a dark strip.
-    //
-    // Range goes 0..40 dB on the SSL plug-in but the GR strip only
-    // visualises up to ~15 dB (5 LEDs × 3 dB per LED in stripTargets);
-    // beyond 15 dB the strip stays fully lit. That matches SSL360's
-    // own behaviour at high Range settings.
+    // CS Gate GR: TODO. SSL CS2 doesn't expose a Gate-only readout via
+    // GainReduction_dB; the user's hardware shows Gate GR independently
+    // (it lit up alongside the Range knob during dual_35 capture work).
+    // Until we find the right data source (separate parmname? Range param
+    // value? real-time signal vs Gate-Threshold?), drive at 0 so the
+    // strip stays dark — better than mirroring Comp GR onto it.
     float csGateGr = 0.0f;
-    if (csTr) {
-        // GateRange linkIdx is 29 in the SSL 360 Link slot table —
-        // resolved against the uf8::PluginMap (separate from the
-        // UC1Bindings struct above).
-        auto uf8Match = uf8::lookupPluginOnTrack(csTr, uf8::Domain::ChannelStrip);
-        if (uf8Match.map) {
-            const uf8::LinkSlot* slot =
-                uf8::findSlotByLinkIdx(*uf8Match.map, 29);
-            if (slot && slot->vst3Param >= 0) {
-                const double norm = TrackFX_GetParamNormalized(
-                    csTr, uf8Match.fxIndex, slot->vst3Param);
-                csGateGr = static_cast<float>(norm * 40.0);
-            }
-        }
-    }
 
     pushGainReduction(bcGr, csCompGr, csGateGr);
 }
