@@ -211,6 +211,22 @@ int UC1Surface::poll()
     for (const auto& e : knobs)   { handleKnob_(e);   ++handled; }
     for (const auto& e : buttons) { handleButton_(e); ++handled; }
 
+    // BC-scroll overlay revert. uc1_41 capture: SSL360 reverts the
+    // central LCD from "BC scroll" sub-mode (banner 0x01 sub=0x02 +
+    // header "BUS COMP 2") to plain MAIN (sub=0x00 + buildCentralLabel
+    // "MAIN"/"CS 2"/etc.) ~1.5s after the last detent. Triple keeps its
+    // BC content. Clear the flag and run refresh() so its central-label
+    // branch picks the regular path now that the overlay is off.
+    if (bcScrollOverlayActive_
+        && std::chrono::steady_clock::now() >= bcScrollOverlayUntil_
+        && device_
+        && mode_ == Uc1Mode::Main)
+    {
+        bcScrollOverlayActive_ = false;
+        device_->send(buildCentralMode(CentralMode::Main, 0x00));
+        refresh();
+    }
+
     // Per-tick value poll. Catches every cause of focused-param change:
     //   - UF8 Page <-/-> shifted slotIdx (text changes)
     //   - UF8 V-Pot rotation on the focused track (value changes)
@@ -594,13 +610,25 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
 
         MediaTrack* tr = GetTrack(nullptr, found);
         if (tr) {
-            // Anchor BC display BEFORE updating REAPER's selection so
-            // the SetSurfaceSelected callback's setFocusedTrack chain
-            // sees the new anchor in place.
+            // Set overlay flag BEFORE refresh chain so refresh()'s
+            // central-label branch picks the "BUS COMP 2" header. If
+            // we set it after, refresh would emit buildCentralLabel
+            // ("MAIN"/"CS 2") and overwrite the overlay header on the
+            // same frame slot (FF 66 …01…). Decoded uc1_41 2026-05-01.
+            bcScrollOverlayActive_ = true;
+            bcScrollOverlayUntil_ =
+                std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
             bcAnchorTrack_ = tr;
             SetOnlyTrackSelected(tr);
             reasixty_followSelectedInMixer(tr);
             setFocusedTrack(tr);
+            // Explicit refresh — setFocusedTrack early-exits when
+            // focusedTrack_ already == tr (e.g. SetSurfaceSelected
+            // callback raced ahead), so the BC carousel triple
+            // wouldn't otherwise repaint on this detent. refresh() is
+            // gated to MAIN mode internally; idempotent if it already
+            // ran via the callback.
+            refresh();
         }
         if (logThis) {
             char line[96];
@@ -1397,6 +1425,17 @@ void UC1Surface::renderExtFuncsSubscreen_()
     // lookup → TrackFX_FormatParamValueNormalized. Display in the
     // value field (FF 66 <len> 0E). Skip silently if no plug-in /
     // entry isn't on the focused plug-in.
+    //
+    // NOTE 2026-05-01: yellow round-indicator (FF 66 04 0D ...) does
+    // not paint on the LCD even when bytes match capture verbatim.
+    // Header text + value text DO render. Verbatim replay of the
+    // exact uc1_40 t=8.700 burst (banner+header+triple+value+unit+
+    // indicator) also fails to paint the arc. Conclusion: SSL360
+    // must send a precursor "register/init" frame earlier in the
+    // session that primes the LCD's indicator zone. Capture sweep
+    // for that frame is the next debugging step. Until then, we
+    // still send the correct bytes — the value text and slot
+    // resolution are useful regardless.
     if (focusedTrack_) {
         auto match = uf8::lookupPluginOnTrack(focusedTrack_,
                                               uf8::Domain::ChannelStrip);
@@ -1411,21 +1450,12 @@ void UC1Surface::renderExtFuncsSubscreen_()
                     TrackFX_FormatParamValueNormalized(
                         static_cast<MediaTrack*>(focusedTrack_),
                         match.fxIndex, s.vst3Param, v, buf, sizeof(buf));
-                    // Strip the unit suffix (" dB", " Hz", " %"). User
-                    // 2026-05-01: round indicator displays the number
-                    // only — unit is implicit from the param name.
-                    // Take chars before the first space (or whole
-                    // string if no space). Trim leading whitespace
-                    // first so "+5.0 dB" stays as "+5.0".
                     std::string val{buf};
                     while (!val.empty() && val.front() == ' ') val.erase(0, 1);
                     const size_t sp = val.find(' ');
                     if (sp != std::string::npos) val.erase(sp);
                     if (val.size() > 8) val.resize(8);
                     device_->send(buildLcdValue(val));
-                    // Unit frame (always empty per user request) —
-                    // MUST come between value and round-indicator
-                    // or firmware skips painting the yellow arc.
                     device_->send(buildLcdUnit(""));
                     device_->send(buildLcdRoundIndicator(v));
                     break;
@@ -2377,13 +2407,27 @@ void UC1Surface::refresh()
     // colour-bar-enable flag that gates the coloured top-stripe
     // rendering: 0x01 when plugin context exists, 0x00 for MAIN.
     // Plugin presence: CS bound to focused track, BC bound to anchor.
+    //
+    // BC-scroll overlay (uc1_41 2026-05-01): during the ~1.5s overlay
+    // window we replace the central label with "BUS COMP 2" — same
+    // FF 66 …01… frame slot, so without this branch the buildCentralLabel
+    // call below silently overwrites the overlay header set by the BC
+    // encoder handler. We also need the overlay's banner sub=0x02
+    // pushed here because refresh() may run AFTER the encoder handler
+    // (via setFocusedTrack's internal refresh) and reset whatever
+    // banner state was last written.
     const bool havePlugin = bindings.channelMap || bcBindings_.busCompMap;
     device_->send(buildColourBarEnable(havePlugin));
-    const char* label =
-        bindings.channelMap   ? bindings.channelMap->shortName :
-        bcBindings_.busCompMap ? bcBindings_.busCompMap->shortName :
-        "MAIN";
-    device_->send(buildCentralLabel(label));
+    if (bcScrollOverlayActive_) {
+        device_->send(buildCentralMode(CentralMode::Main, 0x02));
+        device_->send(buildLcdHeader("BUS COMP 2"));
+    } else {
+        const char* label =
+            bindings.channelMap   ? bindings.channelMap->shortName :
+            bcBindings_.busCompMap ? bcBindings_.busCompMap->shortName :
+            "MAIN";
+        device_->send(buildCentralLabel(label));
+    }
 
     // Focused-track colour bar — single palette byte. Uses the same
     // quantizer as UF8's color-bar (uf8::quantize on the track's

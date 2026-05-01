@@ -373,7 +373,7 @@ enum class CentralMode : uint8_t {
     Transport      = 0x05,
     ExtFuncs       = 0x06,
 };
-std::vector<uint8_t> buildCentralMode(CentralMode m);
+std::vector<uint8_t> buildCentralMode(CentralMode m, uint8_t subMode = 0x00);
 
 // Routing-order indicator on the ROUTING-mode LCD graph (decoded
 // uc1_37 2026-05-01). Frame: FF 66 02 0A <byte> <chk>.

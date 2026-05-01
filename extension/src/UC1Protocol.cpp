@@ -463,10 +463,14 @@ std::vector<uint8_t> buildCentralLabel(std::string_view fourChars)
     return buildFrame(0x66, data);
 }
 
-std::vector<uint8_t> buildCentralMode(CentralMode m)
+std::vector<uint8_t> buildCentralMode(CentralMode m, uint8_t subMode)
 {
-    // FF 66 03 00 <mode> 00 CKSUM
-    const uint8_t data[3] = {0x00, static_cast<uint8_t>(m), 0x00};
+    // FF 66 03 00 <mode> <sub> CKSUM
+    // Sub-mode byte: 0x00 in normal screens. uc1_41 (2026-05-01) shows
+    // 0x02 during MAIN-mode BC encoder scroll — paints the "BUS COMP"
+    // header overlay + BC track-name carousel on the central LCD until
+    // ~1.5s idle reverts it to sub=0x00.
+    const uint8_t data[3] = {0x00, static_cast<uint8_t>(m), subMode};
     return buildFrame(0x66, data);
 }
 

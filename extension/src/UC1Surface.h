@@ -12,6 +12,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -239,6 +240,17 @@ private:
     // changes the param value via TrackFX_SetParamNormalized). Toggled
     // by Sec-Encoder push.
     bool           extFuncsActive_ = false;
+
+    // MAIN-mode BC-scroll overlay (decoded uc1_41 2026-05-01). On every
+    // BC-encoder detent in MAIN, SSL360 puts the central LCD into a
+    // sub-mode (banner 0x01 sub=0x02) with a "BUS COMP 2" header above
+    // the BC-track-name carousel. After ~1.5s of no further detents the
+    // overlay reverts to plain MAIN (banner 0x01 sub=0x00, header
+    // "MAIN"). bcScrollOverlayUntil_ holds the timeout deadline; the
+    // bool flag tracks whether a revert frame is still pending so we
+    // don't spam it on every poll.
+    bool                                  bcScrollOverlayActive_ = false;
+    std::chrono::steady_clock::time_point bcScrollOverlayUntil_{};
 
     std::mutex               queueMu_;
     std::deque<ButtonEvent>  buttonQueue_;
