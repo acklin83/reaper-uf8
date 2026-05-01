@@ -107,35 +107,40 @@ bool MixerWindow::isOpen() const { return impl_->visible; }
 
 void MixerWindow::onRunTick()
 {
-    if (!impl_->visible) return;
     impl_->ensureCtx();
     if (!impl_->ctx) return;  // CreateContext failed (ReaImGui not installed?)
 
-    // Force a sane size + on-screen position the very first time the
-    // user opens the window in this session, then let user-driven
-    // moves / resizes stick afterwards. FirstUseEver means subsequent
-    // toggles don't snap back to defaults.
-    {
-        int condFirst = ImGui_Cond_FirstUseEver;
-        ImGui_SetNextWindowSize(impl_->ctx, /*w*/ 1100, /*h*/ 760,
-                                &condFirst);
-        ImGui_SetNextWindowPos(impl_->ctx, /*x*/ 80, /*y*/ 80,
-                               &condFirst, /*pivot_x*/ nullptr,
-                               /*pivot_y*/ nullptr);
-    }
+    // ReaImGui v0.10 garbage-collects unused objects between defer
+    // cycles ("valid as long as it is used in each defer cycle unless
+    // attached to a context" — verified via the dylib's embedded docs).
+    // Skipping Begin/End on closed frames had the GC reap our context,
+    // so the next open silently rendered nothing. We now ALWAYS call
+    // Begin/End to keep the context "in use"; *p_open toggles whether
+    // the OS window is shown. End must follow Begin regardless.
+    //
+    // Pin a sane size + position on the very first frame the window
+    // becomes visible (Cond_Appearing reapplies on every closed→open),
+    // so a stuck-off-screen pose can't trap us.
+    int condAppearing = ImGui_Cond_Appearing;
+    ImGui_SetNextWindowSize(impl_->ctx, /*w*/ 1100, /*h*/ 760,
+                            &condAppearing);
+    ImGui_SetNextWindowPos(impl_->ctx, /*x*/ 80, /*y*/ 80,
+                           &condAppearing, /*pivot_x*/ nullptr,
+                           /*pivot_y*/ nullptr);
 
     const int pushed = ThemeBridge::pushAll(impl_->ctx);
 
-    // Window display title is just "Rea-Sixty"; the "##" suffix is the
-    // ImGui id-only tail and bumps every open so the window object is
-    // brand-new each session. Without this, the second-and-later open
-    // got stuck behind ReaImGui v0.10's persisted "previously closed"
-    // state on the same id.
+    // Window display title is just "Rea-Sixty"; the "##session_N"
+    // suffix is the ImGui id-only tail and bumps every closed→open so
+    // each session is a brand-new ImGui window. Together with always-
+    // Begin this gives a clean re-open path even after the user closes
+    // via the title bar X.
     char winId[64];
     std::snprintf(winId, sizeof(winId),
                   "Rea-Sixty##session_%d", impl_->sessionGen);
-    bool open = true;
-    if (ImGui_Begin(impl_->ctx, winId, &open, /*flags*/ nullptr)) {
+    bool open = impl_->visible;
+    if (ImGui_Begin(impl_->ctx, winId, &open, /*flags*/ nullptr)
+        && impl_->visible) {
 
         // -- Left rail: section list -------------------------------------
         double railW = kRailWidthPx;
@@ -170,9 +175,10 @@ void MixerWindow::onRunTick()
 
     ThemeBridge::popAll(impl_->ctx, pushed);
 
-    // X-click sets *p_open=false during Begin. Mirror to our flag so
-    // next tick early-returns and the OS window stays hidden.
-    if (!open) impl_->visible = false;
+    // X-click in the title bar sets *p_open=false during Begin. Mirror
+    // back to our visibility flag so the next 360-toggle correctly
+    // moves false→true.
+    impl_->visible = open;
 }
 
 } // namespace uf8
