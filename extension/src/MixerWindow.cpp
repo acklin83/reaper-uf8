@@ -59,6 +59,7 @@ struct MixerWindow::Impl {
     // ReaImGui closes the OS window. Re-toggling resumes drawing.
     ImGui_Context* ctx = nullptr;
     bool           visible = false;
+    bool           focusOnNext = false;   // request ImGui to raise window
     int            selected = kSecMixer;
 
     void ensureCtx()
@@ -83,28 +84,35 @@ MixerWindow::~MixerWindow() { delete impl_; }
 void MixerWindow::toggle()
 {
     impl_->visible = !impl_->visible;
+    // Coming OUT of "closed": next onRunTick must explicitly raise the
+    // ReaImGui window so the OS-side window actually appears. Without
+    // SetNextWindowFocus, re-Begin'ing after a frame skip silently
+    // no-op'd in v0.10 — the original "360 toggle dies after one
+    // open/close cycle" bug.
+    if (impl_->visible) impl_->focusOnNext = true;
 }
 
 bool MixerWindow::isOpen() const { return impl_->visible; }
 
 void MixerWindow::onRunTick()
 {
+    if (!impl_->visible) return;
     impl_->ensureCtx();
     if (!impl_->ctx) return;  // CreateContext failed (ReaImGui not installed?)
 
-    // Always call Begin / End — even when "closed" — and let p_open drive
-    // the visibility. Skipping Begin entirely on closed frames left
-    // ReaImGui v0.10 stuck in a state where the next p_open=true did NOT
-    // re-open the window, manifesting as the 360-button toggling once
-    // open + once closed and then no-op'ing on every subsequent press.
-    // Begin's contract: if *p_open is false on entry, Begin returns
-    // false immediately (window stays hidden); if true, the window
-    // shows and the close-X button writes false to *p_open on click.
-    // Either way End must follow.
+    // After a closed→open transition, explicitly raise the window so
+    // ReaImGui v0.10 re-creates / focuses the OS-side window. Without
+    // this, the second toggle-on after a previous close silently
+    // no-op'd visually.
+    if (impl_->focusOnNext) {
+        ImGui_SetNextWindowFocus(impl_->ctx);
+        impl_->focusOnNext = false;
+    }
+
     const int pushed = ThemeBridge::pushAll(impl_->ctx);
 
-    bool open = impl_->visible;
-    if (ImGui_Begin(impl_->ctx, "Rea-Sixty", &open, /*flags*/ nullptr) && open) {
+    bool open = true;
+    if (ImGui_Begin(impl_->ctx, "Rea-Sixty", &open, /*flags*/ nullptr)) {
 
         // -- Left rail: section list -------------------------------------
         double railW = kRailWidthPx;
@@ -139,8 +147,9 @@ void MixerWindow::onRunTick()
 
     ThemeBridge::popAll(impl_->ctx, pushed);
 
-    // p_open carries through any X-click made by the user → sync our flag.
-    impl_->visible = open;
+    // X-click sets *p_open=false during Begin. Mirror to our flag so
+    // next tick early-returns and the OS window stays hidden.
+    if (!open) impl_->visible = false;
 }
 
 } // namespace uf8
