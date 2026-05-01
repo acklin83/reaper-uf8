@@ -58,9 +58,15 @@ std::unique_ptr<uf8::HidDevice>   g_hid;
 std::unique_ptr<uc1::UC1Device>   g_uc1_dev;
 std::unique_ptr<uc1::UC1Surface>  g_uc1_surface;
 
-// Plugin Mixer / Settings window (Phase 2.6 + 2.7). Toggled via custom
-// action; rendered from onTimer() so REAPER-API reads stay main-thread.
+// Plugin Mixer / Settings window (Phase 2.6 + 2.7). Rendered from
+// onTimer() so REAPER-API reads stay main-thread. Toggle is requested
+// via the atomic flag below — never call toggle() directly from any
+// path that may run on the USB-input worker thread (UF8/UC1 button
+// handlers, libusb readCallbacks, etc.). ImGui_CreateContext crashes
+// hard if invoked off-main; reproducible via the 360 button on either
+// device, fixed by routing through onTimer().
 uf8::MixerWindow g_mixerWindow;
+std::atomic<bool> g_mixerToggleRequest{false};
 
 // IReaperControlSurface subclass registered as a full control surface
 // class ("Rea-Sixty") so users see and add it like any other surface.
@@ -1554,8 +1560,10 @@ void onUf8Input(const uint8_t* data, size_t len)
                 // 360 button — opens our Plugin Mixer / Settings window
                 // (Phase 2.6 + 2.7). SSL 360° opens the SSL editor here;
                 // we ARE the SSL 360° replacement, so the same physical
-                // affordance opens our window.
-                if (pressed) g_mixerWindow.toggle();
+                // affordance opens our window. Defer the actual toggle
+                // to onTimer() — this branch runs on the USB worker
+                // thread and ImGui must be touched main-thread only.
+                if (pressed) g_mixerToggleRequest.store(true);
                 handledNatively = true;
             } else if (id == 0x6E) {
                 // PAN button: toggle "force all V-Pots to Pan" regardless
@@ -3584,6 +3592,13 @@ void onTimer()
         }
     }
 
+    // Plugin Mixer toggle — drained on the main thread. Off-thread
+    // button handlers set the flag; only this site is allowed to call
+    // toggle() because ImGui_CreateContext is main-thread-only.
+    if (g_mixerToggleRequest.exchange(false)) {
+        g_mixerWindow.toggle();
+    }
+
     // ImGui frame for the Plugin Mixer / Settings window. No-op while the
     // window is closed; when open, drives the entire ReaImGui paint cycle
     // for this tick. Kept last so any REAPER-API reads above (track
@@ -4018,7 +4033,7 @@ bool hookCommand2(KbdSectionInfo* /*sec*/, int command,
     if (command == g_cmdDumpParams)     { dumpCsPluginParams();     return true; }
     if (command == g_cmdDumpChunk)      { dumpCsChunk();            return true; }
     if (command == g_cmdDumpRouting)    { dumpRoutingFlags();       return true; }
-    if (command == g_cmdToggleMixer)    { g_mixerWindow.toggle();   return true; }
+    if (command == g_cmdToggleMixer)    { g_mixerToggleRequest.store(true); return true; }
     return false;
 }
 
@@ -4035,12 +4050,13 @@ void reasixty_followSelectedInMixer(MediaTrack* tr)
     followSelectedInMixer(tr);
 }
 
-// External hook for UC1Surface (different TU): toggle the Plugin Mixer
-// window. UC1's 360 knob press lands here so the global window state
-// stays owned by main.cpp's anonymous namespace.
+// External hook for UC1Surface (different TU): request a Plugin Mixer
+// toggle. Same threading rule as the UF8 path — UC1 button events run
+// on the USB worker thread, so we must NOT touch ImGui from here. The
+// onTimer() drain on the main thread does the actual toggle.
 void reasixty_toggleMixerWindow()
 {
-    g_mixerWindow.toggle();
+    g_mixerToggleRequest.store(true);
 }
 
 extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(
