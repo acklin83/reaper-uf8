@@ -18,6 +18,7 @@
 // is visible (and, on UF8, rebank the 8-strip window around it). Shared
 // with UF8's SEL/CHANNEL-encoder paths so UC1 encoders feel identical.
 void reasixty_followSelectedInMixer(MediaTrack* tr);
+void reasixty_toggleMixerWindow();
 
 namespace uc1 {
 
@@ -986,10 +987,10 @@ void UC1Surface::handleButton_(const ButtonEvent& ev)
     }
     if (ev.id == button::k360) {
         if (ev.pressed) {
-            // Repurposed: in SSL360 this opens/minimises the SSL 360°
-            // GUI; we ARE the SSL 360° replacement, so this opens our
-            // Settings window when it lands. Stub for now.
-            ShowConsoleMsg("UC1 360°: Rea-Sixty Settings window — coming\n");
+            // Repurposed: SSL360 opens/minimises the SSL 360° GUI from
+            // here; we ARE the SSL 360° replacement, so this toggles
+            // our Plugin Mixer / Settings window (Phase 2.6 + 2.7).
+            reasixty_toggleMixerWindow();
             ++stats_.buttonEventsHandled;
         }
         return;

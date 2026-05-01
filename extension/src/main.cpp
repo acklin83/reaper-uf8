@@ -1550,6 +1550,13 @@ void onUf8Input(const uint8_t* data, size_t len)
                                 next ? "1" : "0", true);
                 }
                 handledNatively = true;
+            } else if (id == 0x46) {
+                // 360 button — opens our Plugin Mixer / Settings window
+                // (Phase 2.6 + 2.7). SSL 360° opens the SSL editor here;
+                // we ARE the SSL 360° replacement, so the same physical
+                // affordance opens our window.
+                if (pressed) g_mixerWindow.toggle();
+                handledNatively = true;
             } else if (id == 0x6E) {
                 // PAN button: toggle "force all V-Pots to Pan" regardless
                 // of SSL-plug-in presence on each track. Invalidates the
@@ -4026,6 +4033,14 @@ bool hookCommand2(KbdSectionInfo* /*sec*/, int command,
 void reasixty_followSelectedInMixer(MediaTrack* tr)
 {
     followSelectedInMixer(tr);
+}
+
+// External hook for UC1Surface (different TU): toggle the Plugin Mixer
+// window. UC1's 360 knob press lands here so the global window state
+// stays owned by main.cpp's anonymous namespace.
+void reasixty_toggleMixerWindow()
+{
+    g_mixerWindow.toggle();
 }
 
 extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(
