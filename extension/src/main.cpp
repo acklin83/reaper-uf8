@@ -4305,14 +4305,6 @@ bool reasixty_importBindingsViaDialog()
     return uf8::bindings::importFrom(buf);
 }
 
-// CSI import — placeholder until the parser branch lands. Returns -1 so
-// the UI surfaces "cancelled or failed". Replaced once the CSI .zon
-// parser merges from the Mac Studio worktree.
-int reasixty_importFromCsi()
-{
-    return -1;
-}
-
 // File picker → register ReaScript → return the action string suitable
 // for storage in Binding.action. Empty string on cancel/error.
 std::string reasixty_loadReaScript()
