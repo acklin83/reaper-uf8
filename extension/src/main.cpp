@@ -3887,6 +3887,56 @@ custom_action_register_t g_actionDumpChunk{
 };
 int g_cmdDumpChunk = 0;
 
+// Diagnostic: dump just the 5 SSL routing flags + 3 section In/Out
+// flags from the focused CS plug-in. Compact one-line output so the
+// user can run it at each of the 10 SSL360 routing orders and we
+// build the preset table from the results.
+void dumpRoutingFlags()
+{
+    MediaTrack* tr = GetSelectedTrack(nullptr, 0);
+    if (!tr) {
+        ShowConsoleMsg("Routing-flags: no selected track\n");
+        return;
+    }
+    auto match = uf8::lookupPluginOnTrack(tr, uf8::Domain::ChannelStrip);
+    if (!match.map) {
+        ShowConsoleMsg("Routing-flags: focused track has no CS plug-in\n");
+        return;
+    }
+    // Slot ids → vst3 param indices, resolved via PluginMap so this
+    // works across all four CS variants (CS 2 / 4K E / 4K G / 4K B).
+    auto val = [&](const char* slotId) -> int {
+        for (const auto& s : match.map->slots) {
+            if (s.id && std::strcmp(s.id, slotId) == 0 && s.vst3Param >= 0) {
+                const double v = TrackFX_GetParamNormalized(
+                    tr, match.fxIndex, s.vst3Param);
+                return v >= 0.5 ? 1 : 0;
+            }
+        }
+        return -1;  // not in this plug-in's map
+    };
+    char line[256];
+    std::snprintf(line, sizeof(line),
+        "Routing %s: ExtSC=%d FiltIn=%d FiltSC=%d EqSC=%d DynPreEq=%d  |  Filt=%d Eq=%d Dyn=%d\n",
+        match.map->displayShort,
+        val("ExternalSC"),
+        val("FiltersToInput"),
+        val("FiltersToSC"),
+        val("EqToSC"),
+        val("DynamicsPreEq"),
+        val("FiltersIn"),
+        val("EqIn"),
+        val("DynamicsIn"));
+    ShowConsoleMsg(line);
+}
+
+custom_action_register_t g_actionDumpRouting{
+    0, "REASIXTY_DUMP_ROUTING_FLAGS",
+    "Rea-Sixty: Dump SSL routing flags (run at each of 10 orders)",
+    nullptr,
+};
+int g_cmdDumpRouting = 0;
+
 // hookcommand2 is the correct hook for custom_action dispatch per SDK
 // note at reaper_plugin.h:1086. hookcommand (v1) only catches actions
 // triggered via menu/keyboard, not custom_action registered entries.
@@ -3903,6 +3953,7 @@ bool hookCommand2(KbdSectionInfo* /*sec*/, int command,
     if (command == g_cmdProbeGateGr)    { probeGateGrSources();     return true; }
     if (command == g_cmdDumpParams)     { dumpCsPluginParams();     return true; }
     if (command == g_cmdDumpChunk)      { dumpCsChunk();            return true; }
+    if (command == g_cmdDumpRouting)    { dumpRoutingFlags();       return true; }
     return false;
 }
 
@@ -3971,6 +4022,7 @@ extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(
     g_cmdProbeGateGr    = plugin_register("custom_action", &g_actionProbeGateGr);
     g_cmdDumpParams     = plugin_register("custom_action", &g_actionDumpParams);
     g_cmdDumpChunk      = plugin_register("custom_action", &g_actionDumpChunk);
+    g_cmdDumpRouting    = plugin_register("custom_action", &g_actionDumpRouting);
     plugin_register("hookcommand2", reinterpret_cast<void*>(hookCommand2));
 
     return 1;
