@@ -23,6 +23,9 @@ void reasixty_setSelFollowsColor(bool follow);
 int  reasixty_ballisticMode();
 void reasixty_setBallisticMode(int mode);
 void reasixty_exportDiagnostic();  // shows confirmation dialog itself
+const char* reasixty_reaperVersion();
+void reasixty_openUrl(const char* url);
+void reasixty_revealInFinder(const char* path);
 
 namespace uf8 {
 
@@ -243,15 +246,57 @@ void SettingsScreen::drawSelectionSets(ImGui_Context* ctx)
 }
 
 // ---- About ----------------------------------------------------------------
+// Static text + a few buttons that shell out to `open` for browser /
+// Finder reveal. No fancy hyperlink widget — ReaImGui v0.10 has none we
+// can rely on; plain Text + Button is cross-version safe.
 void SettingsScreen::drawAbout(ImGui_Context* ctx)
 {
     ImGui_Text(ctx, "Rea-Sixty");
-    ImGui_Text(ctx, "  Open-source SSL 360° replacement for UF8 / UC1");
-    ImGui_Text(ctx, "");
-    ImGui_Text(ctx, "  TODO: version + build hash");
-    ImGui_Text(ctx, "  TODO: REAPER + ReaImGui versions");
-    ImGui_Text(ctx, "  TODO: links — repo, ReaPack URL, issue tracker");
-    ImGui_Text(ctx, "  TODO: log-file location button (reveals in Finder)");
+    ImGui_Text(ctx, "Open-source SSL 360 replacement for UF8 / UC1");
+    ImGui_Spacing(ctx);
+    ImGui_Spacing(ctx);
+
+    ImGui_Text(ctx, "Versions");
+    ImGui_Separator(ctx);
+    char line[256];
+    std::snprintf(line, sizeof(line), "  Build:    %s %s",
+                  __DATE__, __TIME__);
+    ImGui_Text(ctx, line);
+    std::snprintf(line, sizeof(line), "  REAPER:   %s",
+                  reasixty_reaperVersion());
+    ImGui_Text(ctx, line);
+    ImGui_Text(ctx, "  ReaImGui: bundled v0.10 ABI");
+
+    ImGui_Spacing(ctx);
+    ImGui_Spacing(ctx);
+    ImGui_Text(ctx, "Project");
+    ImGui_Separator(ctx);
+    static const char* kRepoUrl = "https://github.com/acklin83/reaper-uf8";
+    std::snprintf(line, sizeof(line), "  Repository:  %s", kRepoUrl);
+    ImGui_Text(ctx, line);
+    if (ImGui_Button(ctx, "Open repository in browser",
+                     /*size_w*/ nullptr, /*size_h*/ nullptr)) {
+        reasixty_openUrl(kRepoUrl);
+    }
+
+    ImGui_Spacing(ctx);
+    ImGui_Spacing(ctx);
+    ImGui_Text(ctx, "Logs");
+    ImGui_Separator(ctx);
+    ImGui_Text(ctx, "  /tmp/reaper_uf8_frames.log   (frame trace, when enabled)");
+    ImGui_Text(ctx, "  /tmp/reaper_uf8_colors.log   (ColorSync push log)");
+    if (ImGui_Button(ctx, "Reveal /tmp in Finder",
+                     /*size_w*/ nullptr, /*size_h*/ nullptr)) {
+        reasixty_revealInFinder("/tmp");
+    }
+
+    ImGui_Spacing(ctx);
+    ImGui_Spacing(ctx);
+    ImGui_Text(ctx, "Acknowledgements");
+    ImGui_Separator(ctx);
+    ImGui_Text(ctx, "  Built without affiliation with Solid State Logic.");
+    ImGui_Text(ctx, "  ReaImGui (cfillion) handles all on-screen rendering.");
+    ImGui_Text(ctx, "  libusb drives the UF8 / UC1 vendor-USB endpoints.");
 }
 
 } // namespace uf8

@@ -4340,6 +4340,31 @@ void reasixty_setSelFollowsColor(bool follow)
 // can email us a single archive when something misbehaves. Cheap; runs
 // synchronously on the click. macOS-only path for now (Desktop convention
 // + system zip CLI). Cross-platform variant when we tackle Win/Linux.
+const char* reasixty_reaperVersion()
+{
+    const char* v = GetAppVersion();
+    return v ? v : "";
+}
+
+// About tab uses these to launch the system handler. macOS-only path
+// (`open` CLI); cross-platform later. URL is shell-quoted by single
+// quotes — caller is trusted (hard-coded in UI).
+void reasixty_openUrl(const char* url)
+{
+    if (!url || !*url) return;
+    char cmd[1024];
+    std::snprintf(cmd, sizeof(cmd), "/usr/bin/open '%s'", url);
+    std::system(cmd);
+}
+
+void reasixty_revealInFinder(const char* path)
+{
+    if (!path || !*path) return;
+    char cmd[1024];
+    std::snprintf(cmd, sizeof(cmd), "/usr/bin/open '%s'", path);
+    std::system(cmd);
+}
+
 void reasixty_exportDiagnostic()
 {
     char resultPath[512];
