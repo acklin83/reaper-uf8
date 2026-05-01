@@ -50,17 +50,24 @@ constexpr double kRailWidthPx = 160.0;
 } // namespace
 
 struct MixerWindow::Impl {
+    // v0.10+ owns context lifetime itself: ImGui_CreateContext returns a
+    // context that auto-destroys when the calling extension unloads. There
+    // is no ImGui_DestroyContext export in v0.10 — calling the vendored
+    // binding for it crashes with PC=0 (plugin_getapi returns null for the
+    // missing symbol). So we never destroy. Toggle instead flips a
+    // visibility flag; when invisible, we skip Begin/End entirely and
+    // ReaImGui closes the OS window. Re-toggling resumes drawing.
     ImGui_Context* ctx = nullptr;
+    bool           visible = false;
     int            selected = kSecMixer;
 
-    void create()
+    void ensureCtx()
     {
         if (ctx) return;
         // v0.10+ ImGui_CreateContext takes optional int* for all four
         // dimension args — passing raw ints (1280, 720) crashed because
         // the dylib's trampoline dereferenced them as pointers (= addr
-        // 0x500). Must pass &int or nullptr. Vendored header patched in
-        // tandem; see learnings.md rule 17.
+        // 0x500). Must pass &int or nullptr. See learnings.md rule 17.
         int sizeW = 1280;
         int sizeH = 720;
         ctx = ImGui_CreateContext(
@@ -68,29 +75,23 @@ struct MixerWindow::Impl {
             &sizeW, &sizeH,
             /*pos_x*/ nullptr, /*pos_y*/ nullptr);
     }
-
-    void destroy()
-    {
-        if (!ctx) return;
-        ImGui_DestroyContext(ctx);
-        ctx = nullptr;
-    }
 };
 
 MixerWindow::MixerWindow()  : impl_(new Impl) {}
-MixerWindow::~MixerWindow() { if (impl_) impl_->destroy(); delete impl_; }
+MixerWindow::~MixerWindow() { delete impl_; }
 
 void MixerWindow::toggle()
 {
-    if (impl_->ctx) impl_->destroy();
-    else            impl_->create();
+    impl_->visible = !impl_->visible;
 }
 
-bool MixerWindow::isOpen() const { return impl_->ctx != nullptr; }
+bool MixerWindow::isOpen() const { return impl_->visible; }
 
 void MixerWindow::onRunTick()
 {
-    if (!impl_->ctx) return;
+    if (!impl_->visible) return;
+    impl_->ensureCtx();
+    if (!impl_->ctx) return;  // CreateContext failed (ReaImGui not installed?)
 
     const int pushed = ThemeBridge::pushAll(impl_->ctx);
 
@@ -130,10 +131,10 @@ void MixerWindow::onRunTick()
 
     ThemeBridge::popAll(impl_->ctx, pushed);
 
-    // User clicked the close button → tear the context down on the
-    // following tick (defer until *after* End to keep the API contract
-    // clean).
-    if (!open) impl_->destroy();
+    // User clicked the OS close button → drop visibility. The context
+    // stays alive (no DestroyContext in v0.10); next toggle re-Begins and
+    // ReaImGui re-creates the OS window.
+    if (!open) impl_->visible = false;
 }
 
 } // namespace uf8

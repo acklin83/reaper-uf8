@@ -208,7 +208,12 @@ REAIMGUIAPI_EXTERN ReaImGuiEnum ImGui_ConfigFlags_None REAIMGUIAPI_INIT("ImGui_C
 // pass nullptr (defaults) or &int.
 REAIMGUIAPI_EXTERN ReaImGuiFunc<ImGui_Context*(const char* title, int* size_wInOptional, int* size_hInOptional, int* pos_xInOptional, int* pos_yInOptional)> ImGui_CreateContext REAIMGUIAPI_INIT("ImGui_CreateContext");
 REAIMGUIAPI_EXTERN ReaImGuiFunc<ImGui_ListClipper*(ImGui_Context* ctx)> ImGui_CreateListClipper REAIMGUIAPI_INIT("ImGui_CreateListClipper");
-REAIMGUIAPI_EXTERN ReaImGuiFunc<void(ImGui_Context* ctx)> ImGui_DestroyContext REAIMGUIAPI_INIT("ImGui_DestroyContext");
+// Disabled 2026-05-01: ImGui_DestroyContext is NOT exported by ReaImGui
+// v0.10+ (verified via `strings reaper_imgui-arm64.dylib | grep -i destroy`
+// returning only CreateContext, no Destroy). Contexts auto-clean on plug-in
+// unload. Calling it here resolves to nullptr and crashes with PC=0.
+// Make accidental future use a compile error rather than a runtime crash.
+// REAIMGUIAPI_EXTERN ReaImGuiFunc<void(ImGui_Context* ctx)> ImGui_DestroyContext REAIMGUIAPI_INIT("ImGui_DestroyContext");
 REAIMGUIAPI_EXTERN ReaImGuiEnum ImGui_Dir_Down REAIMGUIAPI_INIT("ImGui_Dir_Down");
 REAIMGUIAPI_EXTERN ReaImGuiEnum ImGui_Dir_Left REAIMGUIAPI_INIT("ImGui_Dir_Left");
 REAIMGUIAPI_EXTERN ReaImGuiEnum ImGui_Dir_None REAIMGUIAPI_INIT("ImGui_Dir_None");
