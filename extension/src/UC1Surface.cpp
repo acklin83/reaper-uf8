@@ -1046,11 +1046,14 @@ constexpr uint8_t kCompRatioCells[]     = {0x3A,0x3B,0x3C,0x3D,0x3E,0x3F,0x40,0x
 constexpr uint8_t kBcRatioCells[]    = {0xD6,0xD7,0xD8,0xD9,0xDA,0xDB,0xDC};
 constexpr uint8_t kBcScHpfCells[]    = {0xCB,0xCC,0xCD,0xCE,0xCF,0xD0,0xD1,0xD2,0xD3,0xD4,0xD5};
 constexpr uint8_t kBcAttackCells[]   = {0xDD,0xDE,0xDF,0xE0,0xE1,0xE2,0xE3};
-// BC Release: 7 LEDs (user 2026-05-01). Wrap candidate 0x00 hits the
-// hundreds 7-seg segment 'a' instead of LED 7/7 — try 0x07 (memory:
-// "cell 0x07 unused" by hundreds 7-seg, byte5=0x00). Non-contiguous
-// cell map is fine for Position mode (idx → cells[idx] direct).
-constexpr uint8_t kBcReleaseCells[]  = {0xFA,0xFB,0xFC,0xFD,0xFE,0xFF,0x07};
+// BC Release: 7 LEDs total per user, but only 6 cells decoded so far
+// (0xFA..0xFF byte5=0x00). Wrap candidates 0x00 and 0x07 both turned
+// out to be 7-seg hundreds-digit cells (0x00 = segment 'a', 0x07 =
+// decimal point). LED 7/7 lights at Auto-release on SSL360; finding
+// its cell needs a fresh probe capture sweeping through Auto.
+// Until then, ship 6 cells — LED 7/7 stays dark, but at least the
+// 7-seg display stays correct.
+constexpr uint8_t kBcReleaseCells[]  = {0xFA,0xFB,0xFC,0xFD,0xFE,0xFF};
 // BC Threshold: 11 LEDs (user 2026-05-01) — extend CW past previous 10-cell map.
 constexpr uint8_t kBcThresholdCells[]= {0xE4,0xE5,0xE6,0xE7,0xE8,0xE9,0xEA,0xEB,0xEC,0xED,0xEE};
 // BC Makeup: 11 LEDs (user 2026-05-01) — extend CCW past previous 10-cell map.
@@ -1088,7 +1091,7 @@ const RingDef* ringFor(uint8_t knobId)
     static const RingDef kBcRatio   {kBcRatioCells,     7, P};
     static const RingDef kBcScHpf   {kBcScHpfCells,    11, P};
     static const RingDef kBcAttack  {kBcAttackCells,    7, P};
-    static const RingDef kBcRelease {kBcReleaseCells,   7, P};
+    static const RingDef kBcRelease {kBcReleaseCells,   6, P};
     static const RingDef kBcThr     {kBcThresholdCells,11, G};
     static const RingDef kBcMakeup  {kBcMakeupCells,   11, G};
     static const RingDef kBcMix     {kBcMixCells,      11, G};
