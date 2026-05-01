@@ -99,6 +99,14 @@ namespace button {
     // Bus Comp section (single enable button — rest of Bus Comp is V-Pots)
     constexpr uint8_t kBusCompIn  = 0x0C;
 
+    // Menu / navigation row (decoded uc1_35_menu_buttons 2026-05-01).
+    constexpr uint8_t kBack       = 0x0E;
+    constexpr uint8_t kConfirm    = 0x0F;
+    constexpr uint8_t kRouting    = 0x10;
+    constexpr uint8_t kPresets    = 0x11;
+    constexpr uint8_t k360        = 0x12;  // 360 knob press
+    constexpr uint8_t kMagnifier  = 0x13;
+
     // Dyn section
     constexpr uint8_t kFastAttComp = 0x14;
     constexpr uint8_t kPeak        = 0x15;
