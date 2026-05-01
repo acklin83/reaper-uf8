@@ -17,6 +17,18 @@ bool reasixty_uf8Connected();
 bool reasixty_uc1Connected();
 const char* reasixty_uf8Serial();
 const char* reasixty_uc1Serial();
+// REAPER Action picker — Settings → Bindings editor uses these to drive
+// REAPER's PromptForAction window and to resolve stored action strings
+// to their human-readable names. Implemented in main.cpp; the poll runs
+// off onTimer so the picker keeps working even if the user navigates
+// away from the editor while the picker is open.
+void reasixty_actionPickerStart(int layer, uf8::bindings::ButtonId id,
+                                bool longPress);
+bool reasixty_actionPickerActiveFor(int layer, uf8::bindings::ButtonId id,
+                                    bool longPress);
+void reasixty_actionPickerCancel();
+std::string reasixty_resolveActionName(const std::string& action);
+std::string reasixty_loadReaScript();
 int  reasixty_brightnessLevel();
 int  reasixty_scribbleBrightnessLevel();
 void reasixty_setBrightnessLevel(int level);
@@ -580,7 +592,8 @@ struct ActionFieldsRef {
 };
 
 bool drawActionPicker(ImGui_Context* ctx, const char* prefix,
-                      ActionFieldsRef f)
+                      ActionFieldsRef f, int layer,
+                      uf8::bindings::ButtonId id, bool isLongPress)
 {
     using namespace uf8::bindings;
     bool dirty = false;
@@ -605,7 +618,7 @@ bool drawActionPicker(ImGui_Context* ctx, const char* prefix,
         double w = 260;
         ImGui_PushItemWidth(ctx, w);
         if (ImGui_InputTextWithHint(ctx, idbuf,
-                                    "e.g. 40044 (Track: Toggle FX bypass)",
+                                    "40044  /  _RS123abc",
                                     buf, sizeof(buf),
                                     /*flags*/ nullptr,
                                     /*callback*/ nullptr)) {
@@ -613,6 +626,43 @@ bool drawActionPicker(ImGui_Context* ctx, const char* prefix,
             dirty = true;
         }
         ImGui_PopItemWidth(ctx);
+
+        // Browse Action / Load ReaScript — open REAPER's pickers.
+        // Browse uses PromptForAction; if a picker is already open for
+        // THIS binding, swap the button to "Cancel" so the user can
+        // close it without picking. Polling is owned by main.cpp's
+        // onTimer hook so the result lands even if the user navigates
+        // away from this editor before the picker closes.
+        const bool pickerOpen = reasixty_actionPickerActiveFor(
+            layer, id, isLongPress);
+        std::snprintf(idbuf, sizeof(idbuf), "%s##%s_browse",
+                      pickerOpen ? "Cancel Action Pick" : "Browse Action...",
+                      prefix);
+        if (ImGui_Button(ctx, idbuf,
+                         /*size_w*/ nullptr, /*size_h*/ nullptr)) {
+            if (pickerOpen) reasixty_actionPickerCancel();
+            else            reasixty_actionPickerStart(layer, id, isLongPress);
+        }
+        sameLine(ctx);
+        std::snprintf(idbuf, sizeof(idbuf), "Load ReaScript...##%s_load",
+                      prefix);
+        if (ImGui_Button(ctx, idbuf, nullptr, nullptr)) {
+            std::string picked = reasixty_loadReaScript();
+            if (!picked.empty()) {
+                *f.action = picked;
+                dirty = true;
+            }
+        }
+
+        // Resolved-name line — dim, just for confirmation. Empty when
+        // the field is blank; "(unresolved)" if the stored named cmd no
+        // longer exists in this REAPER instance.
+        std::string nameStr = reasixty_resolveActionName(*f.action);
+        if (!nameStr.empty()) {
+            char line[256];
+            std::snprintf(line, sizeof(line), "  %s", nameStr.c_str());
+            ImGui_TextDisabled(ctx, line);
+        }
         ImGui_Unindent(ctx, /*indent_w*/ nullptr);
     }
 
@@ -775,7 +825,8 @@ void drawBindingEditor(ImGui_Context* ctx, int layer, ButtonId id)
                 &bd.midiDevice, &bd.midiChannel, &bd.midiMsgType,
                 &bd.midiData1, &bd.midiData2,
             };
-            if (drawActionPicker(ctx, "pri", pri)) dirty = true;
+            if (drawActionPicker(ctx, "pri", pri, layer, id,
+                                 /*isLongPress*/ false)) dirty = true;
 
             ImGui_Spacing(ctx);
             ImGui_Separator(ctx);
@@ -833,7 +884,8 @@ void drawBindingEditor(ImGui_Context* ctx, int layer, ButtonId id)
                         &bd.longPressMidiMsgType,
                         &bd.longPressMidiData1, &bd.longPressMidiData2,
                     };
-                    if (drawActionPicker(ctx, "lp", lp)) dirty = true;
+                    if (drawActionPicker(ctx, "lp", lp, layer, id,
+                                         /*isLongPress*/ true)) dirty = true;
                 }
             }
         }

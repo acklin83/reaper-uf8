@@ -48,6 +48,12 @@
 #include "UC1Surface.h"
 #include "UF8Device.h"
 
+// File-scope forward decl — onTimer (inside the anonymous namespace below)
+// drains this every tick. Definition lives further down with the other
+// reasixty_* helpers; the file-scope linkage means SettingsScreen.cpp can
+// also call reasixty_actionPickerStart / Cancel / etc.
+void reasixty_actionPickerPoll();
+
 namespace {
 
 std::unique_ptr<uf8::UF8Device>   g_dev;
@@ -3635,6 +3641,10 @@ void onTimer()
         g_mixerWindow.toggle();
     }
 
+    // REAPER Action picker poll — drives the Bindings editor's
+    // "Browse Action..." flow. Cheap when no session is active.
+    reasixty_actionPickerPoll();
+
     tickIdentify();
 
     // ImGui frame for the Plugin Mixer / Settings window. No-op while the
@@ -4192,6 +4202,103 @@ const char* reasixty_reaperVersion()
 {
     const char* v = GetAppVersion();
     return v ? v : "";
+}
+
+// ---- REAPER Action picker (Settings → Bindings) -------------------------
+// Wraps REAPER's PromptForAction so the Bindings editor can let users pick
+// an action from REAPER's Action List or load a ReaScript file. State lives
+// here (main.cpp owns the onTimer) so the poll keeps running even if the
+// user navigates away from the editor while the picker dialog is open.
+// One picker session at a time; starting a new one cancels the previous.
+namespace {
+    bool                         g_pickerActive    = false;
+    int                          g_pickerLayer     = 0;
+    uf8::bindings::ButtonId      g_pickerId        = uf8::bindings::ButtonId::None;
+    bool                         g_pickerLongPress = false;
+}
+
+void reasixty_actionPickerStart(int layer, uf8::bindings::ButtonId id,
+                                bool longPress)
+{
+    if (g_pickerActive) {
+        // Replace any previous session — REAPER's PromptForAction(1, ...)
+        // already closes a prior picker before opening the new one.
+    }
+    g_pickerLayer     = layer;
+    g_pickerId        = id;
+    g_pickerLongPress = longPress;
+    g_pickerActive    = true;
+    PromptForAction(/*session_mode*/ 1, /*init_id*/ 0, /*section_id*/ 0);
+}
+
+bool reasixty_actionPickerActiveFor(int layer, uf8::bindings::ButtonId id,
+                                    bool longPress)
+{
+    return g_pickerActive
+        && g_pickerLayer == layer
+        && g_pickerId == id
+        && g_pickerLongPress == longPress;
+}
+
+void reasixty_actionPickerCancel()
+{
+    if (!g_pickerActive) return;
+    PromptForAction(/*session_mode*/ -1, 0, 0);
+    g_pickerActive = false;
+}
+
+// Resolve a stored action string ("40044" or "_RS123abc") back to a human-
+// readable name via REAPER's kbd_getTextFromCmd. Returns empty for empty
+// input, "(unresolved)" if NamedCommandLookup fails (stale named cmd).
+std::string reasixty_resolveActionName(const std::string& action)
+{
+    if (action.empty()) return "";
+    int cmd = (action[0] == '_')
+        ? NamedCommandLookup(action.c_str())
+        : std::atoi(action.c_str());
+    if (cmd <= 0) return "(unresolved)";
+    const char* n = kbd_getTextFromCmd(cmd, nullptr);
+    return (n && *n) ? std::string(n) : std::string("(no name)");
+}
+
+// File picker → register ReaScript → return the action string suitable
+// for storage in Binding.action. Empty string on cancel/error.
+std::string reasixty_loadReaScript()
+{
+    char buf[4096] = {0};
+    if (!GetUserFileNameForRead(buf, "Pick a ReaScript",
+                                "lua;eel;py")) {
+        return "";
+    }
+    int cmdId = AddRemoveReaScript(/*add*/ true, /*sectionID*/ 0,
+                                   buf, /*commit*/ true);
+    if (cmdId <= 0) return "";
+    const char* nc = ReverseNamedCommandLookup(cmdId);
+    if (nc && *nc) return std::string("_") + nc;
+    return std::to_string(cmdId);
+}
+
+// Drained from onTimer. Polls PromptForAction; on result writes back to
+// the binding flagged at session start. session_mode=0 returns 0 while
+// pending, -1 once on cancel, or the picked command-id on accept.
+void reasixty_actionPickerPoll()
+{
+    if (!g_pickerActive) return;
+    int r = PromptForAction(/*session_mode*/ 0, 0, 0);
+    if (r == 0) return;          // pending
+    g_pickerActive = false;
+    if (r == -1) return;         // cancelled
+    // Convert to stored representation. Built-in REAPER actions are
+    // numeric; ReaScripts and custom actions get a "_<name>" prefix.
+    std::string actionStr;
+    const char* nc = ReverseNamedCommandLookup(r);
+    if (nc && *nc) actionStr = std::string("_") + nc;
+    else           actionStr = std::to_string(r);
+    using namespace uf8::bindings;
+    Binding bd = getBinding(g_pickerLayer, g_pickerId);
+    if (g_pickerLongPress) bd.longPressAction = actionStr;
+    else                   bd.action          = actionStr;
+    setBinding(g_pickerLayer, g_pickerId, bd);
 }
 
 // About tab uses these to launch the system handler. macOS-only path

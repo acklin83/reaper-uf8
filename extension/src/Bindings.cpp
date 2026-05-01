@@ -606,7 +606,15 @@ void runAction_(const ActionSet& a, bool firing, bool pressed)
             break;
         case ActionType::Reaper: {
             if (!firing) break;
-            const int actionId = std::atoi(a.action.c_str());
+            // Named commands (ReaScripts, custom actions) are stored as
+            // "_RS<hash>" / "_<name>" — atoi would yield 0. Resolve via
+            // NamedCommandLookup so script bindings dispatch correctly.
+            int actionId = 0;
+            if (!a.action.empty() && a.action[0] == '_') {
+                actionId = NamedCommandLookup(a.action.c_str());
+            } else {
+                actionId = std::atoi(a.action.c_str());
+            }
             if (actionId <= 0) break;
             auto it = g_builtins.find("__reaper_action__");
             if (it != g_builtins.end() && it->second.run) {
