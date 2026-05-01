@@ -288,6 +288,12 @@ enum BrightnessLevel {
 std::atomic<int> g_brightness{BL_Full};
 std::atomic<int> g_scribbleBrightness{BL_Full};
 
+// SEL-follows-track-color toggle. Default ON (SSL 360° behaviour: the SEL
+// LED inherits the REAPER track colour). When OFF, SEL falls back to
+// plain white. Read inside ledColourFor() — see below. Persisted via
+// ExtState; toggling re-fires bankDirty so per-strip SEL re-pushes.
+std::atomic<bool> g_selFollowsColor{true};
+
 struct BrightnessBytes {
     uint8_t uf8_led; uint8_t uf8_lcd;
     uint8_t uc1_led; uint8_t uc1_lcd; uint8_t uc1_status;
@@ -363,6 +369,10 @@ void loadBrightness()
         // First-run migration: no separate scribble pref yet → mirror the
         // LED level so the install upgrade is invisible.
         g_scribbleBrightness.store(g_brightness.load());
+    }
+    const char* selFollow = GetExtState("rea_sixty", "sel_follows_color");
+    if (selFollow && *selFollow) {
+        g_selFollowsColor.store(std::atoi(selFollow) != 0);
     }
 }
 
@@ -1129,6 +1139,11 @@ uf8::LedColour ledColourFor(LedClass cls, MediaTrack* tr)
         // Confirmed by user against SSL 360°'s rendering (2026-04-26).
         if (GetMediaTrackInfo_Value(tr, "I_RECARM") > 0.5) {
             return uf8::ledColourRed();
+        }
+        // Setting → Device → "SEL follows track color" gate. Off = plain
+        // white, matching the default for unselected MCU surfaces.
+        if (!g_selFollowsColor.load()) {
+            return uf8::ledColourWhite();
         }
         const uint32_t rgb = static_cast<uint32_t>(GetTrackColor(tr)) & 0x00FFFFFFu;
         return uf8::ledColourForTrackRgb(rgb);
@@ -4212,6 +4227,20 @@ void reasixty_identifyUf8()
 void reasixty_identifyUc1()
 {
     g_identifyUc1UntilMs.store(nowMs_() + kIdentifyDurationMs);
+}
+
+bool reasixty_selFollowsColor()
+{
+    return g_selFollowsColor.load();
+}
+
+void reasixty_setSelFollowsColor(bool follow)
+{
+    g_selFollowsColor.store(follow);
+    SetExtState("rea_sixty", "sel_follows_color", follow ? "1" : "0", true);
+    // Force a per-strip SEL re-push so the new colour mode lands without
+    // requiring the user to bank-shift or click around.
+    g_bankDirty.store(true);
 }
 
 extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(
