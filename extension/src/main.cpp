@@ -3798,6 +3798,52 @@ custom_action_register_t g_actionProbeGateGr{
 };
 int g_cmdProbeGateGr = 0;
 
+// Diagnostic: dump every VST3 param's name + ident + current normalised
+// value for the focused CS plug-in. Use to find candidate Gate-GR
+// parameters when the named-config-parm probe comes up empty (the SSL
+// CS plug-in doesn't expose the PreSonus VST3 GR readback for the Gate
+// section — verified 2026-05-01). Run twice at different Range knob
+// positions and diff to find params whose value tracks Range.
+void dumpCsPluginParams()
+{
+    MediaTrack* tr = GetSelectedTrack(nullptr, 0);
+    if (!tr) {
+        ShowConsoleMsg("Param-dump: no selected track\n");
+        return;
+    }
+    auto match = uf8::lookupPluginOnTrack(tr, uf8::Domain::ChannelStrip);
+    if (!match.map) {
+        ShowConsoleMsg("Param-dump: focused track has no CS plug-in\n");
+        return;
+    }
+    const int n = TrackFX_GetNumParams(tr, match.fxIndex);
+    char header[128];
+    std::snprintf(header, sizeof(header),
+        "Param-dump %s — %d params\n", match.map->displayShort, n);
+    ShowConsoleMsg(header);
+    for (int p = 0; p < n; ++p) {
+        char name[128] = {};
+        char ident[128] = {};
+        char fmt[64]   = {};
+        TrackFX_GetParamName(tr, match.fxIndex, p, name, sizeof(name));
+        TrackFX_GetParamIdent(tr, match.fxIndex, p, ident, sizeof(ident));
+        const double v = TrackFX_GetParamNormalized(tr, match.fxIndex, p);
+        TrackFX_FormatParamValueNormalized(tr, match.fxIndex, p, v,
+                                           fmt, sizeof(fmt));
+        char line[512];
+        std::snprintf(line, sizeof(line),
+            "  [%3d] %-32s ident=%-40s norm=%.4f val=%s\n",
+            p, name, ident, v, fmt);
+        ShowConsoleMsg(line);
+    }
+}
+
+custom_action_register_t g_actionDumpParams{
+    0, "REASIXTY_DUMP_CS_PARAMS",
+    "Rea-Sixty: Dump all CS plug-in params (find Gate GR)", nullptr,
+};
+int g_cmdDumpParams = 0;
+
 // hookcommand2 is the correct hook for custom_action dispatch per SDK
 // note at reaper_plugin.h:1086. hookcommand (v1) only catches actions
 // triggered via menu/keyboard, not custom_action registered entries.
@@ -3812,6 +3858,7 @@ bool hookCommand2(KbdSectionInfo* /*sec*/, int command,
     if (command == g_cmdProbeLegacyLed) { probeNextLegacyLedCell(); return true; }
     if (command == g_cmdFrameTrace)     { toggleFrameTrace();       return true; }
     if (command == g_cmdProbeGateGr)    { probeGateGrSources();     return true; }
+    if (command == g_cmdDumpParams)     { dumpCsPluginParams();     return true; }
     return false;
 }
 
@@ -3878,6 +3925,7 @@ extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(
     g_cmdProbeLegacyLed = plugin_register("custom_action", &g_actionProbeLegacyLed);
     g_cmdFrameTrace     = plugin_register("custom_action", &g_actionFrameTrace);
     g_cmdProbeGateGr    = plugin_register("custom_action", &g_actionProbeGateGr);
+    g_cmdDumpParams     = plugin_register("custom_action", &g_actionDumpParams);
     plugin_register("hookcommand2", reinterpret_cast<void*>(hookCommand2));
 
     return 1;
