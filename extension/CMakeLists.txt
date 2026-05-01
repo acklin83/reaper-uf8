@@ -73,6 +73,8 @@ add_library(reaper_uf8 MODULE
     src/ThemeBridge.cpp
     # Phase 2.7 Bindings — Phase A
     src/Bindings.cpp
+    # CSI configuration import (feature/csi-import)
+    src/CsiImport.cpp
 )
 
 target_link_libraries(reaper_uf8 PRIVATE PkgConfig::HIDAPI)
@@ -114,6 +116,16 @@ add_test(NAME protocol COMMAND test_protocol)
 add_executable(test_uc1_protocol tests/test_uc1_protocol.cpp src/UC1Protocol.cpp)
 target_include_directories(test_uc1_protocol PRIVATE src)
 add_test(NAME uc1_protocol COMMAND test_uc1_protocol)
+
+# CSI-import smoke test: parses the user's real Home.zon (or a path
+# passed on the cmdline) and prints the mapping report. Stubbed for
+# REAPER + Bindings so it links without the full plugin runtime.
+add_executable(test_csi_import tests/test_csi_import.cpp src/CsiImport.cpp)
+target_include_directories(test_csi_import PRIVATE
+    src
+    "${REAPER_SDK_DIR}/sdk"
+    "${WDL_DIR}"
+)
 
 # ----- CLI smoke-test (libusb only, no REAPER) --------------------------------
 add_executable(uf8_color_test tools/uf8_color_test.cpp src/Protocol.cpp)

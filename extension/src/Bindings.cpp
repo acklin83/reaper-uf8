@@ -525,7 +525,15 @@ bool dispatch(ButtonId id, bool pressed)
             break;
         case ActionType::Reaper: {
             if (firing) {
-                const int actionId = std::atoi(bd.action.c_str());
+                int actionId = std::atoi(bd.action.c_str());
+                if (actionId == 0 && !bd.action.empty() &&
+                    NamedCommandLookup) {
+                    // CSI import + power users can store named action ids
+                    // (`_SWS_…`, `_RS…`, `_S&M_…`). NamedCommandLookup is
+                    // documented thread-safe and returns 0 for unknown ids
+                    // — silent skip then matches REAPER's own behaviour.
+                    actionId = NamedCommandLookup(bd.action.c_str());
+                }
                 if (actionId > 0) {
                     // Main_OnCommand must run on the main thread; we route
                     // it through main.cpp's queueInput via a sentinel
