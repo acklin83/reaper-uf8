@@ -27,6 +27,18 @@
 
 namespace uc1 {
 
+// Central Control Panel mode (UC1 User Guide p.18-21). The Back/Confirm
+// buttons + Secondary Encoder change semantics depending on this mode;
+// LCD top-label reflects the current mode. TRANSPORT lives outside any
+// menu hierarchy — entered from MAIN via Sec-Encoder push.
+enum class Uc1Mode : uint8_t {
+    Main,
+    ExtFuncs,   // Phase B — display only for now, no scroll/adjust UX
+    Routing,    // Phase A3 — Sec-Enc cycles SSL CS routing-order chunk attr
+    Presets,    // Phase A4 — Sec-Enc scrolls presets, Confirm/push loads
+    Transport,  // Phase A2 — Back=Stop, Confirm=Play, Sec-Enc scrubs
+};
+
 // Simple host-visible state. Filled by poll(); inspect for debugging.
 struct SurfaceStats {
     uint64_t knobEventsHandled    = 0;
@@ -188,6 +200,13 @@ private:
     // section keeps showing the same plugin instance. See
     // effectiveBcTrack_() for fallback semantics.
     void*      bcAnchorTrack_ = nullptr;  // MediaTrack*
+
+    // Central Control Panel mode. Defaults to MAIN on construction;
+    // resets to MAIN on focusedTrack change so a new track always lands
+    // in the canonical view. Mode transitions update the LCD top label
+    // (zone TBD — capture pending) and gate Back/Confirm/Sec-Enc
+    // behavior in poll().
+    Uc1Mode    mode_ = Uc1Mode::Main;
 
     std::mutex               queueMu_;
     std::deque<ButtonEvent>  buttonQueue_;

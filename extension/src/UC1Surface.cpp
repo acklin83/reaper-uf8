@@ -154,6 +154,10 @@ void UC1Surface::setFocusedTrack(void* track)
     // the new track will refresh the backlight to match its bypass state
     // but won't fire the FF 5C cosmetic — focus change is not a press.
     lastBcBypassed_ = -1;
+    // Drop back to MAIN on focus change — any in-progress menu (EXT_FUNCS
+    // / ROUTING / PRESETS) referenced the previous track's plug-in
+    // context, no point keeping it.
+    mode_ = Uc1Mode::Main;
     refresh();
 }
 
@@ -521,6 +525,92 @@ void UC1Surface::handleButton_(const ButtonEvent& ev)
                                zone::kChannelStripReadout);
         }
         ++stats_.buttonEventsHandled;
+        return;
+    }
+
+    // Central Control Panel — Back / Confirm / Routing / Presets / 360° /
+    // Magnifier. These cycle the UC1's MAIN/EXT_FUNCS/ROUTING/PRESETS/
+    // TRANSPORT mode (UC1 User Guide p.18-21). All operate on the press
+    // edge; no LEDs (the buttons themselves are unlit on the panel).
+    //
+    // Phase A1: state machine + mode toggling only. ROUTING/PRESETS/
+    // TRANSPORT bodies (chunk patch / preset nav / transport actions)
+    // and the LCD top-label rendering land in subsequent commits.
+    auto setMode = [&](Uc1Mode m) {
+        if (mode_ != m) {
+            mode_ = m;
+            // Re-push the central label on the next refresh tick — modes
+            // affect what the 4-char zone shows. Cached state cleared via
+            // bumping lastModePushed_; refresh() compares + sends.
+            char line[96];
+            std::snprintf(line, sizeof(line),
+                "UC1 mode → %s\n",
+                m == Uc1Mode::Main      ? "MAIN"
+              : m == Uc1Mode::ExtFuncs  ? "EXT_FUNCS"
+              : m == Uc1Mode::Routing   ? "ROUTING"
+              : m == Uc1Mode::Presets   ? "PRESETS"
+                                        : "TRANSPORT");
+            ShowConsoleMsg(line);
+        }
+    };
+    if (ev.id == button::kBack) {
+        if (ev.pressed) {
+            switch (mode_) {
+                case Uc1Mode::Main:      setMode(Uc1Mode::ExtFuncs); break;
+                case Uc1Mode::ExtFuncs:  setMode(Uc1Mode::Main);     break;
+                case Uc1Mode::Routing:   setMode(Uc1Mode::Main);     break;
+                case Uc1Mode::Presets:   setMode(Uc1Mode::Main);     break;
+                case Uc1Mode::Transport: /* A2: STOP via REAPER action */ break;
+            }
+            ++stats_.buttonEventsHandled;
+        }
+        return;
+    }
+    if (ev.id == button::kConfirm) {
+        if (ev.pressed) {
+            switch (mode_) {
+                case Uc1Mode::Main:      /* nop */ break;
+                case Uc1Mode::ExtFuncs:  /* B: confirm selection */ break;
+                case Uc1Mode::Routing:   /* nop */ break;
+                case Uc1Mode::Presets:   /* A4: load preset */ break;
+                case Uc1Mode::Transport: /* A2: PLAY via REAPER action */ break;
+            }
+            ++stats_.buttonEventsHandled;
+        }
+        return;
+    }
+    if (ev.id == button::kRouting) {
+        if (ev.pressed) {
+            setMode(mode_ == Uc1Mode::Routing ? Uc1Mode::Main
+                                              : Uc1Mode::Routing);
+            ++stats_.buttonEventsHandled;
+        }
+        return;
+    }
+    if (ev.id == button::kPresets) {
+        if (ev.pressed) {
+            setMode(mode_ == Uc1Mode::Presets ? Uc1Mode::Main
+                                              : Uc1Mode::Presets);
+            ++stats_.buttonEventsHandled;
+        }
+        return;
+    }
+    if (ev.id == button::k360) {
+        if (ev.pressed) {
+            // Repurposed: in SSL360 this opens/minimises the SSL 360°
+            // GUI; we ARE the SSL 360° replacement, so this opens our
+            // Settings window when it lands. Stub for now.
+            ShowConsoleMsg("UC1 360°: Rea-Sixty Settings window — coming\n");
+            ++stats_.buttonEventsHandled;
+        }
+        return;
+    }
+    if (ev.id == button::kMagnifier) {
+        if (ev.pressed) {
+            // User-definable in Settings (TBD). No-op for now.
+            ShowConsoleMsg("UC1 Magnifier: assignable in Settings — TBD\n");
+            ++stats_.buttonEventsHandled;
+        }
         return;
     }
 
