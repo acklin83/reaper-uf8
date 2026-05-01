@@ -3,6 +3,8 @@
 #include "SettingsScreen.h"
 #include "ThemeBridge.h"
 
+#include <cstdio>
+
 // One translation unit must define REAIMGUIAPI_IMPLEMENT before including the
 // header — this materialises the storage for the lazy-resolved ReaImGuiFunc
 // instances. Every other TU just `#include "reaper_imgui_functions.h"` and
@@ -60,6 +62,13 @@ struct MixerWindow::Impl {
     ImGui_Context* ctx = nullptr;
     bool           visible = false;
     int            selected = kSecMixer;
+    // Session counter — bumped on every closed→open transition. Used to
+    // suffix the Begin window-id so each session is a fresh ImGui
+    // window object. Required because ReaImGui v0.10 retains stale
+    // window state (collapsed/closed/off-screen pose) under the old
+    // id and refuses to re-show after a single open/close cycle. New
+    // id = no carried-over state.
+    int            sessionGen = 0;
 
     void ensureCtx()
     {
@@ -89,7 +98,9 @@ MixerWindow::~MixerWindow() { delete impl_; }
 
 void MixerWindow::toggle()
 {
-    impl_->visible = !impl_->visible;
+    const bool wasOpen = impl_->visible;
+    impl_->visible = !wasOpen;
+    if (impl_->visible) ++impl_->sessionGen;
 }
 
 bool MixerWindow::isOpen() const { return impl_->visible; }
@@ -115,12 +126,16 @@ void MixerWindow::onRunTick()
 
     const int pushed = ThemeBridge::pushAll(impl_->ctx);
 
-    // Window display title hides the version suffix via "##" so the
-    // user just reads "Rea-Sixty"; the suffix is the unique-id portion
-    // ImGui uses internally and matches the renamed context — both
-    // change in lock-step so old persisted state is fully bypassed.
+    // Window display title is just "Rea-Sixty"; the "##" suffix is the
+    // ImGui id-only tail and bumps every open so the window object is
+    // brand-new each session. Without this, the second-and-later open
+    // got stuck behind ReaImGui v0.10's persisted "previously closed"
+    // state on the same id.
+    char winId[64];
+    std::snprintf(winId, sizeof(winId),
+                  "Rea-Sixty##session_%d", impl_->sessionGen);
     bool open = true;
-    if (ImGui_Begin(impl_->ctx, "Rea-Sixty##v2", &open, /*flags*/ nullptr)) {
+    if (ImGui_Begin(impl_->ctx, winId, &open, /*flags*/ nullptr)) {
 
         // -- Left rail: section list -------------------------------------
         double railW = kRailWidthPx;

@@ -533,37 +533,14 @@ void drawUf8Vector(ImGui_Context* ctx, ButtonId& sel)
     drawTextCentered_(c, 500, 470, 0x9CA0AAFF, "Rea-Sixty");
 }
 
-// Push a Rea-Sixty-themed colour set so the editor's combos / buttons /
-// inputs match the schematic palette (dark blue-grey, soft accents)
-// instead of the default ImGui orange/red. Returns count to pop.
-int pushBindingsTheme(ImGui_Context* ctx)
-{
-    auto pc = [&](int idx, int rgba) { ImGui_PushStyleColor(ctx, idx, rgba); };
-    pc(ImGui_Col_FrameBg,         0x252A33FF);
-    pc(ImGui_Col_FrameBgHovered,  0x3A4253FF);
-    pc(ImGui_Col_FrameBgActive,   0x4477CCFF);
-    pc(ImGui_Col_Button,          0x252A33FF);
-    pc(ImGui_Col_ButtonHovered,   0x3A4253FF);
-    pc(ImGui_Col_ButtonActive,    0x4477CCFF);
-    pc(ImGui_Col_Header,          0x252A33FF);
-    pc(ImGui_Col_HeaderHovered,   0x3A4253FF);
-    pc(ImGui_Col_HeaderActive,    0x4477CCFF);
-    pc(ImGui_Col_Border,          0x4A5060FF);
-    pc(ImGui_Col_Text,            0xD0D4DAFF);
-    pc(ImGui_Col_TextDisabled,    0x6A6E78FF);
-    pc(ImGui_Col_PopupBg,         0x14181EFF);
-    pc(ImGui_Col_CheckMark,       0xAACCFFFF);
-    pc(ImGui_Col_SliderGrab,      0x4477CCFF);
-    pc(ImGui_Col_SliderGrabActive,0x6699EEFF);
-    pc(ImGui_Col_Separator,       0x3A4253FF);
-    pc(ImGui_Col_ChildBg,         0x1A1E24FF);
-    return 18;
-}
-
-void popBindingsTheme(ImGui_Context* ctx, int n)
-{
-    ImGui_PopStyleColor(ctx, &n);
-}
+// Theme push was disabled — the 18-color stack push around the editor
+// children correlated 1:1 with the mixer window vanishing on first
+// click after a successful open. Whether the cause was ReaImGui's
+// internal stack handling, a colour value rendering the window
+// transparent, or a side-effect of nested BeginChild + style isn't
+// fully nailed down; backing off to default styling keeps the window
+// alive while we iterate. The schematic already paints its own
+// custom palette via DrawList — it doesn't depend on global colours.
 
 // Mutable refs into a Binding so the same picker code drives the
 // primary action AND the long-press secondary action — the underlying
@@ -728,9 +705,11 @@ bool drawActionPicker(ImGui_Context* ctx, const char* prefix,
     return dirty;
 }
 
-// Editor panel — two-column layout. Left: primary action + behavior +
-// clear. Right: long-press (only when primary behavior == Momentary).
-// Auto-saves on every change.
+// Editor panel — flat single-column flow. Earlier 2-column BeginChild
+// layout + theme push correlated with the mixer window dying on first
+// click; back to the simpler shape until we have a working theory for
+// that interaction. Primary and long-press sections are still
+// visually separated by a Separator + heading.
 void drawBindingEditor(ImGui_Context* ctx, int layer, ButtonId id)
 {
     using namespace uf8::bindings;
@@ -745,105 +724,75 @@ void drawBindingEditor(ImGui_Context* ctx, int layer, ButtonId id)
     ImGui_Separator(ctx);
 
     ImGui_PushID(ctx, uf8::bindings::toName(id));
-    const int themePushed = pushBindingsTheme(ctx);
 
-    // Two columns. Left = primary, right = long-press.
-    double availX = 0, availY = 0;
-    ImGui_GetContentRegionAvail(ctx, &availX, &availY);
-    double colW = (availX - 16) / 2.0;
-    if (colW < 280) colW = 280;
-    const double colH = 280;
-
-    // ---- Left column: PRIMARY ACTION ----
+    // ---- PRIMARY ACTION ----
+    ImGui_Text(ctx, "PRIMARY ACTION");
     {
-        double w = colW, h = colH;
-        bool border = true;
-        if (ImGui_BeginChild(ctx, "primary_col", &w, &h, &border, nullptr)) {
-            ImGui_Text(ctx, "PRIMARY ACTION");
-            ImGui_Separator(ctx);
-
-            ActionFieldsRef pri{
-                &bd.type, &bd.action, &bd.param,
-                &bd.midiDevice, &bd.midiChannel, &bd.midiMsgType,
-                &bd.midiData1, &bd.midiData2,
-            };
-            if (drawActionPicker(ctx, "pri", pri)) dirty = true;
-
-            ImGui_Spacing(ctx);
-            ImGui_Separator(ctx);
-
-            static char kBehaviorItems[] =
-                "Momentary (fire on press)\0"
-                "Toggle (flip on each press)\0"
-                "Hold (state mirrors button)\0";
-            int b = static_cast<int>(bd.behavior);
-            double bw = 240;
-            ImGui_PushItemWidth(ctx, bw);
-            if (ImGui_Combo(ctx, "Behavior##pri_beh", &b, kBehaviorItems,
-                            nullptr)) {
-                bd.behavior = static_cast<Behavior>(b);
-                dirty = true;
-            }
-            ImGui_PopItemWidth(ctx);
-        }
-        ImGui_EndChild(ctx);
+        ActionFieldsRef pri{
+            &bd.type, &bd.action, &bd.param,
+            &bd.midiDevice, &bd.midiChannel, &bd.midiMsgType,
+            &bd.midiData1, &bd.midiData2,
+        };
+        if (drawActionPicker(ctx, "pri", pri)) dirty = true;
     }
 
-    ImGui_SameLine(ctx, /*offset_from_start_x*/ nullptr,
-                   /*spacing*/ nullptr);
-
-    // ---- Right column: LONG-PRESS ACTION ----
+    ImGui_Spacing(ctx);
+    static char kBehaviorItems[] =
+        "Momentary (fire on press)\0"
+        "Toggle (flip on each press)\0"
+        "Hold (state mirrors button)\0";
+    int b = static_cast<int>(bd.behavior);
     {
-        double w = colW, h = colH;
-        bool border = true;
-        if (ImGui_BeginChild(ctx, "longpress_col", &w, &h, &border, nullptr)) {
-            ImGui_Text(ctx, "LONG-PRESS  (held > 0.5 s)");
-            ImGui_Separator(ctx);
-
-            if (bd.behavior != Behavior::Momentary) {
-                ImGui_Text(ctx, "Long-press is only available for");
-                ImGui_Text(ctx, "Momentary primary actions.");
-                if (bd.hasLongPress) {
-                    bd.hasLongPress = false;
-                    dirty = true;
-                }
-            } else {
-                bool en = bd.hasLongPress;
-                if (ImGui_Checkbox(ctx, "Enable long-press action##lp_en", &en)) {
-                    bd.hasLongPress = en;
-                    // First time enabling: default the secondary action
-                    // type to Native so the picker shows a useful UI
-                    // straight away (rather than the empty Noop state).
-                    if (en && bd.longPressType == ActionType::Noop) {
-                        bd.longPressType = ActionType::Builtin;
-                    }
-                    dirty = true;
-                }
-                if (bd.hasLongPress) {
-                    ImGui_Spacing(ctx);
-                    ActionFieldsRef lp{
-                        &bd.longPressType, &bd.longPressAction,
-                        &bd.longPressParam,
-                        &bd.longPressMidiDevice, &bd.longPressMidiChannel,
-                        &bd.longPressMidiMsgType,
-                        &bd.longPressMidiData1, &bd.longPressMidiData2,
-                    };
-                    if (drawActionPicker(ctx, "lp", lp)) dirty = true;
-                }
-            }
+        double bw = 240;
+        ImGui_PushItemWidth(ctx, bw);
+        if (ImGui_Combo(ctx, "Behavior##pri_beh", &b, kBehaviorItems,
+                        nullptr)) {
+            bd.behavior = static_cast<Behavior>(b);
+            dirty = true;
         }
-        ImGui_EndChild(ctx);
+        ImGui_PopItemWidth(ctx);
+    }
+
+    ImGui_Spacing(ctx);
+    ImGui_Separator(ctx);
+
+    // ---- LONG-PRESS ----
+    ImGui_Text(ctx, "LONG-PRESS  (held > 0.5 s)");
+    if (bd.behavior != Behavior::Momentary) {
+        ImGui_Text(ctx, "  Long-press is only available for "
+                        "Momentary primary actions.");
+        if (bd.hasLongPress) {
+            bd.hasLongPress = false;
+            dirty = true;
+        }
+    } else {
+        bool en = bd.hasLongPress;
+        if (ImGui_Checkbox(ctx, "Enable long-press action##lp_en", &en)) {
+            bd.hasLongPress = en;
+            if (en && bd.longPressType == ActionType::Noop) {
+                bd.longPressType = ActionType::Builtin;
+            }
+            dirty = true;
+        }
+        if (bd.hasLongPress) {
+            ActionFieldsRef lp{
+                &bd.longPressType, &bd.longPressAction,
+                &bd.longPressParam,
+                &bd.longPressMidiDevice, &bd.longPressMidiChannel,
+                &bd.longPressMidiMsgType,
+                &bd.longPressMidiData1, &bd.longPressMidiData2,
+            };
+            if (drawActionPicker(ctx, "lp", lp)) dirty = true;
+        }
     }
 
     ImGui_Spacing(ctx);
     ImGui_Separator(ctx);
     if (ImGui_Button(ctx, "Clear binding (Do nothing)",
                      /*size_w*/ nullptr, /*size_h*/ nullptr)) {
-        bd = Binding{};   // reset to default (Noop, Momentary)
+        bd = Binding{};
         dirty = true;
     }
-
-    popBindingsTheme(ctx, themePushed);
 
     if (dirty) setBinding(layer, id, bd);
 
