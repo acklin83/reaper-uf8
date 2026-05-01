@@ -11,7 +11,11 @@
 bool reasixty_uf8Connected();
 bool reasixty_uc1Connected();
 int  reasixty_brightnessLevel();
+int  reasixty_scribbleBrightnessLevel();
 void reasixty_setBrightnessLevel(int level);
+void reasixty_setScribbleBrightnessLevel(int level);
+void reasixty_identifyUf8();
+void reasixty_identifyUc1();
 
 namespace uf8 {
 
@@ -36,12 +40,30 @@ void SettingsScreen::drawDevice(ImGui_Context* ctx)
     ImGui_Separator(ctx);
 
     char line[64];
+    const bool uf8On = reasixty_uf8Connected();
+    const bool uc1On = reasixty_uc1Connected();
+
     std::snprintf(line, sizeof(line), "  UF8   %s",
-                  reasixty_uf8Connected() ? "[connected]" : "[not connected]");
+                  uf8On ? "[connected]" : "[not connected]");
     ImGui_Text(ctx, line);
+    if (uf8On) {
+        ImGui_SameLine(ctx, /*offset_from_start_x*/ nullptr, /*spacing*/ nullptr);
+        if (ImGui_Button(ctx, "Identify##uf8",
+                         /*size_w*/ nullptr, /*size_h*/ nullptr)) {
+            reasixty_identifyUf8();
+        }
+    }
+
     std::snprintf(line, sizeof(line), "  UC1   %s",
-                  reasixty_uc1Connected() ? "[connected]" : "[not connected]");
+                  uc1On ? "[connected]" : "[not connected]");
     ImGui_Text(ctx, line);
+    if (uc1On) {
+        ImGui_SameLine(ctx, /*offset_from_start_x*/ nullptr, /*spacing*/ nullptr);
+        if (ImGui_Button(ctx, "Identify##uc1",
+                         /*size_w*/ nullptr, /*size_h*/ nullptr)) {
+            reasixty_identifyUc1();
+        }
+    }
 
     ImGui_Spacing(ctx);
     ImGui_Spacing(ctx);
@@ -49,31 +71,43 @@ void SettingsScreen::drawDevice(ImGui_Context* ctx)
     ImGui_Text(ctx, "Brightness");
     ImGui_Separator(ctx);
 
-    // 5 SSL-equivalent steps: dark / dim / half / bright / full.
-    // SliderInt's required pointer args (vInOut, v_min, v_max) match the
-    // v0.10 ABI as-is — verified via `nm | c++filt`. Format string omitted
-    // (the optional pointer arg) because we render the level name below.
-    int level = reasixty_brightnessLevel();
-    if (ImGui_SliderInt(ctx, "##brightness", &level,
-                        /*v_min*/ 0, /*v_max*/ 4,
-                        /*format*/ nullptr, /*flags*/ nullptr)) {
-        reasixty_setBrightnessLevel(level);
-    }
+    // 5 SSL-equivalent steps: dark / dim / half / bright / full. LED step
+    // drives buttons + V-Pot rings + UC1 LEDs. Scribble step drives the
+    // UF8 LCD strips, UC1 LCD, and UC1 status displays. Independent so a
+    // user can crank the displays while keeping LEDs dim, or vice versa.
     static const char* kLevelNames[5] = {
         "Dark", "Dim", "Half", "Bright", "Full"
     };
-    if (level >= 0 && level <= 4) {
-        std::snprintf(line, sizeof(line), "  %s", kLevelNames[level]);
-        ImGui_Text(ctx, line);
+    auto fmtLevel = [&](int level) {
+        if (level >= 0 && level <= 4) {
+            std::snprintf(line, sizeof(line), "  %s", kLevelNames[level]);
+            ImGui_Text(ctx, line);
+        }
+    };
+
+    int led = reasixty_brightnessLevel();
+    ImGui_Text(ctx, "  LEDs");
+    if (ImGui_SliderInt(ctx, "##led_brightness", &led,
+                        /*v_min*/ 0, /*v_max*/ 4,
+                        /*format*/ nullptr, /*flags*/ nullptr)) {
+        reasixty_setBrightnessLevel(led);
     }
+    fmtLevel(led);
+
+    int scr = reasixty_scribbleBrightnessLevel();
+    ImGui_Text(ctx, "  Scribble strips / LCDs");
+    if (ImGui_SliderInt(ctx, "##scribble_brightness", &scr,
+                        /*v_min*/ 0, /*v_max*/ 4,
+                        /*format*/ nullptr, /*flags*/ nullptr)) {
+        reasixty_setScribbleBrightnessLevel(scr);
+    }
+    fmtLevel(scr);
 
     ImGui_Spacing(ctx);
     ImGui_Spacing(ctx);
     ImGui_Text(ctx, "Pending");
     ImGui_Separator(ctx);
     ImGui_Text(ctx, "  TODO: serial # + drag-to-reorder for multi-UF8 setups");
-    ImGui_Text(ctx, "  TODO: Identify Unit button per device (LCD flash)");
-    ImGui_Text(ctx, "  TODO: separate scribble-strip brightness");
     ImGui_Text(ctx, "  TODO: meter ballistic selector (PPM / VU / RMS)");
     ImGui_Text(ctx, "  TODO: SEL-follows-track-color toggle");
     ImGui_Text(ctx, "  TODO: Export Diagnostic Report button (.zip to Desktop)");

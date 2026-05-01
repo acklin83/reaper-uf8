@@ -279,7 +279,14 @@ enum BrightnessLevel {
     BL_Bright = 3,
     BL_Full   = 4,
 };
+// `g_brightness` is the LED step. `g_scribbleBrightness` is the LCD /
+// scribble-strip / mech-VU step. Originally both followed a single index;
+// Settings → Device exposes them as two sliders so users can crank LCD
+// while keeping LEDs dim (or vice-versa). UC1 LCD + status follow the
+// scribble step (visually they're all "displays"); UC1 LEDs follow the
+// LED step.
 std::atomic<int> g_brightness{BL_Full};
+std::atomic<int> g_scribbleBrightness{BL_Full};
 
 struct BrightnessBytes {
     uint8_t uf8_led; uint8_t uf8_lcd;
@@ -293,39 +300,137 @@ constexpr BrightnessBytes kBrightnessTable[5] = {
     {0x20, 0xA0, 0x40, 0xA0, 0x32},  // full
 };
 
-void pushBrightness(int level)
+int clampLevel_(int level)
 {
-    if (level < 0) level = 0;
-    if (level > 4) level = 4;
-    const auto& b = kBrightnessTable[level];
+    if (level < 0) return 0;
+    if (level > 4) return 4;
+    return level;
+}
+
+void pushUf8Brightness(int ledLevel, int scribbleLevel)
+{
+    ledLevel      = clampLevel_(ledLevel);
+    scribbleLevel = clampLevel_(scribbleLevel);
+    const auto& bl = kBrightnessTable[ledLevel];
+    const auto& bs = kBrightnessTable[scribbleLevel];
     if (g_dev && g_dev->isOpen()) {
-        g_dev->send(uf8::buildLedBrightness(b.uf8_led));
-        g_dev->send(uf8::buildLcdBrightness(b.uf8_lcd));
+        g_dev->send(uf8::buildLedBrightness(bl.uf8_led));
+        g_dev->send(uf8::buildLcdBrightness(bs.uf8_lcd));
     }
+}
+
+void pushUc1Brightness(int ledLevel, int scribbleLevel)
+{
+    ledLevel      = clampLevel_(ledLevel);
+    scribbleLevel = clampLevel_(scribbleLevel);
+    const auto& bl = kBrightnessTable[ledLevel];
+    const auto& bs = kBrightnessTable[scribbleLevel];
     if (g_uc1_dev && g_uc1_dev->isOpen()) {
-        g_uc1_dev->send(uc1::buildLedBrightness(b.uc1_led));
-        g_uc1_dev->send(uc1::buildLcdBrightness(b.uc1_lcd));
-        g_uc1_dev->send(uc1::buildStatusBrightness(b.uc1_status));
+        g_uc1_dev->send(uc1::buildLedBrightness(bl.uc1_led));
+        g_uc1_dev->send(uc1::buildLcdBrightness(bs.uc1_lcd));
+        g_uc1_dev->send(uc1::buildStatusBrightness(bs.uc1_status));
     }
+}
+
+void pushBrightness(int ledLevel, int scribbleLevel)
+{
+    pushUf8Brightness(ledLevel, scribbleLevel);
+    pushUc1Brightness(ledLevel, scribbleLevel);
 }
 
 void applyBrightness()
 {
-    const int lvl = g_brightness.load();
-    pushBrightness(lvl);
+    const int led = g_brightness.load();
+    const int scr = g_scribbleBrightness.load();
+    pushBrightness(led, scr);
     char buf[8];
-    std::snprintf(buf, sizeof(buf), "%d", lvl);
-    SetExtState("rea_sixty", "brightness", buf, true);  // persist=true
+    std::snprintf(buf, sizeof(buf), "%d", led);
+    SetExtState("rea_sixty", "brightness", buf, true);
+    std::snprintf(buf, sizeof(buf), "%d", scr);
+    SetExtState("rea_sixty", "scribble_brightness", buf, true);
 }
 
 void loadBrightness()
 {
-    const char* s = GetExtState("rea_sixty", "brightness");
-    if (s && *s) {
-        int lvl = std::atoi(s);
-        if (lvl < 0) lvl = 0;
-        if (lvl > 4) lvl = 4;
-        g_brightness.store(lvl);
+    const char* led = GetExtState("rea_sixty", "brightness");
+    if (led && *led) {
+        g_brightness.store(clampLevel_(std::atoi(led)));
+    }
+    const char* scr = GetExtState("rea_sixty", "scribble_brightness");
+    if (scr && *scr) {
+        g_scribbleBrightness.store(clampLevel_(std::atoi(scr)));
+    } else {
+        // First-run migration: no separate scribble pref yet → mirror the
+        // LED level so the install upgrade is invisible.
+        g_scribbleBrightness.store(g_brightness.load());
+    }
+}
+
+// ---- Identify Unit (LCD/LED flash) ----------------------------------------
+// Settings → Device exposes per-device "Identify" buttons. Pulses LED + LCD
+// brightness between Dark and Full at 4 Hz for kIdentifyDurationMs to make
+// it obvious which physical box is selected when several are connected.
+// State machine ticks on onTimer so we don't block the main thread.
+constexpr int64_t kIdentifyDurationMs = 2000;
+constexpr int64_t kIdentifyFlashMs    = 250;
+
+std::atomic<int64_t> g_identifyUf8UntilMs{0};
+std::atomic<int64_t> g_identifyUc1UntilMs{0};
+int g_identifyUf8LastLevel = -1;
+int g_identifyUc1LastLevel = -1;
+
+int64_t nowMs_()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+void tickIdentify()
+{
+    const int64_t now = nowMs_();
+
+    // UF8
+    {
+        const int64_t until = g_identifyUf8UntilMs.load();
+        if (until > 0) {
+            if (now < until) {
+                const int64_t remaining = until - now;
+                const int phase = (remaining / kIdentifyFlashMs) & 1;
+                const int target = phase ? BL_Dark : BL_Full;
+                if (target != g_identifyUf8LastLevel) {
+                    // During identify, drive both LED and scribble at the
+                    // same level so the whole unit visibly pulses.
+                    pushUf8Brightness(target, target);
+                    g_identifyUf8LastLevel = target;
+                }
+            } else {
+                g_identifyUf8UntilMs.store(0);
+                g_identifyUf8LastLevel = -1;
+                pushUf8Brightness(g_brightness.load(),
+                                  g_scribbleBrightness.load());
+            }
+        }
+    }
+
+    // UC1
+    {
+        const int64_t until = g_identifyUc1UntilMs.load();
+        if (until > 0) {
+            if (now < until) {
+                const int64_t remaining = until - now;
+                const int phase = (remaining / kIdentifyFlashMs) & 1;
+                const int target = phase ? BL_Dark : BL_Full;
+                if (target != g_identifyUc1LastLevel) {
+                    pushUc1Brightness(target, target);
+                    g_identifyUc1LastLevel = target;
+                }
+            } else {
+                g_identifyUc1UntilMs.store(0);
+                g_identifyUc1LastLevel = -1;
+                pushUc1Brightness(g_brightness.load(),
+                                  g_scribbleBrightness.load());
+            }
+        }
     }
 }
 
@@ -3599,6 +3704,8 @@ void onTimer()
         g_mixerWindow.toggle();
     }
 
+    tickIdentify();
+
     // ImGui frame for the Plugin Mixer / Settings window. No-op while the
     // window is closed; when open, drives the entire ReaImGui paint cycle
     // for this tick. Kept last so any REAPER-API reads above (track
@@ -4080,12 +4187,31 @@ int reasixty_brightnessLevel()
     return g_brightness.load();
 }
 
+int reasixty_scribbleBrightnessLevel()
+{
+    return g_scribbleBrightness.load();
+}
+
 void reasixty_setBrightnessLevel(int level)
 {
-    if (level < BL_Dark) level = BL_Dark;
-    if (level > BL_Full) level = BL_Full;
-    g_brightness.store(level);
+    g_brightness.store(clampLevel_(level));
     applyBrightness();
+}
+
+void reasixty_setScribbleBrightnessLevel(int level)
+{
+    g_scribbleBrightness.store(clampLevel_(level));
+    applyBrightness();
+}
+
+void reasixty_identifyUf8()
+{
+    g_identifyUf8UntilMs.store(nowMs_() + kIdentifyDurationMs);
+}
+
+void reasixty_identifyUc1()
+{
+    g_identifyUc1UntilMs.store(nowMs_() + kIdentifyDurationMs);
 }
 
 extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(
