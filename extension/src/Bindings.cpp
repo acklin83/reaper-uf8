@@ -12,6 +12,7 @@
 
 #include "Bindings.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -562,6 +563,95 @@ int getActiveLayer()
     int n = g_cfg.activeLayer;
     if (n < 0 || n > 2) n = 0;
     return n;
+}
+
+namespace {
+// Factories all the mutators below funnel through. Caller must already
+// hold g_cfgMutex.
+void persistLocked_()
+{
+    ensureConfigDir_();
+    writeFile_(configPath_(), serialize(g_cfg));
+}
+}
+
+Binding getBinding(int layer, ButtonId id)
+{
+    std::lock_guard<std::mutex> lk(g_cfgMutex);
+    if (layer < 0 || layer > 2) return {};
+    auto it = g_cfg.layers[layer].bindings.find(id);
+    if (it == g_cfg.layers[layer].bindings.end()) return {};
+    return it->second;
+}
+
+void setBinding(int layer, ButtonId id, const Binding& bd)
+{
+    if (layer < 0 || layer > 2 || id == ButtonId::None) return;
+    std::lock_guard<std::mutex> lk(g_cfgMutex);
+    g_cfg.layers[layer].bindings[id] = bd;
+    persistLocked_();
+}
+
+void clearBinding(int layer, ButtonId id)
+{
+    if (layer < 0 || layer > 2 || id == ButtonId::None) return;
+    std::lock_guard<std::mutex> lk(g_cfgMutex);
+    g_cfg.layers[layer].bindings.erase(id);
+    persistLocked_();
+}
+
+void setLayerName(int layer, const std::string& name)
+{
+    if (layer < 0 || layer > 2) return;
+    std::lock_guard<std::mutex> lk(g_cfgMutex);
+    g_cfg.layers[layer].name = name;
+    persistLocked_();
+}
+
+void setLayerVpotDefaultMode(int layer, const std::string& mode)
+{
+    if (layer < 0 || layer > 2) return;
+    std::lock_guard<std::mutex> lk(g_cfgMutex);
+    g_cfg.layers[layer].vpotDefaultMode = mode;
+    persistLocked_();
+}
+
+void setLayerAutoMixer(int layer, bool flag)
+{
+    // Layer 0 (Layer 1) doesn't carry the flag per resolved Q5.
+    if (layer < 1 || layer > 2) return;
+    std::lock_guard<std::mutex> lk(g_cfgMutex);
+    g_cfg.layers[layer].autoWhenMixerVisible = flag;
+    if (flag) {
+        // Architectural invariant: at most one layer flagged.
+        const int other = (layer == 1) ? 2 : 1;
+        g_cfg.layers[other].autoWhenMixerVisible = false;
+    }
+    persistLocked_();
+}
+
+void resetLayerToDefaults(int layer)
+{
+    if (layer < 0 || layer > 2) return;
+    std::lock_guard<std::mutex> lk(g_cfgMutex);
+    Config tmp;
+    seedFactoryDefaults_(tmp);
+    g_cfg.layers[layer] = std::move(tmp.layers[layer]);
+    persistLocked_();
+}
+
+std::vector<std::string> builtinNames()
+{
+    // No lock — g_builtins is populated once at startup before the USB
+    // thread starts and never mutated thereafter. Safe to read.
+    std::vector<std::string> out;
+    out.reserve(g_builtins.size());
+    for (auto& kv : g_builtins) {
+        if (kv.first.rfind("__", 0) == 0) continue;  // skip internal sentinels
+        out.push_back(kv.first);
+    }
+    std::sort(out.begin(), out.end());
+    return out;
 }
 
 void setActiveLayer(int layer)

@@ -1,7 +1,11 @@
 #include "SettingsScreen.h"
 
 #include <cstdio>
+#include <cstring>
+#include <string>
+#include <vector>
 
+#include "Bindings.h"
 #include "reaper_imgui_functions.h"
 
 // Forward declarations of accessors defined in main.cpp. Same pattern as
@@ -177,17 +181,269 @@ void SettingsScreen::drawDevice(ImGui_Context* ctx)
 //   - 2 Foot-switches         (UF8 jacks; placeholder until USB event decode)
 //   - Layer-scoped soft-keys  (per active layer)
 //   - Learn button (top right)
+namespace {
+
+struct ButtonRow {
+    uf8::bindings::ButtonId id;
+    const char*             label;
+};
+
+struct Section {
+    const char*       header;
+    const ButtonRow*  rows;
+    int               nRows;
+};
+
+// v1 binding rows — must match what fromUf8DeviceId in Bindings.cpp
+// resolves. Sections mirror the UF8 hardware layout so the user can find
+// rows visually. Per-strip + soft-key bank selectors stay out of the
+// catalogue (resolved Q2: hardcoded in v1).
+constexpr ButtonRow kBankPage[] = {
+    { uf8::bindings::ButtonId::BankLeft,  "Bank ←"  },
+    { uf8::bindings::ButtonId::BankRight, "Bank →"  },
+    { uf8::bindings::ButtonId::PageLeft,  "Page ←"  },
+    { uf8::bindings::ButtonId::PageRight, "Page →"  },
+};
+constexpr ButtonRow kLayer[] = {
+    { uf8::bindings::ButtonId::Layer1, "Layer 1" },
+    { uf8::bindings::ButtonId::Layer2, "Layer 2" },
+    { uf8::bindings::ButtonId::Layer3, "Layer 3" },
+};
+constexpr ButtonRow kQuick[] = {
+    { uf8::bindings::ButtonId::Quick1, "Quick 1" },
+    { uf8::bindings::ButtonId::Quick2, "Quick 2" },
+    { uf8::bindings::ButtonId::Quick3, "Quick 3" },
+};
+constexpr ButtonRow kPluginMode[] = {
+    { uf8::bindings::ButtonId::PluginBtn, "Plugin" },
+    { uf8::bindings::ButtonId::Flip,      "Flip"   },
+    { uf8::bindings::ButtonId::Pan,       "Pan"    },
+    { uf8::bindings::ButtonId::Fine,      "Fine"   },
+    { uf8::bindings::ButtonId::Btn360,    "360"    },
+};
+constexpr ButtonRow kAutomation[] = {
+    { uf8::bindings::ButtonId::AutoOff,   "Off"   },
+    { uf8::bindings::ButtonId::AutoRead,  "Read"  },
+    { uf8::bindings::ButtonId::AutoWrite, "Write" },
+    { uf8::bindings::ButtonId::AutoTrim,  "Trim"  },
+    { uf8::bindings::ButtonId::AutoLatch, "Latch" },
+    { uf8::bindings::ButtonId::AutoTouch, "Touch" },
+};
+constexpr ButtonRow kZoom[] = {
+    { uf8::bindings::ButtonId::ZoomUp,     "Zoom ↑" },
+    { uf8::bindings::ButtonId::ZoomDown,   "Zoom ↓" },
+    { uf8::bindings::ButtonId::ZoomLeft,   "Zoom ←" },
+    { uf8::bindings::ButtonId::ZoomRight,  "Zoom →" },
+    { uf8::bindings::ButtonId::ZoomCenter, "Zoom ⤧" },
+};
+constexpr ButtonRow kEncoder[] = {
+    { uf8::bindings::ButtonId::Nav,         "Nav"           },
+    { uf8::bindings::ButtonId::Nudge,       "Nudge"         },
+    { uf8::bindings::ButtonId::EncFocus,    "Focus"         },
+    { uf8::bindings::ButtonId::ChannelPush, "Channel Push"  },
+};
+
+constexpr Section kSections[] = {
+    { "Bank / Page",   kBankPage,   sizeof(kBankPage)/sizeof(kBankPage[0])     },
+    { "Layer",         kLayer,      sizeof(kLayer)/sizeof(kLayer[0])           },
+    { "Quick keys",    kQuick,      sizeof(kQuick)/sizeof(kQuick[0])           },
+    { "Plugin / Mode", kPluginMode, sizeof(kPluginMode)/sizeof(kPluginMode[0]) },
+    { "Automation",    kAutomation, sizeof(kAutomation)/sizeof(kAutomation[0]) },
+    { "Zoom pad",      kZoom,       sizeof(kZoom)/sizeof(kZoom[0])             },
+    { "Encoder modes", kEncoder,    sizeof(kEncoder)/sizeof(kEncoder[0])       },
+};
+
+void drawBindingRow(ImGui_Context* ctx, int layer, const ButtonRow& row)
+{
+    using namespace uf8::bindings;
+
+    ImGui_PushID(ctx, toName(row.id));   // distinct id-stack per row
+    Binding bd      = getBinding(layer, row.id);
+    bool    dirty   = false;
+
+    // First column — fixed-width label so combos line up across rows.
+    ImGui_Text(ctx, row.label);
+    ImGui_SameLine(ctx, /*offset_from_start_x*/ nullptr,
+                   /*spacing*/ nullptr);
+
+    // Type combo. NUL-separated items must end with an extra NUL — the
+    // C-string literal already adds one implicit terminator.
+    static char kTypeItems[] = "noop\0reaper\0keyboard\0builtin\0";
+    int t = static_cast<int>(bd.type);
+    {
+        double w = 110;
+        ImGui_PushItemWidth(ctx, w);
+        if (ImGui_Combo(ctx, "##type", &t, kTypeItems,
+                        /*popup_max_height_in_items*/ nullptr)) {
+            bd.type = static_cast<ActionType>(t);
+            dirty = true;
+        }
+        ImGui_PopItemWidth(ctx);
+    }
+    ImGui_SameLine(ctx, /*offset_from_start_x*/ nullptr, /*spacing*/ nullptr);
+
+    // Action argument — meaning depends on type:
+    //   Reaper  → REAPER action ID (numeric or named, e.g. "40044")
+    //   Keyboard→ key chord string (Phase D wires actual emission)
+    //   Builtin → name from registry
+    //   Noop    → ignored, hide the field
+    {
+        double w = 220;
+        ImGui_PushItemWidth(ctx, w);
+        if (bd.type == ActionType::Builtin) {
+            // BeginCombo lets us list a runtime-built set of names.
+            if (ImGui_BeginCombo(ctx, "##action",
+                                 bd.action.empty() ? "<pick a builtin>"
+                                                   : bd.action.c_str(),
+                                 /*flags*/ nullptr)) {
+                for (auto& n : builtinNames()) {
+                    bool sel = (n == bd.action);
+                    if (ImGui_Selectable(ctx, n.c_str(), &sel,
+                                         /*flags*/ nullptr,
+                                         /*size_w*/ nullptr,
+                                         /*size_h*/ nullptr)) {
+                        bd.action = n;
+                        dirty = true;
+                    }
+                }
+                ImGui_EndCombo(ctx);
+            }
+        } else if (bd.type == ActionType::Reaper
+                || bd.type == ActionType::Keyboard) {
+            char buf[128] = {0};
+            std::strncpy(buf, bd.action.c_str(), sizeof(buf) - 1);
+            const char* hint = (bd.type == ActionType::Reaper)
+                ? "REAPER action ID (e.g. 40044)"
+                : "Key chord (e.g. ctrl+s)";
+            if (ImGui_InputTextWithHint(ctx, "##action", hint,
+                                        buf, sizeof(buf),
+                                        /*flags*/ nullptr)) {
+                bd.action = buf;
+                dirty = true;
+            }
+        } else {
+            // Noop — placeholder so layout stays aligned.
+            ImGui_Text(ctx, "—");
+        }
+        ImGui_PopItemWidth(ctx);
+    }
+    ImGui_SameLine(ctx, /*offset_from_start_x*/ nullptr, /*spacing*/ nullptr);
+
+    // Behavior combo.
+    static char kBehaviorItems[] = "momentary\0toggle\0hold\0";
+    int b = static_cast<int>(bd.behavior);
+    {
+        double w = 110;
+        ImGui_PushItemWidth(ctx, w);
+        if (ImGui_Combo(ctx, "##behavior", &b, kBehaviorItems,
+                        /*popup_max_height_in_items*/ nullptr)) {
+            bd.behavior = static_cast<Behavior>(b);
+            dirty = true;
+        }
+        ImGui_PopItemWidth(ctx);
+    }
+    ImGui_SameLine(ctx, /*offset_from_start_x*/ nullptr, /*spacing*/ nullptr);
+
+    // Param spinner — most builtins ignore it, but layer_select +
+    // automation_mode use it as the target index / mode.
+    {
+        double w = 90;
+        ImGui_PushItemWidth(ctx, w);
+        int p = bd.param;
+        if (ImGui_InputInt(ctx, "##param", &p,
+                           /*step*/ nullptr, /*step_fast*/ nullptr,
+                           /*flags*/ nullptr)) {
+            bd.param = p;
+            dirty = true;
+        }
+        ImGui_PopItemWidth(ctx);
+    }
+
+    if (dirty) {
+        uf8::bindings::setBinding(layer, row.id, bd);
+    }
+
+    ImGui_PopID(ctx);
+}
+
+} // namespace
+
+// Phase C UI per architecture (memory bindings-architecture.md):
+//   - Layer selector at the top (3 layers, named in JSON).
+//   - For Layer 2/3: auto_when_mixer_visible checkbox.
+//   - Reset-to-factory-defaults button (per layer).
+//   - Sections grouped by hardware location.
+//   - Per-row inline editor: type + action arg + behavior + param.
+//
+// Auto-saves on any change — setBinding writes JSON synchronously. The
+// USB worker thread picks up the new binding on the next press through
+// dispatch's lock-protected lookup.
+//
+// Per-strip Sel/Cut/Solo/Rec, V-Pot push, top soft-key, and soft-key
+// bank selectors stay out of this UI in v1 (resolved Q2: hardcoded).
+// Phase D widens the catalogue once the per-strip dispatch refactor lands.
 void SettingsScreen::drawBindings(ImGui_Context* ctx)
 {
-    ImGui_Text(ctx, "Bindings");
-    ImGui_Text(ctx, "  TODO: per-strip target editor (select/mute/solo/rec/vpot_press)");
-    ImGui_Text(ctx, "  TODO: transport bindings (REAPER action IDs)");
-    ImGui_Text(ctx, "  TODO: global buttons (bank/channel L/R, flip, layer cycle)");
-    ImGui_Text(ctx, "  TODO: 3 Quick Keys (UF8 QUICK row, default = layer switches)");
-    ImGui_Text(ctx, "  TODO: 2 Foot-switches (UF8 jacks; placeholder until USB event decoded)");
-    ImGui_Text(ctx, "  TODO: soft-key bindings table per active layer");
-    ImGui_Text(ctx, "  TODO: Learn-mode arming + ESC-to-cancel");
-    ImGui_Text(ctx, "  TODO: import / export / reset-to-defaults");
+    using namespace uf8::bindings;
+
+    // ---- Top controls ----
+    static int s_editLayer = 0;
+    static char kLayerItems[] = "Layer 1\0Layer 2\0Layer 3\0";
+    {
+        double w = 160;
+        ImGui_PushItemWidth(ctx, w);
+        ImGui_Combo(ctx, "Editing layer", &s_editLayer, kLayerItems,
+                    /*popup_max_height_in_items*/ nullptr);
+        ImGui_PopItemWidth(ctx);
+    }
+
+    // Active-layer indicator + quick-switch button.
+    {
+        const int active = getActiveLayer();
+        char line[64];
+        std::snprintf(line, sizeof(line), "Active layer: %d", active + 1);
+        ImGui_Text(ctx, line);
+        ImGui_SameLine(ctx, /*offset_from_start_x*/ nullptr, /*spacing*/ nullptr);
+        if (ImGui_Button(ctx, "Activate this layer",
+                         /*size_w*/ nullptr, /*size_h*/ nullptr)) {
+            setActiveLayer(s_editLayer);
+        }
+    }
+
+    // Layer 2/3: auto-switch when mixer visible. Architecture invariant
+    // "at most one layer flagged" is enforced by setLayerAutoMixer.
+    if (s_editLayer >= 1) {
+        bool autoMixer = get().layers[s_editLayer].autoWhenMixerVisible;
+        if (ImGui_Checkbox(ctx, "Auto-switch to this layer when mixer is open",
+                           &autoMixer)) {
+            setLayerAutoMixer(s_editLayer, autoMixer);
+        }
+    } else {
+        ImGui_Text(ctx, "(Layer 1 is the default — mixer auto-switch lives "
+                        "on Layer 2 / 3.)");
+    }
+
+    if (ImGui_Button(ctx, "Reset this layer to factory defaults",
+                     /*size_w*/ nullptr, /*size_h*/ nullptr)) {
+        resetLayerToDefaults(s_editLayer);
+    }
+
+    ImGui_Separator(ctx);
+
+    // ---- Section headers + per-button rows ----
+    for (const Section& sec : kSections) {
+        if (ImGui_CollapsingHeader(ctx, sec.header,
+                                   /*p_visible*/ nullptr,
+                                   /*flags*/ nullptr)) {
+            for (int i = 0; i < sec.nRows; ++i) {
+                drawBindingRow(ctx, s_editLayer, sec.rows[i]);
+            }
+        }
+    }
+
+    ImGui_Separator(ctx);
+    ImGui_Text(ctx, "Per-strip Select/Mute/Solo/Rec, V-Pot push, top soft-keys");
+    ImGui_Text(ctx, "and soft-key bank selectors stay hardcoded in v1.");
 }
 
 // ---- Soft-Key Banks -------------------------------------------------------

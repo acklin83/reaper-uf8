@@ -21,6 +21,7 @@
 #include <functional>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace uf8::bindings {
 
@@ -143,5 +144,37 @@ bool dispatch(ButtonId id, bool pressed);
 // restores the saved layer. Manual layer switches via setActiveLayer
 // invalidate the save (manual override wins on close).
 void onMixerVisibilityChanged(bool visible);
+
+// ---- Phase C mutator API (Settings → Bindings tab) ------------------------
+
+// Read a copy of a single binding (Phase C UI snapshots state per row
+// each frame). Returns a default-constructed Binding if no entry exists.
+Binding getBinding(int layer, ButtonId id);
+
+// Replace (or insert) a single binding and persist. Caller is the UI;
+// any in-flight USB-thread dispatch holding the lock blocks briefly.
+void setBinding(int layer, ButtonId id, const Binding& bd);
+
+// Remove a binding and persist. Equivalent to "unbind" — the next press
+// of that button falls through to legacy MCU passthrough on that layer.
+void clearBinding(int layer, ButtonId id);
+
+// Per-layer settings.
+void setLayerName(int layer, const std::string& name);
+void setLayerVpotDefaultMode(int layer, const std::string& mode);
+
+// auto_when_mixer_visible toggle. Enforces the architectural invariant
+// "at most one layer flagged" — turning Layer 2 on automatically clears
+// Layer 3 and vice versa. Layer 0 (Layer 1) ignores the setter.
+void setLayerAutoMixer(int layer, bool flag);
+
+// Re-seed a single layer with the factory defaults (Layer 1 = full
+// catalogue, Layers 2/3 = layer_select bindings only). Persists.
+void resetLayerToDefaults(int layer);
+
+// List of registered builtin names — Phase C UI uses this to populate
+// the action-picker combo. Internal sentinel names (anything starting
+// with `__`) are filtered out.
+std::vector<std::string> builtinNames();
 
 } // namespace uf8::bindings
