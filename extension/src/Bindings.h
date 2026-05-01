@@ -108,11 +108,21 @@ struct Config {
 struct BuiltinDescriptor {
     using Run     = std::function<void(bool firing, bool pressed, int param)>;
     using StateOf = std::function<bool(int param)>;
-    Run     run;
-    StateOf stateOf;   // may be empty; consumed by Phase B LED-pusher
+    Run         run;
+    StateOf     stateOf;       // may be empty; consumed by Phase B LED-pusher
+    std::string displayName;   // human-friendly label for the picker UI
+    bool        usesParam = false;  // hide param field in UI when false
 };
 
 void registerBuiltin(const char* name, BuiltinDescriptor desc);
+
+// Look up a builtin's display name. Falls back to the canonical name
+// if the builtin isn't registered (UI then shows the snake_case name).
+std::string builtinDisplayName(const std::string& name);
+
+// Whether this builtin reads its `param` arg. UI uses this to hide the
+// param column for buttons whose action is param-less.
+bool builtinUsesParam(const std::string& name);
 
 // ---- lifecycle / API -------------------------------------------------------
 

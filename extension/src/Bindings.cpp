@@ -204,19 +204,14 @@ void seedFactoryDefaults_(Config& c)
 
     // Layer-select bindings live on ALL three layers so the user can
     // always navigate back even on the otherwise-empty Layer 2/3
-    // scaffolds. Each layer presses commit through setActiveLayer →
-    // persists. Param = target layer index (0..2). Layer button LED
-    // state is driven by main.cpp's pushUf8GlobalLeds based on
-    // getActiveLayer() — has-state semantics live there, not in the
-    // Binding's own toggle.
+    // scaffolds. Each press commits through setActiveLayer → persists.
+    // Layer button LED state is driven by main.cpp's pushUf8GlobalLeds
+    // based on getActiveLayer().
     for (int li = 0; li < 3; ++li) {
         auto& L = c.layers[li].bindings;
-        L[ButtonId::Layer1] = mkBuiltin("layer_select", Behavior::Momentary,
-                                        "LAYER 1", 255,255,255, 0);
-        L[ButtonId::Layer2] = mkBuiltin("layer_select", Behavior::Momentary,
-                                        "LAYER 2", 255,255,255, 1);
-        L[ButtonId::Layer3] = mkBuiltin("layer_select", Behavior::Momentary,
-                                        "LAYER 3", 255,255,255, 2);
+        L[ButtonId::Layer1] = mkBuiltin("layer_select_1", Behavior::Momentary, "LAYER 1");
+        L[ButtonId::Layer2] = mkBuiltin("layer_select_2", Behavior::Momentary, "LAYER 2");
+        L[ButtonId::Layer3] = mkBuiltin("layer_select_3", Behavior::Momentary, "LAYER 3");
     }
 
     auto& L1 = c.layers[0].bindings;
@@ -230,13 +225,13 @@ void seedFactoryDefaults_(Config& c)
     L1[ButtonId::EncFocus]    = mkBuiltin("encoder_focus", Behavior::Momentary, "FOCUS");
     L1[ButtonId::ChannelPush] = mkBuiltin("encoder_nav",   Behavior::Momentary, "");
 
-    // Automation row. Off and Trim both map to REAPER mode 0 (Trim/Read).
-    L1[ButtonId::AutoOff]   = mkBuiltin("automation_mode", Behavior::Momentary, "OFF",   255,255,255, 0);
-    L1[ButtonId::AutoRead]  = mkBuiltin("automation_mode", Behavior::Momentary, "READ",  255,255,255, 1);
-    L1[ButtonId::AutoWrite] = mkBuiltin("automation_mode", Behavior::Momentary, "WRITE", 255,255,255, 3);
-    L1[ButtonId::AutoTrim]  = mkBuiltin("automation_mode", Behavior::Momentary, "TRIM",  255,255,255, 0);
-    L1[ButtonId::AutoLatch] = mkBuiltin("automation_mode", Behavior::Momentary, "LATCH", 255,255,255, 4);
-    L1[ButtonId::AutoTouch] = mkBuiltin("automation_mode", Behavior::Momentary, "TOUCH", 255,255,255, 2);
+    // Automation row — one builtin per mode (no magic params in JSON).
+    L1[ButtonId::AutoOff]   = mkBuiltin("auto_off",   Behavior::Momentary, "OFF");
+    L1[ButtonId::AutoRead]  = mkBuiltin("auto_read",  Behavior::Momentary, "READ");
+    L1[ButtonId::AutoWrite] = mkBuiltin("auto_write", Behavior::Momentary, "WRITE");
+    L1[ButtonId::AutoTrim]  = mkBuiltin("auto_trim",  Behavior::Momentary, "TRIM");
+    L1[ButtonId::AutoLatch] = mkBuiltin("auto_latch", Behavior::Momentary, "LATCH");
+    L1[ButtonId::AutoTouch] = mkBuiltin("auto_touch", Behavior::Momentary, "TOUCH");
 
     // Zoom pad — bundled builtins (REAPER action + LED feedback). Phase B
     // collapses these into ActionType::Reaper once per-binding LED config
@@ -652,6 +647,20 @@ std::vector<std::string> builtinNames()
     }
     std::sort(out.begin(), out.end());
     return out;
+}
+
+std::string builtinDisplayName(const std::string& name)
+{
+    auto it = g_builtins.find(name);
+    if (it == g_builtins.end() || it->second.displayName.empty()) return name;
+    return it->second.displayName;
+}
+
+bool builtinUsesParam(const std::string& name)
+{
+    auto it = g_builtins.find(name);
+    if (it == g_builtins.end()) return false;
+    return it->second.usesParam;
 }
 
 void setActiveLayer(int layer)

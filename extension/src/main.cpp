@@ -4335,19 +4335,21 @@ void registerBindingHandlers()
     using uf8::bindings::BuiltinDescriptor;
     using uf8::bindings::registerBuiltin;
 
+    using DescBuilder = BuiltinDescriptor;
+
     // Sentinel used by ActionType::Reaper dispatch — funnels Main_OnCommand
     // through the main-thread queue so REAPER's API contract is honoured.
-    registerBuiltin("__reaper_action__", BuiltinDescriptor{
+    registerBuiltin("__reaper_action__", DescBuilder{
         [](bool firing, bool /*pressed*/, int actionId) {
             if (firing && actionId > 0) {
                 queueInput({PendingInput::MainAction, 0,
                             static_cast<double>(actionId)});
             }
         },
-        nullptr
+        nullptr, "", false
     });
 
-    registerBuiltin("flip", BuiltinDescriptor{
+    registerBuiltin("flip", DescBuilder{
         [](bool firing, bool /*pressed*/, int /*param*/) {
             if (!firing) return;
             const bool next = !g_flip.load();
@@ -4355,10 +4357,11 @@ void registerBindingHandlers()
             g_pageDirty.store(true);
             SetExtState("ReaSixty", "flip", next ? "1" : "0", true);
         },
-        [](int) { return g_flip.load(); }
+        [](int) { return g_flip.load(); },
+        "Toggle FLIP (fader ↔ V-Pot)", false
     });
 
-    registerBuiltin("ssl_strip_mode_toggle", BuiltinDescriptor{
+    registerBuiltin("ssl_strip_mode_toggle", DescBuilder{
         [](bool firing, bool /*pressed*/, int /*param*/) {
             if (!firing) return;
             const bool next = !g_pluginFaderMode.load();
@@ -4367,10 +4370,11 @@ void registerBindingHandlers()
             SetExtState("ReaSixty", "pluginFaderMode",
                         next ? "1" : "0", true);
         },
-        [](int) { return g_pluginFaderMode.load(); }
+        [](int) { return g_pluginFaderMode.load(); },
+        "Toggle SSL Strip Mode", false
     });
 
-    registerBuiltin("pan_force", BuiltinDescriptor{
+    registerBuiltin("pan_force", DescBuilder{
         [](bool firing, bool /*pressed*/, int /*param*/) {
             if (!firing) return;
             const bool next = !g_forcePan.load();
@@ -4378,50 +4382,52 @@ void registerBindingHandlers()
             g_pageDirty.store(true);
             SetExtState("ReaSixty", "forcePan", next ? "1" : "0", true);
         },
-        [](int) { return g_forcePan.load(); }
+        [](int) { return g_forcePan.load(); },
+        "Toggle V-Pots → Pan", false
     });
 
-    registerBuiltin("mixer_toggle", BuiltinDescriptor{
+    registerBuiltin("mixer_toggle", DescBuilder{
         [](bool firing, bool /*pressed*/, int /*param*/) {
             if (firing) g_mixerToggleRequest.store(true);
         },
-        nullptr
+        nullptr, "Open / close Plugin Mixer", false
     });
 
     // Hold behaviour — state mirrors the physical button.
-    registerBuiltin("fine_modifier", BuiltinDescriptor{
+    registerBuiltin("fine_modifier", DescBuilder{
         [](bool /*firing*/, bool pressed, int /*param*/) {
             g_shiftHeld.store(pressed);
         },
-        [](int) { return g_shiftHeld.load(); }
+        [](int) { return g_shiftHeld.load(); },
+        "Fine modifier (Shift)", false
     });
 
-    registerBuiltin("encoder_nav", BuiltinDescriptor{
+    registerBuiltin("encoder_nav", DescBuilder{
         [](bool firing, bool /*pressed*/, int /*param*/) {
             if (!firing) return;
             g_encoderMode.store(EncoderMode::Nav);
             SetExtState("ReaSixty", "encoderMode", "Nav", true);
         },
-        nullptr
+        nullptr, "Encoder → Nav", false
     });
-    registerBuiltin("encoder_nudge", BuiltinDescriptor{
+    registerBuiltin("encoder_nudge", DescBuilder{
         [](bool firing, bool /*pressed*/, int /*param*/) {
             if (!firing) return;
             g_encoderMode.store(EncoderMode::Nudge);
             SetExtState("ReaSixty", "encoderMode", "Nudge", true);
         },
-        nullptr
+        nullptr, "Encoder → Nudge", false
     });
-    registerBuiltin("encoder_focus", BuiltinDescriptor{
+    registerBuiltin("encoder_focus", DescBuilder{
         [](bool firing, bool /*pressed*/, int /*param*/) {
             if (!firing) return;
             g_encoderMode.store(EncoderMode::Focus);
             SetExtState("ReaSixty", "encoderMode", "Focus", true);
         },
-        nullptr
+        nullptr, "Encoder → Focus", false
     });
 
-    registerBuiltin("domain_cs", BuiltinDescriptor{
+    registerBuiltin("domain_cs", DescBuilder{
         [](bool firing, bool /*pressed*/, int /*param*/) {
             if (!firing) return;
             const auto fp = uf8::getFocusedParam();
@@ -4429,9 +4435,9 @@ void registerBindingHandlers()
                 uf8::setFocus({uf8::Domain::ChannelStrip, 0});
             }
         },
-        nullptr
+        nullptr, "Focus → Channel Strip", false
     });
-    registerBuiltin("domain_bc", BuiltinDescriptor{
+    registerBuiltin("domain_bc", DescBuilder{
         [](bool firing, bool /*pressed*/, int /*param*/) {
             if (!firing) return;
             const auto fp = uf8::getFocusedParam();
@@ -4439,38 +4445,76 @@ void registerBindingHandlers()
                 uf8::setFocus({uf8::Domain::BusComp, 0});
             }
         },
-        nullptr
+        nullptr, "Focus → Bus Comp", false
     });
 
-    // Layer select (Phase B). param = target layer index (0..2). Press
-    // commits through bindings::setActiveLayer (persists to JSON +
-    // invalidates any pending mixer auto-save). LED feedback is pushed
-    // immediately so the radio moves on the same tick the user presses;
-    // pushUf8GlobalLeds's dedup picks it up afterwards.
-    registerBuiltin("layer_select", BuiltinDescriptor{
+    // Layer select — one builtin per layer so the picker shows
+    // self-documenting rows (no magic param). The legacy
+    // "layer_select" + param entry stays registered for backwards-
+    // compat with bindings.json files saved before the split.
+    auto layerSelect = [](int target) {
+        return DescBuilder{
+            [target](bool firing, bool /*pressed*/, int /*param*/) {
+                if (!firing) return;
+                uf8::bindings::setActiveLayer(target);
+                pushLayerLeds(target);
+            },
+            nullptr,
+            (target == 0 ? "Switch to Layer 1"
+             : target == 1 ? "Switch to Layer 2"
+                           : "Switch to Layer 3"),
+            false
+        };
+    };
+    registerBuiltin("layer_select_1", layerSelect(0));
+    registerBuiltin("layer_select_2", layerSelect(1));
+    registerBuiltin("layer_select_3", layerSelect(2));
+    // Backwards-compat shim — older configs reference layer_select with
+    // param 0..2. Keep working but UI uses the split builtins above.
+    registerBuiltin("layer_select", DescBuilder{
         [](bool firing, bool /*pressed*/, int param) {
             if (!firing) return;
             if (param < 0 || param > 2) return;
             uf8::bindings::setActiveLayer(param);
             pushLayerLeds(param);
         },
-        nullptr
+        nullptr, "Switch to layer (param 0..2)", true
     });
 
-    // Automation row. param = REAPER mode (0..4). Auto Off and Auto Trim
-    // both bind with param=0 (REAPER has no separate "off" mode).
-    registerBuiltin("automation_mode", BuiltinDescriptor{
+    // Automation modes — one builtin per REAPER mode so the picker
+    // shows self-documenting names. Off and Trim both map to mode 0
+    // (REAPER has no separate "off"; SSL convention puts both on the
+    // hardware row). The legacy "automation_mode" + param entry stays
+    // registered for backwards-compat.
+    auto autoMode = [](int reaperMode, const char* label) {
+        return DescBuilder{
+            [reaperMode](bool firing, bool /*pressed*/, int /*param*/) {
+                if (!firing) return;
+                queueInput({PendingInput::AutomationMode, 0,
+                            static_cast<double>(reaperMode)});
+                pushAutoModeLeds(reaperMode);
+            },
+            nullptr, label, false
+        };
+    };
+    registerBuiltin("auto_off",   autoMode(0, "Automation: Off / Trim"));
+    registerBuiltin("auto_read",  autoMode(1, "Automation: Read"));
+    registerBuiltin("auto_write", autoMode(3, "Automation: Write"));
+    registerBuiltin("auto_trim",  autoMode(0, "Automation: Trim"));
+    registerBuiltin("auto_latch", autoMode(4, "Automation: Latch"));
+    registerBuiltin("auto_touch", autoMode(2, "Automation: Touch"));
+    // Backwards-compat shim.
+    registerBuiltin("automation_mode", DescBuilder{
         [](bool firing, bool /*pressed*/, int param) {
             if (!firing) return;
             queueInput({PendingInput::AutomationMode, 0,
                         static_cast<double>(param)});
-            // Pre-empt the firmware's transition flash through TRIM.
             pushAutoModeLeds(param);
         },
-        nullptr
+        nullptr, "Automation mode (param = REAPER mode 0..4)", true
     });
 
-    registerBuiltin("bank_left", BuiltinDescriptor{
+    registerBuiltin("bank_left", DescBuilder{
         [](bool firing, bool pressed, int /*param*/) {
             sendLedFrames(uf8::buildUf8GlobalLed(
                 uf8::Uf8GlobalLed::BankLeft, pressed));
@@ -4482,9 +4526,9 @@ void registerBindingHandlers()
             if (next > maxStart) next = maxStart;
             if (next != g_bankOffset.exchange(next)) g_bankDirty.store(true);
         },
-        nullptr
+        nullptr, "Bank ← (8-strip scroll left)", false
     });
-    registerBuiltin("bank_right", BuiltinDescriptor{
+    registerBuiltin("bank_right", DescBuilder{
         [](bool firing, bool pressed, int /*param*/) {
             sendLedFrames(uf8::buildUf8GlobalLed(
                 uf8::Uf8GlobalLed::BankRight, pressed));
@@ -4496,7 +4540,7 @@ void registerBindingHandlers()
             if (next > maxStart) next = maxStart;
             if (next != g_bankOffset.exchange(next)) g_bankDirty.store(true);
         },
-        nullptr
+        nullptr, "Bank → (8-strip scroll right)", false
     });
 
     auto pageStep = [](int delta) {
@@ -4514,28 +4558,28 @@ void registerBindingHandlers()
             SetExtState("ReaSixty", "softKeyBank", buf, true);
         }
     };
-    registerBuiltin("page_left", BuiltinDescriptor{
+    registerBuiltin("page_left", DescBuilder{
         [pageStep](bool firing, bool pressed, int /*param*/) {
             sendLedFrames(uf8::buildUf8GlobalLed(
                 uf8::Uf8GlobalLed::PageLeft, pressed));
             if (firing) pageStep(-1);
         },
-        nullptr
+        nullptr, "Page ← (soft-key bank prev)", false
     });
-    registerBuiltin("page_right", BuiltinDescriptor{
+    registerBuiltin("page_right", DescBuilder{
         [pageStep](bool firing, bool pressed, int /*param*/) {
             sendLedFrames(uf8::buildUf8GlobalLed(
                 uf8::Uf8GlobalLed::PageRight, pressed));
             if (firing) pageStep(1);
         },
-        nullptr
+        nullptr, "Page → (soft-key bank next)", false
     });
 
     // Zoom pad — bundled builtins (REAPER action + LED feedback). Phase B
     // collapses these into ActionType::Reaper once per-binding LED config
     // lands.
-    auto zoomBuiltin = [](uf8::Uf8GlobalLed led, int actionId) {
-        return BuiltinDescriptor{
+    auto zoomBuiltin = [](uf8::Uf8GlobalLed led, int actionId, const char* label) {
+        return DescBuilder{
             [led, actionId](bool firing, bool pressed, int /*param*/) {
                 sendLedFrames(uf8::buildUf8GlobalLed(led, pressed));
                 if (firing && actionId) {
@@ -4543,14 +4587,14 @@ void registerBindingHandlers()
                                 static_cast<double>(actionId)});
                 }
             },
-            nullptr
+            nullptr, label, false
         };
     };
-    registerBuiltin("zoom_up",     zoomBuiltin(uf8::Uf8GlobalLed::ZoomUp,     40112));
-    registerBuiltin("zoom_down",   zoomBuiltin(uf8::Uf8GlobalLed::ZoomDown,   40111));
-    registerBuiltin("zoom_left",   zoomBuiltin(uf8::Uf8GlobalLed::ZoomLeft,   1011));
-    registerBuiltin("zoom_right",  zoomBuiltin(uf8::Uf8GlobalLed::ZoomRight,  1012));
-    registerBuiltin("zoom_center", zoomBuiltin(uf8::Uf8GlobalLed::ZoomCenter, 40295));
+    registerBuiltin("zoom_up",     zoomBuiltin(uf8::Uf8GlobalLed::ZoomUp,     40112, "Zoom in vertically"));
+    registerBuiltin("zoom_down",   zoomBuiltin(uf8::Uf8GlobalLed::ZoomDown,   40111, "Zoom out vertically"));
+    registerBuiltin("zoom_left",   zoomBuiltin(uf8::Uf8GlobalLed::ZoomLeft,   1011,  "Zoom out horizontally"));
+    registerBuiltin("zoom_right",  zoomBuiltin(uf8::Uf8GlobalLed::ZoomRight,  1012,  "Zoom in horizontally"));
+    registerBuiltin("zoom_center", zoomBuiltin(uf8::Uf8GlobalLed::ZoomCenter, 40295, "Zoom to fit project"));
 }
 
 extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(
