@@ -1001,13 +1001,11 @@ constexpr uint8_t kLfGainCells[] = {0x18,0x19,0x1A,0x1B,0x1C,0x1D,0x1E,0x1F,0x20
 constexpr uint8_t kInputTrimCells[]  = {0xC0,0xC1,0xC2,0xC3,0xC4,0xC5,0xC6,0xC7,0xC8,0xC9,0xCA};
 // Fader Level / Output Gain — knob 0x16, byte5=0x01. Confirmed in
 // Output Gain / Fader Level — full 11-LED ring per user 2026-05-01.
-// uc1_32c only swept the visible-active range (4 cells 0x0E..0x11)
-// because SSL360 doesn't drive the unused outer cells in a
-// param-equivalent sweep; the physical ring is the same 11-LED layout
-// every other UC1 knob uses. Cells 0x0C..0x16 byte5=0x01 (the 7-seg
-// digit cells at 0x10..0x16 are byte5=0x00 — independent address
-// space, no collision).
-constexpr uint8_t kFaderLevelCells[] = {0x0C,0x0D,0x0E,0x0F,0x10,0x11,0x12,0x13,0x14,0x15,0x16};
+// First-revision map (0x0C..0x16) was off-by-one: 0x0C belongs to
+// BC Mix LED 11/11 (BC Mix's high-address neighbour, byte5=0x01).
+// Real Output Gain range is 0x0D..0x17. The 7-seg digit cells at
+// 0x10..0x16 are byte5=0x00 — independent address space, no collision.
+constexpr uint8_t kFaderLevelCells[] = {0x0D,0x0E,0x0F,0x10,0x11,0x12,0x13,0x14,0x15,0x16,0x17};
 
 // ---- Dyn / Gate section (7 knobs) ----
 constexpr uint8_t kGateReleaseCells[]   = {0x7C,0x7D,0x7E,0x7F,0x80,0x81,0x82,0x83,0x84,0x85,0x86};
@@ -1033,14 +1031,16 @@ constexpr uint8_t kCompRatioCells[]     = {0x3A,0x3B,0x3C,0x3D,0x3E,0x3F,0x40,0x
 constexpr uint8_t kBcRatioCells[]    = {0xD6,0xD7,0xD8,0xD9,0xDA,0xDB,0xDC};
 constexpr uint8_t kBcScHpfCells[]    = {0xCB,0xCC,0xCD,0xCE,0xCF,0xD0,0xD1,0xD2,0xD3,0xD4,0xD5};
 constexpr uint8_t kBcAttackCells[]   = {0xDD,0xDE,0xDF,0xE0,0xE1,0xE2,0xE3};
-// BC Release: 6 cells, NO byte-boundary wrap to 0x00 — old guess was wrong.
-constexpr uint8_t kBcReleaseCells[]  = {0xFA,0xFB,0xFC,0xFD,0xFE,0xFF};
-constexpr uint8_t kBcThresholdCells[]= {0xE4,0xE5,0xE6,0xE7,0xE8,0xE9,0xEA,0xEB,0xEC,0xED};
-// BC Makeup — full 10-cell ring per uc1_31 (was 5 in old guess).
-constexpr uint8_t kBcMakeupCells[]   = {0xF0,0xF1,0xF2,0xF3,0xF4,0xF5,0xF6,0xF7,0xF8,0xF9};
-// BC Mix — byte5=0x01, 9 cells 0x03..0x0B (uc1_31b full sweep). Old
-// guess including 0x0C was wrong.
-constexpr uint8_t kBcMixCells[]      = {0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0A,0x0B};
+// BC Release: 7 LEDs (user 2026-05-01) — wraps from 0xFF to 0x00.
+constexpr uint8_t kBcReleaseCells[]  = {0xFA,0xFB,0xFC,0xFD,0xFE,0xFF,0x00};
+// BC Threshold: 11 LEDs (user 2026-05-01) — extend CW past previous 10-cell map.
+constexpr uint8_t kBcThresholdCells[]= {0xE4,0xE5,0xE6,0xE7,0xE8,0xE9,0xEA,0xEB,0xEC,0xED,0xEE};
+// BC Makeup: 11 LEDs (user 2026-05-01) — extend CCW past previous 10-cell map.
+constexpr uint8_t kBcMakeupCells[]   = {0xEF,0xF0,0xF1,0xF2,0xF3,0xF4,0xF5,0xF6,0xF7,0xF8,0xF9};
+// BC Mix — byte5=0x01, 11 LEDs (user 2026-05-01); previous 9-cell map
+// missed both the CCW and CW LEDs. 0x0C is BC Mix LED 11/11 (Output
+// Gain map starts at 0x0D right above it).
+constexpr uint8_t kBcMixCells[]      = {0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0A,0x0B,0x0C};
 
 const RingDef* ringFor(uint8_t knobId)
 {
@@ -1070,10 +1070,10 @@ const RingDef* ringFor(uint8_t knobId)
     static const RingDef kBcRatio   {kBcRatioCells,     7, P};
     static const RingDef kBcScHpf   {kBcScHpfCells,    11, P};
     static const RingDef kBcAttack  {kBcAttackCells,    7, P};
-    static const RingDef kBcRelease {kBcReleaseCells,   6, P};
-    static const RingDef kBcThr     {kBcThresholdCells,10, G};
-    static const RingDef kBcMakeup  {kBcMakeupCells,   10, G};
-    static const RingDef kBcMix     {kBcMixCells,       9, G};
+    static const RingDef kBcRelease {kBcReleaseCells,   7, P};
+    static const RingDef kBcThr     {kBcThresholdCells,11, G};
+    static const RingDef kBcMakeup  {kBcMakeupCells,   11, G};
+    static const RingDef kBcMix     {kBcMixCells,      11, G};
 
     switch (knobId) {
         // EQ
