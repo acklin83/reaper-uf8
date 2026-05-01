@@ -3844,6 +3844,49 @@ custom_action_register_t g_actionDumpParams{
 };
 int g_cmdDumpParams = 0;
 
+// Diagnostic: dump the focused CS plug-in's full track-state chunk to
+// /tmp/reasixty_cs_chunk.txt. Use to find the XML attribute name SSL
+// uses for the processing-order routing setting (10 orders + 'b'
+// variants per UC1 manual p.20). Run twice at two different routing
+// orders, diff, and the differing attribute is the patch target.
+void dumpCsChunk()
+{
+    MediaTrack* tr = GetSelectedTrack(nullptr, 0);
+    if (!tr) {
+        ShowConsoleMsg("Chunk-dump: no selected track\n");
+        return;
+    }
+    int chunkSize = 0;
+    char* chunk = GetSetObjectState(tr, "");
+    if (!chunk) {
+        ShowConsoleMsg("Chunk-dump: GetSetObjectState returned null\n");
+        return;
+    }
+    const std::string body{chunk};
+    FreeHeapPtr(chunk);
+    const char* path = "/tmp/reasixty_cs_chunk.txt";
+    FILE* f = std::fopen(path, "w");
+    if (!f) {
+        ShowConsoleMsg("Chunk-dump: cannot open /tmp/reasixty_cs_chunk.txt\n");
+        return;
+    }
+    std::fwrite(body.data(), 1, body.size(), f);
+    std::fclose(f);
+    char line[256];
+    std::snprintf(line, sizeof(line),
+        "Chunk-dump: %zu bytes → %s\n", body.size(), path);
+    ShowConsoleMsg(line);
+    chunkSize = static_cast<int>(body.size());
+    (void)chunkSize;
+}
+
+custom_action_register_t g_actionDumpChunk{
+    0, "REASIXTY_DUMP_CS_CHUNK",
+    "Rea-Sixty: Dump focused track's chunk (find SSL routing attr)",
+    nullptr,
+};
+int g_cmdDumpChunk = 0;
+
 // hookcommand2 is the correct hook for custom_action dispatch per SDK
 // note at reaper_plugin.h:1086. hookcommand (v1) only catches actions
 // triggered via menu/keyboard, not custom_action registered entries.
@@ -3859,6 +3902,7 @@ bool hookCommand2(KbdSectionInfo* /*sec*/, int command,
     if (command == g_cmdFrameTrace)     { toggleFrameTrace();       return true; }
     if (command == g_cmdProbeGateGr)    { probeGateGrSources();     return true; }
     if (command == g_cmdDumpParams)     { dumpCsPluginParams();     return true; }
+    if (command == g_cmdDumpChunk)      { dumpCsChunk();            return true; }
     return false;
 }
 
@@ -3926,6 +3970,7 @@ extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(
     g_cmdFrameTrace     = plugin_register("custom_action", &g_actionFrameTrace);
     g_cmdProbeGateGr    = plugin_register("custom_action", &g_actionProbeGateGr);
     g_cmdDumpParams     = plugin_register("custom_action", &g_actionDumpParams);
+    g_cmdDumpChunk      = plugin_register("custom_action", &g_actionDumpChunk);
     plugin_register("hookcommand2", reinterpret_cast<void*>(hookCommand2));
 
     return 1;
