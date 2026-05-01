@@ -33,3 +33,6 @@ extension/build/
 
 # Vendored SDKs (fetched on demand)
 extension/vendor/
+
+# Claude Code session-local state
+.claude/
