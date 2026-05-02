@@ -4504,6 +4504,18 @@ bool reasixty_uc1Connected()
     return g_uc1_dev && g_uc1_dev->isOpen();
 }
 
+// SSL plug-in soft-key bank labels for the Settings → Soft-Key Banks
+// editor's read-only "stock" tabs. domain: 0 = ChannelStrip,
+// 1 = BusComp. Returns the 8-element label array for the bank, or
+// nullptr on out-of-range. Caller treats empty strings as "no slot".
+const char* const* reasixty_softkeyStockLabels(int domain, int bank)
+{
+    if (bank < 0 || bank > 5) return nullptr;
+    if (domain == 1) return softkey::kBcLabels[bank];
+    return softkey::kCsLabels[bank];
+}
+int reasixty_softkeyStockBankCount() { return 6; }
+
 const char* reasixty_uf8Serial()
 {
     if (!g_dev) return "";

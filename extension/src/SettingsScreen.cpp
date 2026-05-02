@@ -42,6 +42,10 @@ void reasixty_setSelFollowsColor(bool follow);
 int  reasixty_ballisticMode();
 void reasixty_setBallisticMode(int mode);
 void reasixty_exportDiagnostic();  // shows confirmation dialog itself
+// Stock SSL plug-in soft-key labels for the read-only tabs.
+// domain: 0 = ChannelStrip, 1 = BusComp.
+const char* const* reasixty_softkeyStockLabels(int domain, int bank);
+int                reasixty_softkeyStockBankCount();
 // Bindings save/load to user-chosen path. Both spawn a native file
 // dialog and persist via uf8::bindings::exportLayerTo / importLayerFrom
 // for the layer index passed in. Returns true on success, false on
@@ -1431,53 +1435,13 @@ void SettingsScreen::drawBindings(ImGui_Context* ctx)
 // MVP editor: bank picker, name input, 8 slots × (label + action picker).
 // Modifier matrix / long-press / LED config per slot reuse the existing
 // per-binding editor wiring once the user clicks "Edit slot N".
-void SettingsScreen::drawSoftKeyBanks(ImGui_Context* ctx)
+// Render one user-bank's editing surface — bank name + 8 slot
+// collapsibles. Mutates `bank` in-place; caller persists via setUserBank
+// when `dirty` is true.
+void drawUserBankEditor_(ImGui_Context* ctx, int bankIdx,
+                         uf8::bindings::UserBank& bank, bool& dirty)
 {
     using namespace uf8::bindings;
-
-    static int s_editBank = 0;
-    static int s_editSlot = -1;   // -1 = no slot expanded
-
-    ImGui_Text(ctx, "User Soft-Key Banks");
-    ImGui_TextDisabled(ctx,
-        "Bind a button to \"Show user soft-key bank\" (param 0..11) to "
-        "switch the top-soft-key row to one of these 12 banks.");
-    ImGui_Spacing(ctx);
-
-    // ---- Bank picker row ----
-    {
-        char items[64 * uf8::bindings::kUserBankCount + 1] = {0};
-        size_t pos = 0;
-        for (int i = 0; i < uf8::bindings::kUserBankCount; ++i) {
-            UserBank b = getUserBank(i);
-            char buf[64];
-            if (b.name.empty()) {
-                std::snprintf(buf, sizeof(buf), "Bank %d", i + 1);
-            } else {
-                std::snprintf(buf, sizeof(buf), "Bank %d: %s",
-                              i + 1, b.name.c_str());
-            }
-            const size_t n = std::strlen(buf);
-            if (pos + n + 2 < sizeof(items)) {
-                std::memcpy(items + pos, buf, n);
-                pos += n;
-                items[pos++] = '\0';
-            }
-        }
-        items[pos] = '\0';   // double-null terminate the combo list
-        double w = 280;
-        ImGui_PushItemWidth(ctx, w);
-        if (ImGui_Combo(ctx, "Edit bank##bank_pick", &s_editBank,
-                        items, nullptr)) {
-            s_editSlot = -1;
-        }
-        ImGui_PopItemWidth(ctx);
-    }
-
-    UserBank bank = getUserBank(s_editBank);
-    bool dirtyBank = false;
-
-    // ---- Bank name input ----
     {
         char nameBuf[128] = {0};
         std::strncpy(nameBuf, bank.name.c_str(), sizeof(nameBuf) - 1);
@@ -1489,19 +1453,17 @@ void SettingsScreen::drawSoftKeyBanks(ImGui_Context* ctx)
                                     /*flags*/ nullptr,
                                     /*callback*/ nullptr)) {
             bank.name = nameBuf;
-            dirtyBank = true;
+            dirty = true;
         }
         ImGui_PopItemWidth(ctx);
     }
-
     ImGui_Spacing(ctx);
     ImGui_Separator(ctx);
     ImGui_Spacing(ctx);
 
-    // ---- 8 slot rows ----
     for (int i = 0; i < uf8::bindings::kUserBankSlots; ++i) {
         char idtag[32];
-        std::snprintf(idtag, sizeof(idtag), "ub%d_slot%d", s_editBank, i);
+        std::snprintf(idtag, sizeof(idtag), "ub%d_slot%d", bankIdx, i);
         ImGui_PushID(ctx, idtag);
         Binding& bd = bank.slots[i];
         auto& sp = bd.shortPress[static_cast<int>(Modifier::Plain)];
@@ -1509,17 +1471,15 @@ void SettingsScreen::drawSoftKeyBanks(ImGui_Context* ctx)
         char header[80];
         const std::string& act = sp.action;
         if (act.empty()) {
-            std::snprintf(header, sizeof(header), "Slot %d   (empty)", i + 1);
+            std::snprintf(header, sizeof(header),
+                          "Slot %d   (empty)", i + 1);
         } else {
-            std::snprintf(header, sizeof(header), "Slot %d   %s%s",
-                          i + 1,
-                          bd.label.empty() ? act.c_str() : bd.label.c_str(),
-                          bd.label.empty() ? "" : "");
+            std::snprintf(header, sizeof(header),
+                          "Slot %d   %s", i + 1,
+                          bd.label.empty() ? act.c_str() : bd.label.c_str());
         }
         if (ImGui_CollapsingHeader(ctx, header, nullptr, nullptr)) {
             ImGui_Indent(ctx, nullptr);
-
-            // Label
             char labelBuf[64] = {0};
             std::strncpy(labelBuf, bd.label.c_str(), sizeof(labelBuf) - 1);
             double w = 200;
@@ -1529,40 +1489,109 @@ void SettingsScreen::drawSoftKeyBanks(ImGui_Context* ctx)
                                         labelBuf, sizeof(labelBuf),
                                         nullptr, nullptr)) {
                 bd.label = labelBuf;
-                dirtyBank = true;
+                dirty = true;
             }
             ImGui_PopItemWidth(ctx);
 
-            // Reuse the action picker for this slot's plain short slot.
-            // The picker writes directly into the referenced fields so
-            // the local `bank` copy gets the user's change before we
-            // commit via setUserBank below.
             ActionFieldsRef ref{
                 &sp.type, &sp.action, &sp.param,
                 &sp.midiDevice, &sp.midiChannel, &sp.midiMsgType,
                 &sp.midiData1, &sp.midiData2,
             };
             char prefix[32];
-            std::snprintf(prefix, sizeof(prefix), "ub%d_s%d",
-                          s_editBank, i);
+            std::snprintf(prefix, sizeof(prefix), "ub%d_s%d", bankIdx, i);
             if (drawActionPicker(ctx, prefix, ref,
                                  /*layer*/ -1, ButtonId::None,
                                  /*isLongPress*/ false)) {
-                dirtyBank = true;
+                dirty = true;
             }
-
             if (ImGui_Button(ctx, "Clear slot##clr",
                              /*size_w*/ nullptr, /*size_h*/ nullptr)) {
                 bd = Binding{};
-                dirtyBank = true;
+                dirty = true;
             }
-
             ImGui_Unindent(ctx, nullptr);
         }
         ImGui_PopID(ctx);
     }
+}
 
-    if (dirtyBank) setUserBank(s_editBank, bank);
+// Render a read-only stock SSL bank — just shows what each top-soft-key
+// will display when the SSL Channel Strip plug-in is in front and that
+// bank is selected via PAGE ←/→. No editing — these come from the
+// hardcoded SSL plug-in maps in main.cpp's softkey:: namespace.
+void drawSslStockBank_(ImGui_Context* ctx, int bankIdx)
+{
+    const char* const* labels = reasixty_softkeyStockLabels(0, bankIdx);
+    if (!labels) {
+        ImGui_TextDisabled(ctx, "(unavailable)");
+        return;
+    }
+    ImGui_TextWrapped(ctx,
+        "Read-only — these are the SSL Channel Strip plug-in's stock "
+        "soft-key parameters for the selected bank. PAGE ← / PAGE → "
+        "switches between them on the hardware. To customise the row, "
+        "use one of the User Banks tabs.");
+    ImGui_Spacing(ctx);
+    ImGui_Separator(ctx);
+    ImGui_Spacing(ctx);
+    for (int i = 0; i < 8; ++i) {
+        char line[80];
+        const char* lbl = labels[i] ? labels[i] : "";
+        if (*lbl == '\0') {
+            std::snprintf(line, sizeof(line), "Slot %d   —", i + 1);
+            ImGui_TextDisabled(ctx, line);
+        } else {
+            std::snprintf(line, sizeof(line), "Slot %d   %s", i + 1, lbl);
+            ImGui_Text(ctx, line);
+        }
+    }
+}
+
+void SettingsScreen::drawSoftKeyBanks(ImGui_Context* ctx)
+{
+    using namespace uf8::bindings;
+
+    ImGui_Text(ctx, "Soft-Key Banks");
+    ImGui_TextDisabled(ctx,
+        "6 stock SSL Channel Strip banks (read-only) + 12 user-defined "
+        "banks. Bind a button to \"Show user soft-key bank\" (param "
+        "0..11) to activate one of the user banks at runtime.");
+    ImGui_Spacing(ctx);
+
+    int barFlags = 0;
+    if (!ImGui_BeginTabBar(ctx, "skbanks_tabs", &barFlags)) return;
+
+    // ---- 6 stock SSL banks (read-only) ---------------------------------
+    static const char* kSslTabs[6] = {
+        "SSL V-POT", "SSL Bank 1", "SSL Bank 2",
+        "SSL Bank 3", "SSL Bank 4", "SSL Bank 5",
+    };
+    for (int i = 0; i < 6; ++i) {
+        if (ImGui_BeginTabItem(ctx, kSslTabs[i], nullptr, nullptr)) {
+            drawSslStockBank_(ctx, i);
+            ImGui_EndTabItem(ctx);
+        }
+    }
+
+    // ---- 12 user banks (editable) --------------------------------------
+    for (int i = 0; i < uf8::bindings::kUserBankCount; ++i) {
+        UserBank b = getUserBank(i);
+        char tab[64];
+        if (b.name.empty()) {
+            std::snprintf(tab, sizeof(tab), "Bank %d##utab%d", i + 1, i);
+        } else {
+            std::snprintf(tab, sizeof(tab), "%s##utab%d", b.name.c_str(), i);
+        }
+        if (ImGui_BeginTabItem(ctx, tab, nullptr, nullptr)) {
+            bool dirty = false;
+            drawUserBankEditor_(ctx, i, b, dirty);
+            if (dirty) setUserBank(i, b);
+            ImGui_EndTabItem(ctx);
+        }
+    }
+
+    ImGui_EndTabBar(ctx);
 }
 
 // ---- Modes ----------------------------------------------------------------
