@@ -77,47 +77,37 @@ int ThemeBridge::pushAll(ImGui_Context* ctx)
         ++n;
     };
 
-    push(ImGui_Col_WindowBg,        kBg);
-    push(ImGui_Col_ChildBg,         kChild);
-    push(ImGui_Col_PopupBg,         kChild);
-    push(ImGui_Col_Border,          kBorder);
+    // Conservative set — sticks to enum names that have been stable
+    // across ImGui 1.89..1.91+. Skips the Tab* family (renamed to
+    // TabSelected* etc. in 1.91, ReaImGui follows DearImGui), which
+    // crashes here as a NULL function pointer when the deployed
+    // dylib doesn't export the old names. Same caution for any
+    // enum I can't verify against the user's installed version —
+    // safer to undertheme than to take down REAPER on every tick.
+    push(ImGui_Col_WindowBg,         kBg);
+    push(ImGui_Col_ChildBg,          kChild);
+    push(ImGui_Col_PopupBg,          kChild);
+    push(ImGui_Col_Border,           kBorder);
 
-    push(ImGui_Col_FrameBg,         kFrame);
-    push(ImGui_Col_FrameBgHovered,  kFrameHover);
-    push(ImGui_Col_FrameBgActive,   kFrameActive);
+    push(ImGui_Col_FrameBg,          kFrame);
+    push(ImGui_Col_FrameBgHovered,   kFrameHover);
+    push(ImGui_Col_FrameBgActive,    kFrameActive);
 
-    push(ImGui_Col_TitleBg,         kBg);
-    push(ImGui_Col_TitleBgActive,   kChild);
-    push(ImGui_Col_TitleBgCollapsed, kBg);
+    push(ImGui_Col_Button,           kButton);
+    push(ImGui_Col_ButtonHovered,    kButtonHover);
+    push(ImGui_Col_ButtonActive,     kButtonAct);
 
-    push(ImGui_Col_Button,          kButton);
-    push(ImGui_Col_ButtonHovered,   kButtonHover);
-    push(ImGui_Col_ButtonActive,    kButtonAct);
+    push(ImGui_Col_Header,           kAccentDim);
+    push(ImGui_Col_HeaderHovered,    kAccentBri);
+    push(ImGui_Col_HeaderActive,     kAccent);
 
-    push(ImGui_Col_Header,          kAccentDim);
-    push(ImGui_Col_HeaderHovered,   kAccentBri);
-    push(ImGui_Col_HeaderActive,    kAccent);
+    push(ImGui_Col_CheckMark,        kAccentBri);
+    push(ImGui_Col_Separator,        kSeparator);
 
-    push(ImGui_Col_Tab,             kButton);
-    push(ImGui_Col_TabHovered,      kAccentBri);
-    push(ImGui_Col_TabActive,       kAccent);
-    push(ImGui_Col_TabUnfocused,    shade(kButton, -8));
-    push(ImGui_Col_TabUnfocusedActive, kAccentDim);
+    push(ImGui_Col_Text,             kText);
+    push(ImGui_Col_TextDisabled,     kTextDim);
 
-    push(ImGui_Col_CheckMark,       kAccentBri);
-    push(ImGui_Col_SliderGrab,      kAccent);
-    push(ImGui_Col_SliderGrabActive, kAccentBri);
-
-    push(ImGui_Col_Separator,       kSeparator);
-    push(ImGui_Col_SeparatorHovered, kAccent);
-    push(ImGui_Col_SeparatorActive, kAccentBri);
-
-    push(ImGui_Col_Text,            kText);
-    push(ImGui_Col_TextDisabled,    kTextDim);
-    push(ImGui_Col_TextSelectedBg,  kAccentDim);
-
-    push(ImGui_Col_PlotLines,         0x40C040FF);
-    push(ImGui_Col_PlotLinesHovered,  0x60E060FF);
+    push(ImGui_Col_PlotLines,        0x40C040FF);
     return n;
 }
 
