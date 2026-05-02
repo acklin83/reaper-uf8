@@ -110,20 +110,21 @@ PluginMatch lookupPluginOnTrack(void* track, Domain domain, int instanceIdx = 0)
 
 ### Surface-Anzeige
 
-`displayShort` ist 4 chars, padded mit Spaces ("CS 2", "4K B"). Multi-Instance — **dreistufiger Fallback**:
+Channel-Strip-Type-Zone ist **hardware-fixiert auf 4 chars** ([Protocol.cpp:155](extension/src/Protocol.cpp:155), `buildChannelStripType` — SSL-Frame `FF 66 06 17 <strip> <4 chars>`). Plugin-Slot-Name-Zone hat 12 chars und Value-Line hat 19 chars, sind aber für V-Pot-Slot-Label und Param-Wert belegt.
 
-1. **User hat den FX-Slot in REAPER umbenannt** ("Vocal", "Pre", "Side"…) → Rename-Name (4 chars truncated, uppercase) statt "CS 2". Holen via `TrackFX_GetNamedConfigParm(tr, fx, "renamed_name", buf, sz)`. Macht die Anzeige semantisch: "VOC " neben "PRE " neben "SIDE" sagt mehr als "CS2a/b/c".
-2. **Kein Rename, aber Count > 1** → automatisches a/b/c-Suffix. "CS2a", "CS2b". Passt in 4 chars ohne Layout-Bruch ([main.cpp:2565-2572](extension/src/main.cpp:2565)).
-3. **Count == 1** → `displayShort` wie heute, "CS 2" / "4K B" / etc.
+**Anzeige-Logik:**
 
-**UC1 7-Segment**: bleibt Zahlen-only. Wenn User-Rename existiert → trotzdem "2a"/"2b" (kein Platz für Buchstaben). Plugin-Mixer-Window zeigt den vollen Rename als Text — dort ist Platz.
+1. **Count > 1, User hat `renamed_name` gesetzt** → 4-char-Zone zeigt den Rename truncated + uppercase. User-Verantwortung, lesbare Kurznamen zu vergeben ("VOC ", "PRE ", "SIDE", "PARA"). Holen via `TrackFX_GetNamedConfigParm(tr, fx, "renamed_name", buf, sz)`.
+2. **Count > 1, kein Rename** → `displayShort` wie immer ("CS 2"). Keine a/b/c-Verstümmelung. Welche Instanz aktiv ist erkennt der User im Plugin-Mixer-Window oder am Verhalten der V-Pots; navigiert wird mit `next_instance` / `prev_instance`.
+3. **Count == 1** → unverändert.
 
-**Plugin-Mixer-Window (ImGui)**: voller Rename-Name + Domain-Tag immer sichtbar wenn gesetzt. "Vocal Channel (CS 2)" liest sich gut.
+**UC1 7-Segment**: bleibt Zahlen-only ("2"). Multi-Instance ist auf der UC1-Anzeige nicht visuell unterscheidbar — Plugin-Mixer-Window übernimmt diese Aufgabe.
+
+**Plugin-Mixer-Window (ImGui, beliebiger Platz)**: zeigt voller Rename-Name + Domain-Tag + Instanz-Index immer wenn count > 1. "Vocal Channel — CS 2 [2 of 3]" o.ä.
 
 **Edge-Cases:**
-- Bei 4-Buchstaben-`displayShort` (z.B. user-defined "FFP4") bricht das a/b/c-Schema — Suffix ersetzt letztes Char ("FFPa"). Akzeptieren oder `displayShort` auf 3 Chars beschränken wenn `count > 1`.
-- Rename mit Sonderzeichen / Umlaute → wir filtern auf ASCII-uppercase (das Display kann eh nur ASCII).
-- Rename leer / nur whitespace → behandelt als nicht-gesetzt, fallback auf a/b/c.
+- Rename mit Sonderzeichen / Umlauten → ASCII-uppercase filtern (Display kann nur ASCII).
+- Rename leer / nur whitespace → behandelt als nicht gesetzt → fallback auf `displayShort`.
 
 ### Navigation — Builtins
 
