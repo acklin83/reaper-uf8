@@ -852,9 +852,16 @@ bool drawActionPicker(ImGui_Context* ctx, const char* prefix,
             // ssl_softkey follows the current PAGE bank (we use V-POT
             // labels as the picker hint since they're the most useful
             // generic set); ssl_bank_* address a specific bank.
-            int sslBankIdx = -1;
+            // ssl_softkey is bank-aware — its slot's meaning changes
+            // with the live PAGE bank, so auto-filling a single label
+            // from one bank would be wrong on every other bank
+            // (incident 2026-05-02: sp.label "BYPASS" persisting onto
+            // Bank 1's slot 0 = WIDTH). Limit the slot picker + label
+            // auto-fill to the explicit-bank ssl_bank_* actions.
+            int sslBankIdx = -1;          // -1 = no bank-tied combo / auto-fill
+            int sslBankComboOnly = -1;    // show combo only, no label fill
             if (*f.action == "ssl_softkey") {
-                sslBankIdx = 0;   // V-POT labels as a hint
+                sslBankComboOnly = 0;     // V-POT labels as a hint for the combo
             } else if (*f.action == "ssl_bank_vpot") {
                 sslBankIdx = 0;
             } else if (f.action->rfind("ssl_bank_", 0) == 0
@@ -884,20 +891,21 @@ bool drawActionPicker(ImGui_Context* ctx, const char* prefix,
                     *f.param = flipped ? 1 : 0;
                     dirty = true;
                 }
-            } else if (sslBankIdx >= 0) {
+            } else if (sslBankIdx >= 0 || sslBankComboOnly >= 0) {
+                const int comboBank = (sslBankIdx >= 0)
+                                         ? sslBankIdx : sslBankComboOnly;
                 // Build a combo from the bank's labels. Empty slots
                 // (some banks have gaps in the SSL plug-in spec) show
                 // as "(empty)" so the user sees the slot exists but
                 // does nothing if pressed.
                 const char* const* labels =
-                    reasixty_softkeyStockLabels(/*domain*/ 0, sslBankIdx);
-                // Auto-fill the per-action display label with the
-                // current slot's SSL function name when the user
-                // hasn't typed their own. Lets factory-seeded SSL
-                // bindings show meaningful LCD text without manual
-                // editing — the user can override afterwards (label
-                // stays sticky once non-empty).
-                if (f.label && f.label->empty() && labels) {
+                    reasixty_softkeyStockLabels(/*domain*/ 0, comboBank);
+                // Auto-fill the display label only for explicit-bank
+                // actions where the slot's meaning is stable. ssl_softkey
+                // intentionally skipped — its label has to track the live
+                // PAGE bank at render time, not be frozen here.
+                if (sslBankIdx >= 0 && f.label && f.label->empty()
+                    && labels) {
                     const int curSlot = std::clamp(*f.param, 0, 7);
                     if (labels[curSlot] && *labels[curSlot]) {
                         *f.label = labels[curSlot];
@@ -925,17 +933,16 @@ bool drawActionPicker(ImGui_Context* ctx, const char* prefix,
                 if (ImGui_Combo(ctx, idbuf, &slot, comboItems, nullptr)) {
                     *f.param = slot;
                     dirty = true;
-                    // Auto-fill the slot's display label with the SSL
-                    // function name so it shows on the LCD without the
-                    // user typing it in. The user can still override
-                    // afterwards — we only auto-fill when the label
-                    // either is empty or matches the previous slot's
-                    // SSL name (i.e. wasn't a user override).
-                    if (f.label && labels) {
+                    // Auto-fill the slot's display label only for
+                    // explicit-bank SSL actions. ssl_softkey is
+                    // bank-aware so freezing one slot's name into
+                    // sp.label would mis-display on every other bank.
+                    if (sslBankIdx >= 0 && f.label && labels) {
                         const char* prevName =
                             labels[std::clamp(slot, 0, 7)];
-                        // To detect "was previously the SSL name", we
-                        // accept any of the bank's labels as a hint.
+                        // Detect "previously auto-filled with an SSL
+                        // name" by comparing against any of this
+                        // bank's labels. User-typed labels survive.
                         bool wasAutoFilled = f.label->empty();
                         for (int j = 0; !wasAutoFilled && j < 8; ++j) {
                             if (labels[j] && *labels[j]

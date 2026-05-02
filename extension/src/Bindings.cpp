@@ -1059,7 +1059,7 @@ void registerBuiltin(const char* name, BuiltinDescriptor desc)
 // reach existing configs. load() runs every defined upgrade step in
 // order, then writes the bumped version back so the upgrade is
 // idempotent across REAPER restarts.
-constexpr int kCurrentBindingsVersion = 2;
+constexpr int kCurrentBindingsVersion = 3;
 
 // Upgrade hook: existing configs get factory long-press defaults on
 // the FLIP button (send_this / recv_this+Shift) without touching any
@@ -1083,6 +1083,24 @@ void upgradeFlipLongPress_(Layer& L)
     lpShift.param  = 1;
 }
 
+// v3 upgrade: a previous editor version auto-filled per-binding
+// labels for ssl_softkey from the V-POT bank's slot names. ssl_softkey
+// is bank-aware though — that label then mis-displayed on every other
+// PAGE bank. Clear those auto-filled labels so the runtime falls
+// back to the live SSL softkey label per current bank. Only sweeps
+// shortPress[Plain] since that's the only slot the auto-fill could
+// have touched.
+void upgradeSslSoftkeyLabels_(Layer& L)
+{
+    for (auto& kv : L.bindings) {
+        Binding& bd = kv.second;
+        auto& sp = bd.shortPress[static_cast<int>(Modifier::Plain)];
+        if (sp.type == ActionType::Builtin && sp.action == "ssl_softkey") {
+            sp.label.clear();
+        }
+    }
+}
+
 void load()
 {
     std::lock_guard<std::mutex> lk(g_cfgMutex);
@@ -1097,6 +1115,9 @@ void load()
             // no-op) so the conditional guard is mostly a perf hint.
             if (tmp.version < 2) {
                 for (auto& L : tmp.layers) upgradeFlipLongPress_(L);
+            }
+            if (tmp.version < 3) {
+                for (auto& L : tmp.layers) upgradeSslSoftkeyLabels_(L);
             }
             tmp.version = kCurrentBindingsVersion;
             g_cfg = std::move(tmp);
