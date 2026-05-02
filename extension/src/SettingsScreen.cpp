@@ -380,13 +380,18 @@ void drawUf8Vector(ImGui_Context* ctx, ButtonId& sel)
     };
 
     // Bindable button: hit-tests against the canvas mouse, draws a
-    // hardware-face rectangle, highlights on hover/select.
+    // hardware-face rectangle, highlights on hover/select. Returns
+    // true when this tile was clicked this frame so the caller can
+    // optionally fire the binding's action (used by the V-POT/Bank
+    // tiles so clicking them in the schematic actually switches the
+    // SSL PAGE bank — a hardware proxy for that one row).
     auto drawHwBtn = [&](float x, float y, float w, float h,
-                         ButtonId id, const char* label)
+                         ButtonId id, const char* label) -> bool
     {
         const bool hot      = inside(x, y, w, h);
         const bool selected = (id == sel);
-        if (hot && canvasClicked && leftBtn == 0) sel = id;
+        const bool clicked  = hot && canvasClicked && leftBtn == 0;
+        if (clicked) sel = id;
 
         const uint32_t fill   = selected ? 0x4477CCFF
                                 : hot     ? 0x3A4253FF
@@ -395,6 +400,7 @@ void drawUf8Vector(ImGui_Context* ctx, ButtonId& sel)
         const uint32_t txt    = selected ? 0xFFFFFFFF : 0xD0D4DAFF;
         rect_(c, x, y, w, h, fill, border, /*rounding*/ 3.5);
         drawTextCentered_(c, x + w / 2.0f, y + h / 2.0f, txt, label);
+        return clicked;
     };
 
     // Locked (non-bindable in v1) button — flatter colour, no hover.
@@ -534,7 +540,15 @@ void drawUf8Vector(ImGui_Context* ctx, ButtonId& sel)
             {944, 46, 41, ButtonId::SoftKey5Bank, "5",     5},
         };
         for (auto& b : banks) {
-            drawHwBtn(b.x, b.y, b.w, 20, b.id, b.lbl);
+            const bool justClicked = drawHwBtn(b.x, b.y, b.w, 20, b.id, b.lbl);
+            if (justClicked) {
+                // Hardware proxy: fire the binding's action so the
+                // schematic click actually switches the SSL PAGE bank
+                // (g_softKeyBank), exactly like pressing the hardware
+                // button would.
+                uf8::bindings::dispatch(b.id, /*pressed*/ true);
+                uf8::bindings::dispatch(b.id, /*pressed*/ false);
+            }
             if (b.idx == activeBank) {
                 // Inset green outline to mark the live bank without
                 // fighting the existing select/hover highlight.

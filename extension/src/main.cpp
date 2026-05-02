@@ -5470,10 +5470,12 @@ extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(
         else if (std::strcmp(m, "Focus") == 0) g_encoderMode.store(EncoderMode::Focus);
         else                                   g_encoderMode.store(EncoderMode::Nav);
     }
-    if (const char* sb = GetExtState("ReaSixty", "softKeyBank"); sb && *sb) {
-        const int v = std::atoi(sb);
-        if (v >= 0 && v <= softkey::kCsMaxBank) g_softKeyBank.store(v);
-    }
+    // softKeyBank intentionally NOT restored from ExtState — every
+    // REAPER load starts on V-POT (bank 0) so the row matches what
+    // the user sees on the SSL plug-in immediately. The atomic's
+    // default-init to 0 covers it; the ExtState write side stays so
+    // the value can survive a mid-session extension reload, but a
+    // fresh REAPER session always boots on V-POT.
 
     // Phase 2.7 Bindings — register builtins + load JSON config BEFORE
     // the csurf class registration. The surface ctor opens USB, which
