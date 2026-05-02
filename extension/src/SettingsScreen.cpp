@@ -1113,6 +1113,11 @@ void drawCsiImportSection(ImGui_Context* ctx, int editLayer)
 
     ImGui_Spacing(ctx);
     {
+        // ReaImGui v0.10 — EndChild MUST be unconditional (must pair with
+        // every BeginChild call, regardless of its return value).
+        // Same root cause as commit 95405b2 in MixerWindow: a missed
+        // EndChild leaves the ImGui stack desynced and the next frame
+        // tears down the parent window.
         double childH = 240;
         if (ImGui_BeginChild(ctx, "csi_import_log",
                              /*size_w*/ nullptr, &childH,
@@ -1133,8 +1138,8 @@ void drawCsiImportSection(ImGui_Context* ctx, int editLayer)
                     ImGui_TextColored(ctx, 0x99999999, line);
                 }
             }
-            ImGui_EndChild(ctx);
         }
+        ImGui_EndChild(ctx);
     }
 }
 
