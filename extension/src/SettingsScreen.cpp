@@ -1,9 +1,11 @@
 #include "SettingsScreen.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "Bindings.h"
@@ -820,14 +822,76 @@ bool drawActionPicker(ImGui_Context* ctx, const char* prefix,
         double w = 280;
         ImGui_PushItemWidth(ctx, w);
         if (ImGui_BeginCombo(ctx, idbuf, preview.c_str(), /*flags*/ nullptr)) {
+            // Categorise the builtin catalogue so the dropdown stays
+            // browseable as it grows. Each builtin gets bucketed by
+            // name prefix; the buckets render in the order kCats
+            // dictates with a Separator + disabled "header" entry
+            // between groups. Anything that doesn't match a known
+            // prefix falls into "Other" at the bottom.
+            auto categoryFor = [](const std::string& n) -> const char* {
+                if (n == "mod_shift" || n == "mod_cmd" || n == "mod_ctrl")
+                    return "Modifiers";
+                if (n.rfind("layer_select", 0) == 0)
+                    return "Layer";
+                if (n.rfind("encoder_", 0) == 0)
+                    return "Encoder modes";
+                if (n == "bank_left"  || n == "bank_right" ||
+                    n == "page_left"  || n == "page_right")
+                    return "Bank / Page";
+                if (n.rfind("auto_", 0) == 0 || n == "automation_mode")
+                    return "Automation";
+                if (n.rfind("zoom_", 0) == 0)
+                    return "Zoom";
+                if (n.rfind("ssl_", 0) == 0 || n == "softkey_bank_select")
+                    return "SSL Soft-Keys";
+                if (n.rfind("send_", 0) == 0)
+                    return "Sends";
+                if (n.rfind("recv_", 0) == 0)
+                    return "Receives";
+                if (n == "show_user_bank")
+                    return "User Soft-Key Banks";
+                if (n == "flip" || n == "pan_force"
+                 || n == "ssl_strip_mode_toggle"
+                 || n == "mixer_toggle" || n == "home")
+                    return "Mode Toggles";
+                if (n == "domain_cs" || n == "domain_bc")
+                    return "Domain";
+                if (n.rfind("__", 0) == 0)
+                    return "";   // hide internals
+                return "Other";
+            };
+            static const char* kCats[] = {
+                "Modifiers", "Mode Toggles", "Layer", "Encoder modes",
+                "Bank / Page", "Automation", "Zoom",
+                "SSL Soft-Keys", "Domain",
+                "Sends", "Receives", "User Soft-Key Banks",
+                "Other",
+            };
+            std::unordered_map<std::string, std::vector<std::string>> bucket;
             for (auto& n : builtinNames()) {
-                std::string lbl = builtinDisplayName(n);
-                if (lbl != n) lbl += "   [" + n + "]";
-                bool s = (n == *f.action);
-                if (ImGui_Selectable(ctx, lbl.c_str(), &s,
-                                     nullptr, nullptr, nullptr)) {
-                    *f.action = n;
-                    dirty = true;
+                const char* cat = categoryFor(n);
+                if (!cat || !*cat) continue;
+                bucket[cat].emplace_back(n);
+            }
+            for (auto& v : bucket) std::sort(v.second.begin(), v.second.end());
+
+            bool firstCat = true;
+            for (auto* cat : kCats) {
+                auto it = bucket.find(cat);
+                if (it == bucket.end() || it->second.empty()) continue;
+                if (!firstCat) ImGui_Separator(ctx);
+                firstCat = false;
+                int hdrFlags = ImGui_SelectableFlags_Disabled;
+                ImGui_Selectable(ctx, cat, /*p_selected*/ nullptr,
+                                 &hdrFlags, nullptr, nullptr);
+                for (auto& n : it->second) {
+                    std::string lbl = "  " + builtinDisplayName(n);
+                    bool s = (n == *f.action);
+                    if (ImGui_Selectable(ctx, lbl.c_str(), &s,
+                                         nullptr, nullptr, nullptr)) {
+                        *f.action = n;
+                        dirty = true;
+                    }
                 }
             }
             ImGui_EndCombo(ctx);
