@@ -567,6 +567,12 @@ std::atomic<bool> g_recvVpotThisTrack  {false};
 std::atomic<int>  g_recvFaderAllIdx    {-1};
 std::atomic<bool> g_recvFaderThisTrack {false};
 
+// Set by the routing-mode handlers; consumed by pushZonesForVisibleSlots
+// to force a full re-push of the strip caches when the routing source
+// changes (otherwise the previous mode's last-sent values pin the
+// scribble strips / V-Pot bars to stale state).
+std::atomic<bool> g_routingDirty{false};
+
 // Helper: clear every other Send/Receive mode on the same physical
 // output (V-Pot or Fader) so the user can never end up with two
 // conflicting routing modes pointing at the same strip area.
@@ -576,6 +582,7 @@ void clearVpotRouting_()
     g_sendVpotThisTrack.store(false);
     g_recvVpotAllIdx.store(-1);
     g_recvVpotThisTrack.store(false);
+    g_routingDirty.store(true);
 }
 void clearFaderRouting_()
 {
@@ -583,6 +590,97 @@ void clearFaderRouting_()
     g_sendFaderThisTrack.store(false);
     g_recvFaderAllIdx.store(-1);
     g_recvFaderThisTrack.store(false);
+    g_routingDirty.store(true);
+}
+
+// One strip's data source for V-Pot OR Fader. When `valid` is true the
+// strip's value/scribble pull from a send/receive instead of the bank
+// track's volume/pan. A "no route" struct (valid=false, sendCategory=
+// kRouteNone) tells the caller to fall through to the existing
+// track-direct logic.
+constexpr int kRouteNone = INT_MAX;
+struct StripRoute {
+    MediaTrack* track        = nullptr;
+    int         sendCategory = kRouteNone;   // 0 = send, -1 = receive
+    int         sendIndex    = -1;
+    bool        valid        = false;
+    bool        active() const { return sendCategory != kRouteNone; }
+};
+
+StripRoute makeRoute_(int strip, int bankOffset, int trackCount,
+                      int allIdx, bool thisTrack, int category)
+{
+    StripRoute r;
+    if (allIdx >= 0) {
+        const int rs = strip + bankOffset;
+        r.track        = (rs < trackCount) ? GetTrack(nullptr, rs) : nullptr;
+        r.sendCategory = category;
+        r.sendIndex    = allIdx;
+    } else if (thisTrack) {
+        // Focused track for the strip-as-send-list mode. GetLastTouchedTrack
+        // is a stable choice that survives mixer-scroll: SetSurfaceSelected
+        // keeps it pointing at whatever the user last clicked.
+        r.track        = GetLastTouchedTrack();
+        r.sendCategory = category;
+        r.sendIndex    = strip;
+    } else {
+        return r;  // not in this routing mode
+    }
+    if (r.track && r.sendIndex >= 0) {
+        r.valid = (r.sendIndex < GetTrackNumSends(r.track, category));
+    }
+    return r;
+}
+
+StripRoute resolveVpotRoute_(int strip, int bankOffset, int trackCount)
+{
+    if (g_sendVpotAllIdx.load() >= 0 || g_sendVpotThisTrack.load()) {
+        return makeRoute_(strip, bankOffset, trackCount,
+                          g_sendVpotAllIdx.load(),
+                          g_sendVpotThisTrack.load(), 0);
+    }
+    if (g_recvVpotAllIdx.load() >= 0 || g_recvVpotThisTrack.load()) {
+        return makeRoute_(strip, bankOffset, trackCount,
+                          g_recvVpotAllIdx.load(),
+                          g_recvVpotThisTrack.load(), -1);
+    }
+    return {};
+}
+StripRoute resolveFaderRoute_(int strip, int bankOffset, int trackCount)
+{
+    if (g_sendFaderAllIdx.load() >= 0 || g_sendFaderThisTrack.load()) {
+        return makeRoute_(strip, bankOffset, trackCount,
+                          g_sendFaderAllIdx.load(),
+                          g_sendFaderThisTrack.load(), 0);
+    }
+    if (g_recvFaderAllIdx.load() >= 0 || g_recvFaderThisTrack.load()) {
+        return makeRoute_(strip, bankOffset, trackCount,
+                          g_recvFaderAllIdx.load(),
+                          g_recvFaderThisTrack.load(), -1);
+    }
+    return {};
+}
+
+// Volume read/write helper that funnels through GetTrack/SetTrackSendInfo
+// when a route is active, else returns the track-direct linear volume.
+double readRouteVolumeLinear_(const StripRoute& r, MediaTrack* fallbackTr)
+{
+    if (r.valid) {
+        return GetTrackSendInfo_Value(r.track, r.sendCategory,
+                                      r.sendIndex, "D_VOL");
+    }
+    // Fall back to the bank track's UI volume (post-envelope).
+    if (!fallbackTr) return 1.0;
+    double vol = 1.0, pan = 0.0;
+    GetTrackUIVolPan(fallbackTr, &vol, &pan);
+    return vol;
+}
+
+void writeRouteVolumeLinear_(const StripRoute& r, double v)
+{
+    if (!r.valid) return;
+    SetTrackSendInfo_Value(r.track, r.sendCategory, r.sendIndex,
+                           "D_VOL", v);
 }
 
 // REAPER's GetTrackSendName / GetTrackReceiveName produce the
@@ -604,6 +702,14 @@ std::string getTrackReceiveName(MediaTrack* tr, int recvIdx)
     char buf[256] = {0};
     if (!GetTrackReceiveName(tr, recvIdx, buf, sizeof(buf))) return {};
     return std::string(buf);
+}
+
+std::string routeName_(const StripRoute& r)
+{
+    if (!r.valid) return {};
+    return (r.sendCategory == 0)
+        ? getTrackSendName(r.track, r.sendIndex)
+        : getTrackReceiveName(r.track, r.sendIndex);
 }
 
 // Nudge step per physical detent (seconds). User-settings-facing later;
@@ -835,6 +941,20 @@ void drainInputQueue()
                 followSelectedInMixer(tr);
                 break;
             case PendingInput::VolumeAbs: {
+                // Send/Receive routing wins over every other fader-input
+                // path: when the user explicitly turned on a routing
+                // mode, the fader writes the routed level (no FLIP, no
+                // plugin-fader, no track-vol).
+                {
+                    const StripRoute fr = resolveFaderRoute_(
+                        e.strip, bankOffset, trackCount);
+                    if (fr.active() && fr.valid) {
+                        SetTrackSendInfo_Value(fr.track, fr.sendCategory,
+                                               fr.sendIndex, "D_VOL", e.value);
+                        break;
+                    }
+                    if (fr.active()) break;   // routed but slot doesn't exist — eat the event
+                }
                 // FLIP: fader drives the focused plug-in parameter on this
                 // strip's track instead of track volume. Read the raw
                 // pb14 straight from the touch buffer — bypass the volume
@@ -894,6 +1014,31 @@ void drainInputQueue()
                 break;
             }
             case PendingInput::PanDelta: {
+                // Send/Receive routing on the V-Pot wins everything else.
+                // Treat V-Pot detents as a volume scrub against the routed
+                // level — same conversion the FLIP fader path uses below
+                // so a single detent moves about 1/128 of the full sweep
+                // (with shift = quarter-fine).
+                {
+                    const StripRoute vr = resolveVpotRoute_(
+                        e.strip, bankOffset, trackCount);
+                    if (vr.active() && vr.valid) {
+                        const double curLin = readRouteVolumeLinear_(vr, tr);
+                        const uint16_t curPb = linearVolumeToPb(curLin);
+                        double dPb = e.value * 16383.0;
+                        if (g_shiftHeld.load()) dPb *= 0.25;
+                        int newPb = static_cast<int>(std::round(
+                            static_cast<double>(curPb) + dPb));
+                        if (newPb < 0)     newPb = 0;
+                        if (newPb > 16383) newPb = 16383;
+                        const double newLin = pbToLinearVolume(
+                            static_cast<uint16_t>(newPb));
+                        SetTrackSendInfo_Value(vr.track, vr.sendCategory,
+                                               vr.sendIndex, "D_VOL", newLin);
+                        break;
+                    }
+                    if (vr.active()) break;   // routed but slot missing — eat the event
+                }
                 // V-pot rotation: if the strip's track hosts a plug-in of
                 // the focused domain (CS / BC) AND we're not in global Pan
                 // mode, drive the focused parameter on that strip's track.
@@ -2238,6 +2383,11 @@ void pushZonesForVisibleSlots()
     // Value Line now refer to a different plugin slot, so dedup must
     // re-fire the pushes.
     const bool bankChanged    = g_bankDirty.exchange(false);
+    // Routing-mode change (Send/Receive toggles) flips what every strip
+    // points at. Treat it as a bank-shift for cache-invalidation purposes:
+    // every g_last* needs to repaint so the previous mode's stale values
+    // don't pin the display.
+    const bool routingChanged = g_routingDirty.exchange(false);
     // g_focusedDirty is the canonical "focused param changed" signal,
     // set by anyone who mutates uf8::g_focusedParam (Stage 2+ adds
     // cross-device writers). g_pageDirty is the older UF8-local flag —
@@ -2276,7 +2426,7 @@ void pushZonesForVisibleSlots()
         g_lastFaderDb.fill({});
         g_lastVPotBar.fill(0xFFFF);
     }
-    if (bankChanged) {
+    if (bankChanged || routingChanged) {
         g_lastTrackName.fill({});
         g_lastSlotLabel.fill({});
         g_lastCsType.fill({});
@@ -2332,6 +2482,14 @@ void pushZonesForVisibleSlots()
         // Keep the slot→track mapping fresh so GetTouchState can map
         // REAPER's track pointer back to a strip index.
         g_slotTrack[s] = tr;
+
+        // Send/Receive routing — when a routing mode is on, this strip's
+        // V-Pot / fader / scribble pull from a send or receive instead
+        // of the bank track. Resolved once per strip then queried below.
+        const StripRoute vpotRoute  = resolveVpotRoute_(s, bankOffset, trackCount);
+        const StripRoute faderRoute = resolveFaderRoute_(s, bankOffset, trackCount);
+        const bool routedVpot  = vpotRoute.active();
+        const bool routedFader = faderRoute.active();
 
         // Empty strip (bank window extends past the last track): blank
         // every zone so the last bucket's residue doesn't linger. Without
@@ -2522,6 +2680,7 @@ void pushZonesForVisibleSlots()
         // below) stays at 0x01 so the firmware draws a single line
         // instead of the linear-fill animation mode 0x02 produces.
         // Decision order (top wins):
+        //   0. Send/Receive routing → V-Pot shows the routed level.
         //   1. FLIP        → V-Pot mirrors track volume.
         //   2. forcePan    → V-Pot is REAPER track pan, period. Overrides
         //                    Plugin-mode and any focus, since the user
@@ -2530,7 +2689,18 @@ void pushZonesForVisibleSlots()
         //   4. focused but unavailable here → blank (collapsed bar).
         //   5. Plugin mode → SSL strip Pan (linkIdx 3).
         //   6. default     → REAPER track pan.
-        if (flipActive) {
+        if (routedVpot) {
+            if (vpotRoute.valid) {
+                const double volLin = readRouteVolumeLinear_(vpotRoute, tr);
+                const uint16_t pbVol = linearVolumeToPb(volLin);
+                vpotBar[s] = vpotPosFromUnipolar(
+                    static_cast<double>(pbVol) / 16383.0);
+            } else {
+                // Routed but the send/receive doesn't exist on this track —
+                // collapsed bar so the user sees the slot is empty.
+                vpotBar[s] = (uint16_t{0x00} | (uint16_t{0x80} << 8));
+            }
+        } else if (flipActive) {
             // FLIP: V-Pot reads track volume. Map pb14 → 0..100 unipolar.
             const double volLinFlip = uiVolLinear(tr);
             const uint16_t pbVol = linearVolumeToPb(volLinFlip);
@@ -2573,17 +2743,30 @@ void pushZonesForVisibleSlots()
             vpotBar[s] = vpotPosFromPan(pan);
         }
 
-        // Upper scribble row — REAPER track name (max 7 chars).
+        // Upper scribble row — REAPER track name (max 7 chars). When a
+        // Send/Receive route is active for this strip's V-Pot or Fader
+        // we override the line with the route's destination/source
+        // name so the user sees what they're controlling. V-Pot route
+        // wins over Fader route when both are active (V-Pot is the
+        // more granular per-strip control).
         {
-            char name[256] = {0};
-            GetSetMediaTrackInfo_String(tr, "P_NAME", name, false);
-            std::string n(name);
-            if (n.size() > 7) n.resize(7);
-            if (n.empty()) {
-                char fallback[8];
-                std::snprintf(fallback, sizeof(fallback), "CH %d", realSlot + 1);
-                n = fallback;
+            std::string n;
+            if (routedVpot && vpotRoute.valid) {
+                n = routeName_(vpotRoute);
+            } else if (routedFader && faderRoute.valid) {
+                n = routeName_(faderRoute);
             }
+            if (n.empty()) {
+                char name[256] = {0};
+                GetSetMediaTrackInfo_String(tr, "P_NAME", name, false);
+                n = name;
+                if (n.empty()) {
+                    char fallback[8];
+                    std::snprintf(fallback, sizeof(fallback), "CH %d", realSlot + 1);
+                    n = fallback;
+                }
+            }
+            if (n.size() > 7) n.resize(7);
             if (n != g_lastTrackName[s]) {
                 g_lastTrackName[s] = n;
                 g_dev->send(uf8::buildStripTextUpper(static_cast<uint8_t>(s), n));
@@ -2596,9 +2779,20 @@ void pushZonesForVisibleSlots()
         // the fader has its own readout matching what it now drives.
         // In Plugin-Fader mode the readout shows the SSL strip's
         // internal Fader Level dB instead of REAPER's track volume.
-        const double volLin = uiVolLinear(tr);
+        // In a Send/Receive routing mode the fader controls the
+        // routed level — show its dB value.
+        double volLin;
+        if (routedFader && faderRoute.valid) {
+            volLin = readRouteVolumeLinear_(faderRoute, tr);
+        } else if (routedFader) {
+            volLin = 0.0;       // routed but slot doesn't exist → -inf dB
+        } else {
+            volLin = uiVolLinear(tr);
+        }
         std::string dbStr;
-        if (flipActive || csFaderActive) {
+        if (routedFader) {
+            dbStr = formatDbReadout(volLin);
+        } else if (flipActive || csFaderActive) {
             char paramBuf[64] = {0};
             const int useFx = flipActive ? fxIdx : cs.fxIndex;
             const int useParam = flipActive ? slot->vst3Param : cs.vst3Param;
@@ -2667,7 +2861,13 @@ void pushZonesForVisibleSlots()
         // travels to where the plug-in param actually is.
         if (!g_touchReported[s].load()) {
             uint16_t pb;
-            if (flipActive || csFaderActive) {
+            if (routedFader) {
+                // routedFader → motor parks at the routed level. volLin
+                // was already overridden above to the send/receive volume
+                // (or 0.0 for an invalid route), so the same conversion
+                // works as the normal track-volume path.
+                pb = linearVolumeToPb(volLin);
+            } else if (flipActive || csFaderActive) {
                 const int useFx = flipActive ? fxIdx : cs.fxIndex;
                 const int useParam = flipActive ? slot->vst3Param : cs.vst3Param;
                 const bool inverted = flipActive ? slot->inverted : false;
