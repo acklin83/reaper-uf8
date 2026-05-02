@@ -254,6 +254,14 @@ const char* hwFaceLabel(ButtonId id)
         case ButtonId::SendPlugin6: return "S/P 6";
         case ButtonId::SendPlugin7: return "S/P 7";
         case ButtonId::SendPlugin8: return "S/P 8";
+        case ButtonId::TopSoftKey1: return "TSK 1";
+        case ButtonId::TopSoftKey2: return "TSK 2";
+        case ButtonId::TopSoftKey3: return "TSK 3";
+        case ButtonId::TopSoftKey4: return "TSK 4";
+        case ButtonId::TopSoftKey5: return "TSK 5";
+        case ButtonId::TopSoftKey6: return "TSK 6";
+        case ButtonId::TopSoftKey7: return "TSK 7";
+        case ButtonId::TopSoftKey8: return "TSK 8";
         default:                    return uf8::bindings::toName(id);
     }
 }
@@ -487,6 +495,29 @@ void drawUf8Vector(ImGui_Context* ctx, ButtonId& sel)
     drawHwBtn(13,  396, 33, 22, ButtonId::AutoTrim,  "TRIM");
     drawHwBtn(48,  396, 33, 22, ButtonId::AutoLatch, "LATCH");
     drawHwBtn(83,  396, 33, 22, ButtonId::AutoTouch, "TOUCH");
+
+    // ---- Top-soft-keys (per strip, above the V-Pots) ----
+    // The schematic doesn't render the 8 strips themselves; this row
+    // represents the 8 buttons sitting over them. Default action wired
+    // by the factory seed is `ssl_softkey` — same behaviour as SSL 360°.
+    {
+        constexpr ButtonId kTsk[8] = {
+            ButtonId::TopSoftKey1, ButtonId::TopSoftKey2,
+            ButtonId::TopSoftKey3, ButtonId::TopSoftKey4,
+            ButtonId::TopSoftKey5, ButtonId::TopSoftKey6,
+            ButtonId::TopSoftKey7, ButtonId::TopSoftKey8,
+        };
+        constexpr float bw = 60, bh = 22, gap = 4;
+        constexpr float total = bw * 8 + gap * 7;
+        constexpr float startX = (1000.0f - total) / 2.0f;
+        drawGroupLabel(startX + total / 2 - 70, 6,
+                       "TOP SOFT KEYS (PER STRIP)");
+        for (int i = 0; i < 8; ++i) {
+            char lbl[8];
+            std::snprintf(lbl, sizeof(lbl), "%d", i + 1);
+            drawHwBtn(startX + i * (bw + gap), 22, bw, bh, kTsk[i], lbl);
+        }
+    }
 
     // ---- Right panel ----
     // SOFT KEYS — 2x3 grid spans the full right-panel width now that

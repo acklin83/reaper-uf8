@@ -79,6 +79,14 @@ constexpr NameEntry kNames[] = {
     { ButtonId::SendPlugin7, "send_plugin_7" },
     { ButtonId::SendPlugin8, "send_plugin_8" },
     { ButtonId::Channel,     "channel"      },
+    { ButtonId::TopSoftKey1, "top_soft_1"   },
+    { ButtonId::TopSoftKey2, "top_soft_2"   },
+    { ButtonId::TopSoftKey3, "top_soft_3"   },
+    { ButtonId::TopSoftKey4, "top_soft_4"   },
+    { ButtonId::TopSoftKey5, "top_soft_5"   },
+    { ButtonId::TopSoftKey6, "top_soft_6"   },
+    { ButtonId::TopSoftKey7, "top_soft_7"   },
+    { ButtonId::TopSoftKey8, "top_soft_8"   },
 };
 
 } // namespace
@@ -139,6 +147,15 @@ ButtonId fromUf8DeviceId(uint8_t id)
         case 0x4E: return ButtonId::SendPlugin7;
         case 0x4F: return ButtonId::SendPlugin8;
         case 0x51: return ButtonId::Channel;
+        // Top-soft-keys 0x18..0x1F (one per strip, above the V-Pots).
+        case 0x18: return ButtonId::TopSoftKey1;
+        case 0x19: return ButtonId::TopSoftKey2;
+        case 0x1A: return ButtonId::TopSoftKey3;
+        case 0x1B: return ButtonId::TopSoftKey4;
+        case 0x1C: return ButtonId::TopSoftKey5;
+        case 0x1D: return ButtonId::TopSoftKey6;
+        case 0x1E: return ButtonId::TopSoftKey7;
+        case 0x1F: return ButtonId::TopSoftKey8;
         default:   return ButtonId::None;
     }
 }
@@ -376,6 +393,25 @@ void seedFactoryDefaults_(Config& c)
     // toggle (send/recv on V-Pots and Faders) so the strips return to
     // their normal track-volume + pan view.
     L1[ButtonId::Channel] = mkBuiltin("home", Behavior::Momentary, "HOME");
+
+    // Top-soft-keys (one per strip, above the V-Pots) — default to the
+    // SSL Channel-Strip plug-in's softkey-focus behaviour. param =
+    // strip 0..7. Press fires `ssl_softkey` which looks up the
+    // current PAGE bank + focused-domain plugin map and calls
+    // setFocus on the slot's linkIdx — same as SSL 360°.
+    static const ButtonId kTopSoftKeyIds[8] = {
+        ButtonId::TopSoftKey1, ButtonId::TopSoftKey2,
+        ButtonId::TopSoftKey3, ButtonId::TopSoftKey4,
+        ButtonId::TopSoftKey5, ButtonId::TopSoftKey6,
+        ButtonId::TopSoftKey7, ButtonId::TopSoftKey8,
+    };
+    for (int i = 0; i < 8; ++i) {
+        char label[8];
+        std::snprintf(label, sizeof(label), "TSK %d", i + 1);
+        L1[kTopSoftKeyIds[i]] = mkBuiltin("ssl_softkey",
+                                          Behavior::Momentary, label,
+                                          255, 255, 255, /*param*/ i);
+    }
 
     // Quick keys: Q1=CS domain, Q2=BC domain, Q3 reserved (no factory binding —
     // falls through to legacy MCU path, matching today's behaviour).

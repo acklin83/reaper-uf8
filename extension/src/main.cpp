@@ -1821,11 +1821,30 @@ void onUf8Input(const uint8_t* data, size_t len)
 
             bool handledNatively = false;
 
-            // Bindings layer — globals previously hardcoded inline.
-            if (auto bid = uf8::bindings::fromUf8DeviceId(id);
-                bid != uf8::bindings::ButtonId::None) {
-                if (uf8::bindings::dispatch(bid, pressed)) {
+            // Top-soft-key user-bank override has the highest priority:
+            // when a user-defined Soft-Key Bank is active, route the
+            // press straight to its slot's binding, bypassing the
+            // default ssl_softkey factory binding that would otherwise
+            // steal the press through bindings::dispatch.
+            if (id >= 0x18 && id <= 0x1F) {
+                const int activeUserBank = g_activeUserBank.load();
+                if (activeUserBank >= 0) {
+                    uf8::bindings::dispatchUserBankSlot(
+                        activeUserBank, id - 0x18, pressed);
                     handledNatively = true;
+                }
+            }
+
+            // Bindings layer — globals previously hardcoded inline. Now
+            // also covers top-soft-keys (TopSoftKey1..8) which carry an
+            // ssl_softkey factory binding by default — same semantics as
+            // SSL 360°, but the user can rebind via Settings.
+            if (!handledNatively) {
+                if (auto bid = uf8::bindings::fromUf8DeviceId(id);
+                    bid != uf8::bindings::ButtonId::None) {
+                    if (uf8::bindings::dispatch(bid, pressed)) {
+                        handledNatively = true;
+                    }
                 }
             }
 
@@ -1880,32 +1899,11 @@ void onUf8Input(const uint8_t* data, size_t len)
                         queueInput({k, strip, 0.0});
                     }
                     handledNatively = true;
-                } else if (id >= 0x18 && id <= 0x1F) {
-                    // Per-strip top soft-key. Two paths:
-                    //   1. User soft-key bank active → route through the
-                    //      bank's slot via the bindings dispatcher (full
-                    //      modifier + long-press support).
-                    //   2. Plugin-driven mode → setFocus to the bank's
-                    //      slot's linkIdx like before.
-                    const int strip = id - 0x18;
-                    const int activeUserBank = g_activeUserBank.load();
-                    if (activeUserBank >= 0) {
-                        uf8::bindings::dispatchUserBankSlot(
-                            activeUserBank, strip, pressed);
-                    } else if (pressed) {
-                        const auto fp = uf8::getFocusedParam();
-                        const auto domain = (fp.domain == uf8::Domain::BusComp)
-                            ? uf8::Domain::BusComp : uf8::Domain::ChannelStrip;
-                        const int bank = std::clamp(g_softKeyBank.load(),
-                            0, softkey::maxBankFor(domain));
-                        const auto v = softkey::viewFor(domain, bank);
-                        const int linkIdx = v.linkIdx[strip];
-                        if (linkIdx != softkey::kNoSlot) {
-                            uf8::setFocus({domain, linkIdx});
-                        }
-                    }
-                    handledNatively = true;
                 }
+                // Top-soft-keys (0x18..0x1F) are now handled at the top
+                // of the switch block via the user-bank override + the
+                // bindings::dispatch path with a default `ssl_softkey`
+                // factory binding. No inline fall-through needed here.
             }
 
             if (!handledNatively) {
@@ -5204,6 +5202,30 @@ void registerBindingHandlers()
         d.displayName = "8 receives of focused track";
         registerBuiltin("recv_this", d);
     }
+
+    // SSL_SOFTKEY — default action for the per-strip top-soft-keys.
+    // param 0..7 = which strip the binding sits on. Looks up the
+    // current PAGE bank in the focused-domain plugin map, resolves the
+    // slot's linkIdx, and calls setFocus to bring that param across all
+    // V-Pots — same semantics as SSL 360°'s soft-key behaviour. Slots
+    // mapped to kNoSlot in the plugin tables silently no-op.
+    registerBuiltin("ssl_softkey", DescBuilder{
+        [](bool firing, bool /*pressed*/, int param) {
+            if (!firing) return;
+            if (param < 0 || param >= 8) return;
+            const auto fp = uf8::getFocusedParam();
+            const auto domain = (fp.domain == uf8::Domain::BusComp)
+                ? uf8::Domain::BusComp : uf8::Domain::ChannelStrip;
+            const int bank = std::clamp(g_softKeyBank.load(),
+                0, softkey::maxBankFor(domain));
+            const auto v = softkey::viewFor(domain, bank);
+            const int linkIdx = v.linkIdx[param];
+            if (linkIdx != softkey::kNoSlot) {
+                uf8::setFocus({domain, linkIdx});
+            }
+        },
+        nullptr, "SSL plug-in soft-key focus (param = strip 0..7)", true
+    });
 
     // SHOW USER BANK — switches the top-soft-key row (8 buttons above
     // the V-Pots) to a user-defined bank. param 0..kUserBankCount-1

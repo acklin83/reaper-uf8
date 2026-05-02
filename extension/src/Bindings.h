@@ -66,6 +66,14 @@ enum class ButtonId : uint16_t {
     // Channel — sits next to PLUGIN. Default action: HOME (clears every
     // routing toggle so V-Pots / faders return to track volume + pan).
     Channel,
+
+    // Top-soft-keys: the 8 buttons above the V-Pots (one per strip,
+    // device IDs 0x18..0x1F). Default action: ssl_softkey with
+    // param=strip — focuses the SSL plug-in param at this strip's
+    // position in the current PAGE bank, matching SSL 360°'s native
+    // behaviour. User can rebind to anything via Settings → Bindings.
+    TopSoftKey1, TopSoftKey2, TopSoftKey3, TopSoftKey4,
+    TopSoftKey5, TopSoftKey6, TopSoftKey7, TopSoftKey8,
 };
 
 // Map UF8 device byte (FF 22 03 <id> 00 <s>) to ButtonId. Returns None
