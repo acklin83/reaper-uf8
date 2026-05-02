@@ -226,6 +226,12 @@ enum class Uf8GlobalLed : uint8_t {
 
 LedColourFrames buildUf8GlobalLed(Uf8GlobalLed btn, bool on);
 LedColourFrames buildUf8GlobalLed(Uf8GlobalLed btn, GlobalLedState state);
+// Override the button's table-default colour with a caller-supplied
+// LedColour (use the helpers in Protocol.h: ledColourYellow/Red/Orange/
+// White/ForTrackRgb). Same state semantics as the GlobalLedState
+// overload.
+LedColourFrames buildUf8GlobalLed(Uf8GlobalLed btn, GlobalLedState state,
+                                  LedColour colour);
 
 // Selected-strip bitmask. cap33 shows SSL360 sending this on every
 // selection change in PM Layer + DAW Colour mode — it's what tells the

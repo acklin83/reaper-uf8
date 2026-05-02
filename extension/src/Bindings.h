@@ -55,6 +55,13 @@ enum class ButtonId : uint16_t {
 
     // Encoder modes (channel encoder above transport)
     Nav, Nudge, EncFocus, ChannelPush,
+
+    // Send/Plugin row — 8 buttons under the V-Pots, used by SSL 360°
+    // for plug-in slot selection. Rea-Sixty defaults them to the
+    // send_all_N routing builtins so each button switches all V-Pots
+    // (or Faders, when Flip is enabled) to a different send index.
+    SendPlugin1, SendPlugin2, SendPlugin3, SendPlugin4,
+    SendPlugin5, SendPlugin6, SendPlugin7, SendPlugin8,
 };
 
 // Map UF8 device byte (FF 22 03 <id> 00 <s>) to ButtonId. Returns None

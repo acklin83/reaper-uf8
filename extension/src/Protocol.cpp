@@ -656,14 +656,15 @@ constexpr Uf8GlobalLedDef kUf8GlobalLedTable[] = {
 };
 } // namespace
 
-LedColourFrames buildUf8GlobalLed(Uf8GlobalLed btn, GlobalLedState state)
+LedColourFrames buildUf8GlobalLed(Uf8GlobalLed btn, GlobalLedState state,
+                                  LedColour colour)
 {
     const auto& def = kUf8GlobalLedTable[static_cast<size_t>(btn)];
     LedColourFrames out;
     switch (state) {
         case GlobalLedState::Bright:
             out.ff38 = buildSelFrame(0x38, def.cell,
-                                     def.colour.aBright, def.colour.bBright);
+                                     colour.aBright, colour.bBright);
             out.ff39 = buildSelFrame(0x39, def.cell, 0x00, 0xF0);
             if (def.legacy) out.legacy = buildLedCommand(def.cell, true);
             break;
@@ -674,9 +675,9 @@ LedColourFrames buildUf8GlobalLed(Uf8GlobalLed btn, GlobalLedState state)
             // also need their FF 3B 03 frame fired to leave legacy-OFF,
             // otherwise the colour-pair has no visible effect (cap48).
             out.ff38 = buildSelFrame(0x38, def.cell,
-                                     def.colour.aDim, def.colour.bDim);
+                                     colour.aDim, colour.bDim);
             out.ff39 = buildSelFrame(0x39, def.cell,
-                                     def.colour.aDim, def.colour.bDim);
+                                     colour.aDim, colour.bDim);
             if (def.legacy) out.legacy = buildLedCommand(def.cell, true);
             break;
         case GlobalLedState::Off:
@@ -688,6 +689,12 @@ LedColourFrames buildUf8GlobalLed(Uf8GlobalLed btn, GlobalLedState state)
             break;
     }
     return out;
+}
+
+LedColourFrames buildUf8GlobalLed(Uf8GlobalLed btn, GlobalLedState state)
+{
+    const auto& def = kUf8GlobalLedTable[static_cast<size_t>(btn)];
+    return buildUf8GlobalLed(btn, state, def.colour);
 }
 
 // Backwards-compat: bool maps Bright/Dim. Callers needing explicit Off

@@ -3424,6 +3424,13 @@ int  g_lastPageRightLit = -1;
 int  g_lastPluginLit    = -1;     // -1 = unknown / 0 = dim / 1 = bright (mode)
 int  g_lastDomainLed    = -1;     // -1 = unknown, 0 = CS, 1 = BC
 int  g_lastActiveLayer  = -1;     // -1 = unknown, 0..2 = Layer 1..3 (Phase B)
+
+// Routing-state cache for the LED-render dedup. Packs sendVpot/sendFader/
+// recvVpot/recvFader all-track indices + the two this-track flags into
+// one 64-bit key so a single comparison decides whether the SP1..SP8
+// row + Flip LED need a re-push. Init to all-bits-set so the first tick
+// after load always paints.
+uint64_t g_lastRoutingKey = ~uint64_t(0);
 bool g_globalLedsInit = false;
 
 // Map REAPER's automation-mode integer to a position in kAutoLeds.
@@ -3509,6 +3516,24 @@ void pushUf8GlobalLeds()
                                      ? 1 : 0;
     const int  activeLayer     = uf8::bindings::getActiveLayer();
 
+    // Send/Receive routing state — drives the Send/Plugin row LEDs and
+    // the Flip LED colour override.
+    const int  sendVAll  = g_sendVpotAllIdx.load();
+    const int  sendFAll  = g_sendFaderAllIdx.load();
+    const int  recvVAll  = g_recvVpotAllIdx.load();
+    const int  recvFAll  = g_recvFaderAllIdx.load();
+    const bool sendThis  = g_sendVpotThisTrack.load() || g_sendFaderThisTrack.load();
+    const bool recvThis  = g_recvVpotThisTrack.load() || g_recvFaderThisTrack.load();
+    // -1 → 0xFF (unsigned), packed into bytes — the all-bits-set sentinel
+    // for the cache makes the first tick always repaint.
+    const uint64_t routingKey =
+          (uint64_t(uint8_t(sendVAll)) <<  0)
+        | (uint64_t(uint8_t(sendFAll)) <<  8)
+        | (uint64_t(uint8_t(recvVAll)) << 16)
+        | (uint64_t(uint8_t(recvFAll)) << 24)
+        | (uint64_t(sendThis ? 1 : 0)  << 32)
+        | (uint64_t(recvThis ? 1 : 0)  << 33);
+
     // Page Left LED — confirmed via probe 2026-04-30 to live at cell
     // 0x2D (NOT 0x5D as cap35/36 originally suggested — that earlier
     // assumption is what caused the "2 buttons selected" surface bug
@@ -3528,7 +3553,8 @@ void pushUf8GlobalLeds()
         flip == g_lastFlip && shiftHeld == g_lastShiftHeld &&
         encMode == g_lastEncoderMode && softKeyBank == g_lastSoftKeyBank &&
         pluginLit == g_lastPluginLit && domainLed == g_lastDomainLed &&
-        activeLayer == g_lastActiveLayer) {
+        activeLayer == g_lastActiveLayer &&
+        routingKey == g_lastRoutingKey) {
         return;
     }
 
@@ -3548,9 +3574,24 @@ void pushUf8GlobalLeds()
         g_lastForcePan = forcePan;
     }
 
-    // FLIP LED indicates fader↔V-Pot swap is active.
-    if (flip != g_lastFlip || !g_globalLedsInit) {
-        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Flip, flip));
+    // FLIP LED — three sources of truth, top wins:
+    //   1. send_this active (long-press default) → bright green
+    //   2. recv_this active (long-press + Shift)  → bright red
+    //   3. flip toggle on / off                   → existing white state
+    if (flip != g_lastFlip || routingKey != g_lastRoutingKey || !g_globalLedsInit) {
+        if (sendThis) {
+            sendLedFrames(uf8::buildUf8GlobalLed(
+                uf8::Uf8GlobalLed::Flip,
+                uf8::GlobalLedState::Bright,
+                uf8::ledColourForTrackRgb(0x00FF00)));   // green
+        } else if (recvThis) {
+            sendLedFrames(uf8::buildUf8GlobalLed(
+                uf8::Uf8GlobalLed::Flip,
+                uf8::GlobalLedState::Bright,
+                uf8::ledColourForTrackRgb(0xFF0000)));   // red
+        } else {
+            sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Flip, flip));
+        }
         g_lastFlip = flip;
     }
 
@@ -3631,18 +3672,29 @@ void pushUf8GlobalLeds()
         }) {
             sendLedFrames(uf8::buildUf8GlobalLed(led, false));
         }
-        // Send/Plugin 1..8 ship dim baseline. Settings UI will let the
-        // user assign actions per button — at runtime the LED of the
-        // currently-active assignment goes bright as a radio.
-        for (auto led : {
+    }
+
+    // Send/Plugin 1..8 LEDs — bright when the matching send/recv index
+    // is the active routing target on EITHER physical output (V-Pot or
+    // Fader). Same row drives both sends and receives by binding
+    // convention (Plain = sends, Shift+ = receives), so the LED can't
+    // distinguish the two — it just shows "this index is currently the
+    // routing target".
+    if (routingKey != g_lastRoutingKey || !g_globalLedsInit) {
+        constexpr uf8::Uf8GlobalLed kSpLeds[8] = {
             uf8::Uf8GlobalLed::SendPlugin1, uf8::Uf8GlobalLed::SendPlugin2,
             uf8::Uf8GlobalLed::SendPlugin3, uf8::Uf8GlobalLed::SendPlugin4,
             uf8::Uf8GlobalLed::SendPlugin5, uf8::Uf8GlobalLed::SendPlugin6,
             uf8::Uf8GlobalLed::SendPlugin7, uf8::Uf8GlobalLed::SendPlugin8,
-        }) {
-            sendLedFrames(uf8::buildUf8GlobalLed(led, false));
+        };
+        for (int i = 0; i < 8; ++i) {
+            const bool sendHit = (sendVAll == i || sendFAll == i);
+            const bool recvHit = (recvVAll == i || recvFAll == i);
+            const bool active  = sendHit || recvHit;
+            sendLedFrames(uf8::buildUf8GlobalLed(kSpLeds[i], active));
         }
     }
+    g_lastRoutingKey = routingKey;
 
     // Page Left / Page Right LEDs — dim baseline, bright momentarily
     // while held (driven from the press handler, not here). At init

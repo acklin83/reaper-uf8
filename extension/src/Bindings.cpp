@@ -70,6 +70,14 @@ constexpr NameEntry kNames[] = {
     { ButtonId::Nudge,       "nudge"        },
     { ButtonId::EncFocus,    "focus"        },
     { ButtonId::ChannelPush, "channel_push" },
+    { ButtonId::SendPlugin1, "send_plugin_1" },
+    { ButtonId::SendPlugin2, "send_plugin_2" },
+    { ButtonId::SendPlugin3, "send_plugin_3" },
+    { ButtonId::SendPlugin4, "send_plugin_4" },
+    { ButtonId::SendPlugin5, "send_plugin_5" },
+    { ButtonId::SendPlugin6, "send_plugin_6" },
+    { ButtonId::SendPlugin7, "send_plugin_7" },
+    { ButtonId::SendPlugin8, "send_plugin_8" },
 };
 
 } // namespace
@@ -120,6 +128,15 @@ ButtonId fromUf8DeviceId(uint8_t id)
         case 0x40: return ButtonId::Layer1;
         case 0x41: return ButtonId::Layer2;
         case 0x42: return ButtonId::Layer3;
+        // Send/Plugin row 0x48..0x4F (docs/buttons-leds-quickref.md).
+        case 0x48: return ButtonId::SendPlugin1;
+        case 0x49: return ButtonId::SendPlugin2;
+        case 0x4A: return ButtonId::SendPlugin3;
+        case 0x4B: return ButtonId::SendPlugin4;
+        case 0x4C: return ButtonId::SendPlugin5;
+        case 0x4D: return ButtonId::SendPlugin6;
+        case 0x4E: return ButtonId::SendPlugin7;
+        case 0x4F: return ButtonId::SendPlugin8;
         default:   return ButtonId::None;
     }
 }
@@ -252,7 +269,7 @@ Binding mkBuiltin(const char* name, Behavior b, const char* label,
 void seedFactoryDefaults_(Config& c)
 {
     c = Config{};
-    c.version     = 1;
+    c.version     = 2;
     c.activeLayer = 0;
     c.layers[0].name = "Layer 1";
     c.layers[1].name = "Layer 2";
@@ -305,6 +322,53 @@ void seedFactoryDefaults_(Config& c)
     L1[ButtonId::PluginBtn] = mkBuiltin("ssl_strip_mode_toggle", Behavior::Toggle,    "PLUGIN");
     L1[ButtonId::Btn360]    = mkBuiltin("mixer_toggle",          Behavior::Momentary, "360");
     L1[ButtonId::Pan]       = mkBuiltin("pan_force",             Behavior::Toggle,    "PAN");
+
+    // Flip long-press routes the focused track's sends/receives onto
+    // V-Pots: long alone = sends (LED green when active), long+Shift =
+    // receives (LED red). Behavior must be Momentary for long-press to
+    // arm; the regular FLIP toggle still works on a quick press.
+    {
+        auto& fl = L1[ButtonId::Flip];
+        fl.behavior     = Behavior::Momentary;
+        fl.hasLongPress = true;
+        auto& lpPlain = fl.longPress[static_cast<int>(Modifier::Plain)];
+        lpPlain.type   = ActionType::Builtin;
+        lpPlain.action = "send_this";
+        lpPlain.param  = 1;   // Flip → V-Pots (this track's sends spread across V-Pots)
+        auto& lpShift = fl.longPress[static_cast<int>(Modifier::Shift)];
+        lpShift.type   = ActionType::Builtin;
+        lpShift.action = "recv_this";
+        lpShift.param  = 1;
+    }
+
+    // Send/Plugin row — each button switches to the matching send
+    // index. Plain = Send N for all tracks, Shift+ = Receive N. Param
+    // 0 routes onto Faders by default; the user can flip onto V-Pots
+    // via the per-binding "Flip" checkbox.
+    static const ButtonId kSendPluginIds[8] = {
+        ButtonId::SendPlugin1, ButtonId::SendPlugin2,
+        ButtonId::SendPlugin3, ButtonId::SendPlugin4,
+        ButtonId::SendPlugin5, ButtonId::SendPlugin6,
+        ButtonId::SendPlugin7, ButtonId::SendPlugin8,
+    };
+    for (int i = 0; i < 8; ++i) {
+        char nameSend[20], nameRecv[20], label[8];
+        std::snprintf(nameSend, sizeof(nameSend), "send_all_%d", i + 1);
+        std::snprintf(nameRecv, sizeof(nameRecv), "recv_all_%d", i + 1);
+        std::snprintf(label,    sizeof(label),    "S/P %d",    i + 1);
+        Binding bd;
+        bd.behavior = Behavior::Momentary;
+        bd.label    = label;
+        auto& sp = bd.shortPress[static_cast<int>(Modifier::Plain)];
+        sp.type   = ActionType::Builtin;
+        sp.action = nameSend;
+        sp.param  = 0;   // default: Faders
+        auto& shft = bd.shortPress[static_cast<int>(Modifier::Shift)];
+        shft.type   = ActionType::Builtin;
+        shft.action = nameRecv;
+        shft.param  = 0;
+        L1[kSendPluginIds[i]] = bd;
+    }
 
     // Quick keys: Q1=CS domain, Q2=BC domain, Q3 reserved (no factory binding —
     // falls through to legacy MCU path, matching today's behaviour).
@@ -778,6 +842,34 @@ void registerBuiltin(const char* name, BuiltinDescriptor desc)
     g_builtins[name] = std::move(desc);
 }
 
+// Bumped each time we ship a default-binding change that needs to
+// reach existing configs. load() runs every defined upgrade step in
+// order, then writes the bumped version back so the upgrade is
+// idempotent across REAPER restarts.
+constexpr int kCurrentBindingsVersion = 2;
+
+// Upgrade hook: existing configs get factory long-press defaults on
+// the FLIP button (send_this / recv_this+Shift) without touching any
+// other field. Skipped if the user has already set their own
+// long-press for FLIP — explicit assignments always win.
+void upgradeFlipLongPress_(Layer& L)
+{
+    auto it = L.bindings.find(ButtonId::Flip);
+    if (it == L.bindings.end()) return;
+    Binding& bd = it->second;
+    if (bd.hasLongPress) return;
+    bd.behavior     = Behavior::Momentary;
+    bd.hasLongPress = true;
+    auto& lpPlain = bd.longPress[static_cast<int>(Modifier::Plain)];
+    lpPlain.type   = ActionType::Builtin;
+    lpPlain.action = "send_this";
+    lpPlain.param  = 1;
+    auto& lpShift = bd.longPress[static_cast<int>(Modifier::Shift)];
+    lpShift.type   = ActionType::Builtin;
+    lpShift.action = "recv_this";
+    lpShift.param  = 1;
+}
+
 void load()
 {
     std::lock_guard<std::mutex> lk(g_cfgMutex);
@@ -787,7 +879,18 @@ void load()
         Config tmp;
         seedFactoryDefaults_(tmp);     // start from factories so missing fields fall back
         if (tryParse_(contents, tmp)) {
+            // One-shot upgrades for configs from older versions. Each
+            // step is idempotent (re-running a completed step is a
+            // no-op) so the conditional guard is mostly a perf hint.
+            if (tmp.version < 2) {
+                for (auto& L : tmp.layers) upgradeFlipLongPress_(L);
+            }
+            tmp.version = kCurrentBindingsVersion;
             g_cfg = std::move(tmp);
+            // Persist the upgraded config so the next load doesn't
+            // re-walk the upgrade chain.
+            ensureConfigDir_();
+            writeFile_(configPath_(), serialize(g_cfg));
             return;
         }
     }
