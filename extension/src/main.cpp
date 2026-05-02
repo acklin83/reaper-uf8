@@ -5212,10 +5212,10 @@ void registerBindingHandlers()
 
     // SSL_SOFTKEY — default action for the per-strip top-soft-keys.
     // param 0..7 = which strip the binding sits on. Looks up the
-    // current PAGE bank in the focused-domain plugin map, resolves the
-    // slot's linkIdx, and calls setFocus to bring that param across all
-    // V-Pots — same semantics as SSL 360°'s soft-key behaviour. Slots
-    // mapped to kNoSlot in the plugin tables silently no-op.
+    // CURRENT PAGE bank in the focused-domain plugin map (so the row
+    // changes meaning as the user steps banks via V-POT/Bank1..5 — the
+    // SSL 360° default behaviour). Slots mapped to kNoSlot in the
+    // plugin tables silently no-op.
     registerBuiltin("ssl_softkey", DescBuilder{
         [](bool firing, bool /*pressed*/, int param) {
             if (!firing) return;
@@ -5231,8 +5231,48 @@ void registerBindingHandlers()
                 uf8::setFocus({domain, linkIdx});
             }
         },
-        nullptr, "SSL plug-in soft-key focus (param = strip 0..7)", true
+        nullptr, "SSL Soft-Key (current bank, slot 0..7)", true
     });
+
+    // SSL_BANK_* — explicit-bank versions. Six builtins (V-POT + Bank
+    // 1..5), each with param 0..7 selecting the slot WITHIN THAT
+    // SPECIFIC bank. Lets the user wire any button to a fixed SSL
+    // parameter (e.g. "always focus HMF Q") without depending on the
+    // global PAGE-bank state. Picker presents the param as a combo
+    // listing the actual function names from softkey::kCsLabels so the
+    // user picks "HMF Q" rather than the numeric 2.
+    auto sslBankHandler = [](int bankIdx) {
+        return DescBuilder{
+            [bankIdx](bool firing, bool /*pressed*/, int param) {
+                if (!firing) return;
+                if (param < 0 || param >= 8) return;
+                const auto fp = uf8::getFocusedParam();
+                const auto domain = (fp.domain == uf8::Domain::BusComp)
+                    ? uf8::Domain::BusComp : uf8::Domain::ChannelStrip;
+                const int b = std::clamp(bankIdx,
+                    0, softkey::maxBankFor(domain));
+                const auto v = softkey::viewFor(domain, b);
+                const int linkIdx = v.linkIdx[param];
+                if (linkIdx != softkey::kNoSlot) {
+                    uf8::setFocus({domain, linkIdx});
+                }
+            },
+            nullptr, "", true
+        };
+    };
+    {
+        auto d = sslBankHandler(0);
+        d.displayName = "SSL Standard Bank: V-POT";
+        registerBuiltin("ssl_bank_vpot", d);
+    }
+    for (int b = 1; b <= 5; ++b) {
+        char name[24], desc[40];
+        std::snprintf(name, sizeof(name), "ssl_bank_%d", b);
+        std::snprintf(desc, sizeof(desc), "SSL Standard Bank %d", b);
+        auto d = sslBankHandler(b);
+        d.displayName = desc;
+        registerBuiltin(name, d);
+    }
 
     // SHOW USER BANK — switches the top-soft-key row (8 buttons above
     // the V-Pots) to a user-defined bank. param 0..kUserBankCount-1

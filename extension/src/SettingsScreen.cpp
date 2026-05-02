@@ -754,6 +754,22 @@ bool drawActionPicker(ImGui_Context* ctx, const char* prefix,
              || f.action->rfind("recv_all_", 0) == 0
              || *f.action == "send_this"
              || *f.action == "recv_this";
+            // SSL Soft-Key builtins use param as the slot index 0..7.
+            // Show a combo listing the actual function names from the
+            // SSL plug-in's bank (e.g. "BYPASS / IN TRIM / PHASE …").
+            // ssl_softkey follows the current PAGE bank (we use V-POT
+            // labels as the picker hint since they're the most useful
+            // generic set); ssl_bank_* address a specific bank.
+            int sslBankIdx = -1;
+            if (*f.action == "ssl_softkey") {
+                sslBankIdx = 0;   // V-POT labels as a hint
+            } else if (*f.action == "ssl_bank_vpot") {
+                sslBankIdx = 0;
+            } else if (f.action->rfind("ssl_bank_", 0) == 0
+                    && f.action->size() == 10) {
+                const char d = (*f.action)[9];
+                if (d >= '1' && d <= '5') sslBankIdx = d - '0';
+            }
             if (isMod) {
                 static char kModeItems[] =
                     "Momentary (held = active)\0"
@@ -776,6 +792,36 @@ bool drawActionPicker(ImGui_Context* ctx, const char* prefix,
                     *f.param = flipped ? 1 : 0;
                     dirty = true;
                 }
+            } else if (sslBankIdx >= 0) {
+                // Build a combo from the bank's labels. Empty slots
+                // ("BYPASS"/""/"PHASE"/...) show as "Slot N (empty)".
+                const char* const* labels =
+                    reasixty_softkeyStockLabels(/*domain*/ 0, sslBankIdx);
+                char comboItems[8 * 32 + 1] = {0};
+                size_t pos = 0;
+                for (int i = 0; i < 8; ++i) {
+                    char itm[40];
+                    const char* l = (labels && labels[i] && *labels[i])
+                        ? labels[i] : "(empty)";
+                    std::snprintf(itm, sizeof(itm), "%d  %s", i, l);
+                    const size_t n = std::strlen(itm);
+                    if (pos + n + 2 < sizeof(comboItems)) {
+                        std::memcpy(comboItems + pos, itm, n);
+                        pos += n;
+                        comboItems[pos++] = '\0';
+                    }
+                }
+                comboItems[pos] = '\0';
+                std::snprintf(idbuf, sizeof(idbuf), "Slot##%s_sslslot",
+                              prefix);
+                int slot = std::clamp(*f.param, 0, 7);
+                double pw = 240;
+                ImGui_PushItemWidth(ctx, pw);
+                if (ImGui_Combo(ctx, idbuf, &slot, comboItems, nullptr)) {
+                    *f.param = slot;
+                    dirty = true;
+                }
+                ImGui_PopItemWidth(ctx);
             } else {
                 std::snprintf(idbuf, sizeof(idbuf), "Param##%s_bparam", prefix);
                 double pw = 90;
