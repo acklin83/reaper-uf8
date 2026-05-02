@@ -121,6 +121,11 @@ struct ActionSlot {
     ActionType  type     = ActionType::Noop;
     std::string action;        // builtin name / REAPER action id / keyboard chord
     int         param    = 0;
+    // Per-slot scribble label. Shown on the UF8 LCD when this slot is
+    // the one a press will fire (e.g. user soft-key bank slot, or
+    // the focused modifier overlay). Empty = fall back to the
+    // binding's top-level Binding::label.
+    std::string label;
     // MIDI command fields — read only when `type == Midi`.
     //   midiDevice  output device name (REAPER GetMIDIOutputName, "" = all)
     //   midiChannel 1..16 (stored 1-based for human-readability)

@@ -254,14 +254,14 @@ const char* hwFaceLabel(ButtonId id)
         case ButtonId::SendPlugin6: return "S/P 6";
         case ButtonId::SendPlugin7: return "S/P 7";
         case ButtonId::SendPlugin8: return "S/P 8";
-        case ButtonId::TopSoftKey1: return "TSK 1";
-        case ButtonId::TopSoftKey2: return "TSK 2";
-        case ButtonId::TopSoftKey3: return "TSK 3";
-        case ButtonId::TopSoftKey4: return "TSK 4";
-        case ButtonId::TopSoftKey5: return "TSK 5";
-        case ButtonId::TopSoftKey6: return "TSK 6";
-        case ButtonId::TopSoftKey7: return "TSK 7";
-        case ButtonId::TopSoftKey8: return "TSK 8";
+        case ButtonId::TopSoftKey1: return "Soft-Key 1";
+        case ButtonId::TopSoftKey2: return "Soft-Key 2";
+        case ButtonId::TopSoftKey3: return "Soft-Key 3";
+        case ButtonId::TopSoftKey4: return "Soft-Key 4";
+        case ButtonId::TopSoftKey5: return "Soft-Key 5";
+        case ButtonId::TopSoftKey6: return "Soft-Key 6";
+        case ButtonId::TopSoftKey7: return "Soft-Key 7";
+        case ButtonId::TopSoftKey8: return "Soft-Key 8";
         case ButtonId::VPotBank:     return "V-POT";
         case ButtonId::SoftKey1Bank: return "BANK 1";
         case ButtonId::SoftKey2Bank: return "BANK 2";
@@ -635,6 +635,7 @@ struct ActionFieldsRef {
     uf8::bindings::ActionType*  type;
     std::string*                action;
     int*                        param;
+    std::string*                label;
     std::string*                midiDevice;
     int*                        midiChannel;
     int*                        midiMsgType;
@@ -658,6 +659,30 @@ bool drawActionPicker(ImGui_Context* ctx, const char* prefix,
             dirty = true;
         }
     };
+
+    // ---- Per-action display label ----
+    // What the UF8 LCD shows when this slot is the one that will fire
+    // (e.g. user soft-key bank slot, or visible while the matching
+    // modifier is held). Empty falls back to the binding's top-level
+    // label / hardware-face name. Some callers (e.g. drawSlotPicker
+    // for short/long binding-editor slots) opt out by passing nullptr.
+    if (f.label) {
+        char lblBuf[64] = {0};
+        std::strncpy(lblBuf, f.label->c_str(), sizeof(lblBuf) - 1);
+        std::snprintf(idbuf, sizeof(idbuf),
+                      "Display label##%s_lbl", prefix);
+        double lw = 220;
+        ImGui_PushItemWidth(ctx, lw);
+        if (ImGui_InputTextWithHint(ctx, idbuf,
+                                    "shown on the UF8 LCD",
+                                    lblBuf, sizeof(lblBuf),
+                                    nullptr, nullptr)) {
+            *f.label = lblBuf;
+            dirty = true;
+        }
+        ImGui_PopItemWidth(ctx);
+        ImGui_Spacing(ctx);
+    }
 
     // ---- REAPER Action ----
     sectionRadio("rd_reaper", "REAPER Action", ActionType::Reaper);
@@ -794,26 +819,26 @@ bool drawActionPicker(ImGui_Context* ctx, const char* prefix,
                 }
             } else if (sslBankIdx >= 0) {
                 // Build a combo from the bank's labels. Empty slots
-                // ("BYPASS"/""/"PHASE"/...) show as "Slot N (empty)".
+                // (some banks have gaps in the SSL plug-in spec) show
+                // as "(empty)" so the user sees the slot exists but
+                // does nothing if pressed.
                 const char* const* labels =
                     reasixty_softkeyStockLabels(/*domain*/ 0, sslBankIdx);
                 char comboItems[8 * 32 + 1] = {0};
                 size_t pos = 0;
                 for (int i = 0; i < 8; ++i) {
-                    char itm[40];
                     const char* l = (labels && labels[i] && *labels[i])
                         ? labels[i] : "(empty)";
-                    std::snprintf(itm, sizeof(itm), "%d  %s", i, l);
-                    const size_t n = std::strlen(itm);
+                    const size_t n = std::strlen(l);
                     if (pos + n + 2 < sizeof(comboItems)) {
-                        std::memcpy(comboItems + pos, itm, n);
+                        std::memcpy(comboItems + pos, l, n);
                         pos += n;
                         comboItems[pos++] = '\0';
                     }
                 }
                 comboItems[pos] = '\0';
-                std::snprintf(idbuf, sizeof(idbuf), "Slot##%s_sslslot",
-                              prefix);
+                std::snprintf(idbuf, sizeof(idbuf),
+                              "SSL function##%s_sslslot", prefix);
                 int slot = std::clamp(*f.param, 0, 7);
                 double pw = 240;
                 ImGui_PushItemWidth(ctx, pw);
@@ -922,7 +947,7 @@ bool drawSlotPicker(ImGui_Context* ctx, const char* prefix,
                     bool isLongPress)
 {
     ActionFieldsRef ref{
-        &s.type, &s.action, &s.param,
+        &s.type, &s.action, &s.param, &s.label,
         &s.midiDevice, &s.midiChannel, &s.midiMsgType,
         &s.midiData1, &s.midiData2,
     };
@@ -1562,7 +1587,7 @@ void drawUserBankEditor_(ImGui_Context* ctx, int bankIdx,
             ImGui_PopItemWidth(ctx);
 
             ActionFieldsRef ref{
-                &sp.type, &sp.action, &sp.param,
+                &sp.type, &sp.action, &sp.param, &sp.label,
                 &sp.midiDevice, &sp.midiChannel, &sp.midiMsgType,
                 &sp.midiData1, &sp.midiData2,
             };

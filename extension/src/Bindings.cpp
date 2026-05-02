@@ -419,8 +419,8 @@ void seedFactoryDefaults_(Config& c)
         ButtonId::TopSoftKey7, ButtonId::TopSoftKey8,
     };
     for (int i = 0; i < 8; ++i) {
-        char label[8];
-        std::snprintf(label, sizeof(label), "TSK %d", i + 1);
+        char label[12];
+        std::snprintf(label, sizeof(label), "Soft-Key %d", i + 1);
         L1[kTopSoftKeyIds[i]] = mkBuiltin("ssl_softkey",
                                           Behavior::Momentary, label,
                                           255, 255, 255, /*param*/ i);
@@ -525,6 +525,10 @@ void serializeSlotFields_(const ActionSlot& s, std::ostringstream& os)
     os << "\"type\": ";   appendEscaped(os, actionTypeName(s.type));
     os << ", \"action\": "; appendEscaped(os, s.action);
     os << ", \"param\": " << s.param;
+    if (!s.label.empty()) {
+        os << ", \"label\": ";
+        appendEscaped(os, s.label);
+    }
     if (s.type == ActionType::Midi) {
         os << ", \"midi\": {";
         os << "\"device\": ";   appendEscaped(os, s.midiDevice);
@@ -698,6 +702,8 @@ bool parseSlotFields_(wdl_json_element* obj, ActionSlot& out)
         if (auto* s = v->get_string_value()) out.action = s;
     if (auto* v = obj->get_item_by_name("param"))
         if (auto* s = v->get_string_value(true)) out.param = std::atoi(s);
+    if (auto* v = obj->get_item_by_name("label"))
+        if (auto* s = v->get_string_value()) out.label = s;
     if (auto* mi = obj->get_item_by_name("midi"); mi && mi->is_object()) {
         if (auto* v = mi->get_item_by_name("device"))
             if (auto* s = v->get_string_value()) out.midiDevice = s;
