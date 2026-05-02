@@ -141,18 +141,7 @@ Unter dem Schematic ein kleiner Footer mit:
 - `displayShort` 4-char Feld (auto-vorbelegt vom getrimmten FX-Namen).
 - Checkbox "Make this the default for CS / BC".
 - Save-Button (oder live-save bei jedem Mapping-Edit, wenn die UX flüssig genug ist).
-- "Import / Export…" Buttons für JSON-Map-Sharing zwischen Usern.
-
-#### Factory Maps
-
-360 Link liefert Factory-Maps für Slate Digital, UAD, Waves, Brainworx, Plugin Alliance, Harrison. Wir können das Konzept übernehmen:
-
-- Repo-Subdir `extension/factory-maps/` mit JSON-Files pro bekanntem Plugin.
-- Beim ersten UserPluginCatalog-Load: Files aus dem Subdir parsen, in den Catalog einfügen wenn das matching Plugin in keiner User-Map vorkommt.
-- Editierbar — beim ersten Edit klont's eine Kopie in den User-Catalog (`user_plugins.json`), Factory-Original bleibt unangetastet.
-- Community-Beiträge per PR ins Repo.
-
-Erste Factory-Maps die wir mitliefern könnten (Reihenfolge nach Verbreitung): FabFilter Pro-Q, Pro-C; Waves SSL E/G Channel; UAD SSL 4000 E; TDR Nova; ReaEQ.
+- "Import / Export…" Buttons für JSON-Map-Sharing zwischen Usern (Community-getrieben, nicht von uns kuratiert).
 
 ### GR-Metering (Tech-Stack)
 
