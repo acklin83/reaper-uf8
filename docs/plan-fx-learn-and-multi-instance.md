@@ -66,6 +66,48 @@ Learn lebt als **eigener Tab im Mixer-Window** (neue `RailEntry` in [MixerWindow
 
 Tab-Name: "FX Learn" oder "User Plugins". Sektion-Konstante `kSecFxLearn`. RailEntry-Eintrag zwischen "Soft-Key Banks" und "Modes".
 
+### Management bereits gelernter Plugins
+
+Der Tab hat **zwei Modi** — Master-View (Default) und Editor (Schematic).
+
+#### Master-View — Liste + CRUD
+
+Zeigt alle UserPluginMaps aus dem Catalog. Tabellarisch:
+
+| `displayShort` | Plugin Match | Domain | Default | Slots | Aktionen |
+|---|---|---|---|---|---|
+| FFP4 | FabFilter Pro-Q 4 | CS | ★ | 12 / 30 | Edit · Duplicate · Delete · Export |
+| FFPC | FabFilter Pro-C 2 | CS | – | 8 / 30 | … |
+| WaSL | Waves SSL E-Channel | CS | – | 22 / 30 | … |
+
+- **Edit** → Editor-View für diese Map (Schematic + Param-Liste).
+- **Duplicate** → klonen unter neuem Match/Name; Default geht NICHT mit (bleibt beim Original).
+- **Delete** → Confirm-Dialog ("Delete map for FabFilter Pro-Q 4? Tracks hosting this plugin fall back to no mapping.") → Eintrag raus, JSON sofort persistiert.
+- **Export** → einzelnen JSON-Schnipsel für diese Map kopieren / als Datei speichern. Format ist eine Sub-Form des `user_plugins.json` Schema (`{ "format_version": 1, "plugins": [ <one-entry> ] }`) damit Re-Import trivial ist.
+- **Default-Stern-Klick** → toggelt `isDefault` für diese Domain. Bei Aktivieren wird der Stern bei allen anderen UserPluginMaps derselben Domain automatisch entfernt (one-of enforced).
+- **Sortier-Header** klickbar: alphabet by displayShort / Match-Name / Domain / Slot-Count.
+
+**Header-Buttons** über der Liste:
+
+- **+ New** → leerer Editor mit Plugin-Picker als ersten Schritt.
+- **Import…** → File-Picker, lädt JSON-File. Conflict-Resolution-Dialog wenn ein importierter Match schon im Catalog existiert: per Eintrag wählbar **Replace / Keep Both (rename) / Skip**. "Apply to all"-Checkbox für Bulk.
+- **Export All…** → kompletten Catalog als JSON-File speichern. Für Backup oder Cross-Machine-Sharing.
+- **Reset / Restore** → "Restore Backup…" liest die `*.bak`-Files (siehe Persistenz unten); kein "Reset to factory" weil wir keine Factory-Maps haben.
+
+#### Editor-View — Schematic + Param-Liste
+
+Das visuelle Mapping-UI das oben beschrieben ist (zweispaltig, drag-and-drop, click-and-turn). Header zeigt Breadcrumb "← All maps / Editing: FabFilter Pro-Q 4" um zurück zur Master-View zu kommen. Live-Save bei jedem Edit (oder explizit "Save" + "Discard"-Buttons — Entscheidung beim Bauen, je nachdem wie sich's anfühlt).
+
+#### Persistenz-Sicherheit
+
+Bei jedem destructive Edit (Delete, Replace via Import, Bulk-Import-Replace):
+
+- Pre-Write-Backup: kopiere aktuellen `user_plugins.json` nach `user_plugins.json.bak` (mit Timestamp-Suffix optional, aber initial-Iteration nur ein Backup-Slot reicht).
+- Atomic-Write des neuen Inhalts via `*.tmp` + `rename`.
+- "Restore Backup…" Button in Master-View ruft den `.bak` zurück.
+
+Damit ist ein versehentliches "Delete all maps" oder fehlerhafter Import zumindest einmal zurückrollbar ohne externe Tools.
+
 ### Learn-Flow (UI) — primär: visuelles Schematic + Param-Liste
 
 **Vorbild: SSL 360 Link Plugin** (Recherche siehe [SSL 360 Link User-Guide](https://support.solidstatelogic.com/hc/en-gb/articles/17183407536285)). Deren UI ist zweispaltig — links virtueller Channel-Strip, rechts scrollbare Param-Liste des hosted Plugins. Drei parallele Mapping-Methoden, alle gleich offiziell:
