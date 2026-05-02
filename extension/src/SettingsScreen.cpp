@@ -428,6 +428,12 @@ void drawUf8Vector(ImGui_Context* ctx, ButtonId& sel)
         ButtonId::TopSoftKey5, ButtonId::TopSoftKey6,
         ButtonId::TopSoftKey7, ButtonId::TopSoftKey8,
     };
+    // Live SSL labels for the active PAGE bank — the top-soft-key
+    // scribble area shows whatever the hardware would show right now.
+    const int sslBank = reasixty_softkeyCurrentBank();
+    const char* const* sslLabels =
+        reasixty_softkeyStockLabels(/*domain*/ 0, sslBank);
+    const int activeLayer = uf8::bindings::getActiveLayer();
     for (int i = 0; i < 8; ++i) {
         const float sx = kStripX0 + i * (kStripW + kStripGap);
         // Top soft-key — clickable so the user can edit the per-strip
@@ -435,10 +441,31 @@ void drawUf8Vector(ImGui_Context* ctx, ButtonId& sel)
         char tlbl[4];
         std::snprintf(tlbl, sizeof(tlbl), "%d", i + 1);
         drawHwBtn(sx + 6, 12, kStripW - 12, 22, kStripTsk[i], tlbl);
-        // Scribble LCD with placeholder logo
+        // Scribble LCD — show the live top-soft-key label. Resolution
+        // mirrors the runtime render path:
+        //   1. binding.shortPress[Plain].label   (user override)
+        //   2. SSL plug-in's softkey label for the current bank slot
+        //   3. blank
+        // Bank-switch via the V-POT/Bank tiles updates this on the
+        // next render tick.
         rect_(c, sx + 4, 40, kStripW - 8, 58, 0x080C12FF, 0x444A55FF, 2.0);
-        drawTextCentered_(c, sx + kStripW / 2.0f, 60, 0x4488DDFF, "SSL");
-        drawTextCentered_(c, sx + kStripW / 2.0f, 78, 0x4488DDFF, "UF8");
+        std::string scribble;
+        {
+            const auto bd =
+                uf8::bindings::getBinding(activeLayer, kStripTsk[i]);
+            const auto& sp = bd.shortPress[
+                static_cast<int>(uf8::bindings::Modifier::Plain)];
+            if (!sp.label.empty()) {
+                scribble = sp.label;
+            } else if (sslLabels && sslLabels[i] && *sslLabels[i]) {
+                scribble = sslLabels[i];
+            }
+        }
+        if (scribble.size() > 10) scribble.resize(10);
+        if (!scribble.empty()) {
+            drawTextCentered_(c, sx + kStripW / 2.0f, 68,
+                              0x4488DDFF, scribble.c_str());
+        }
         // V-Pot (large dial with notch)
         const float vx = sx + kStripW / 2.0f, vy = 124;
         circle_(c, vx, vy, 18, 0x14181EFF, 0x4A5060FF);
@@ -864,6 +891,19 @@ bool drawActionPicker(ImGui_Context* ctx, const char* prefix,
                 // does nothing if pressed.
                 const char* const* labels =
                     reasixty_softkeyStockLabels(/*domain*/ 0, sslBankIdx);
+                // Auto-fill the per-action display label with the
+                // current slot's SSL function name when the user
+                // hasn't typed their own. Lets factory-seeded SSL
+                // bindings show meaningful LCD text without manual
+                // editing — the user can override afterwards (label
+                // stays sticky once non-empty).
+                if (f.label && f.label->empty() && labels) {
+                    const int curSlot = std::clamp(*f.param, 0, 7);
+                    if (labels[curSlot] && *labels[curSlot]) {
+                        *f.label = labels[curSlot];
+                        dirty = true;
+                    }
+                }
                 char comboItems[8 * 32 + 1] = {0};
                 size_t pos = 0;
                 for (int i = 0; i < 8; ++i) {
@@ -1070,7 +1110,7 @@ void drawBindingEditor(ImGui_Context* ctx, int layer, ButtonId id)
     if (colW < 320) colW = 320;
     const double colH = 480;
 
-    static const char* kModNames[]   = { "Plain", "+ Shift / Fine",
+    static const char* kModNames[]   = { "(no modifier)", "+ Shift / Fine",
                                          "+ Cmd",  "+ Ctrl" };
     static const char* kModSlugs[]   = { "pl", "sh", "cm", "ct" };
 
