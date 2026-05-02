@@ -78,6 +78,7 @@ constexpr NameEntry kNames[] = {
     { ButtonId::SendPlugin6, "send_plugin_6" },
     { ButtonId::SendPlugin7, "send_plugin_7" },
     { ButtonId::SendPlugin8, "send_plugin_8" },
+    { ButtonId::Channel,     "channel"      },
 };
 
 } // namespace
@@ -137,6 +138,7 @@ ButtonId fromUf8DeviceId(uint8_t id)
         case 0x4D: return ButtonId::SendPlugin6;
         case 0x4E: return ButtonId::SendPlugin7;
         case 0x4F: return ButtonId::SendPlugin8;
+        case 0x51: return ButtonId::Channel;
         default:   return ButtonId::None;
     }
 }
@@ -370,6 +372,11 @@ void seedFactoryDefaults_(Config& c)
         L1[kSendPluginIds[i]] = bd;
     }
 
+    // CHANNEL — defaults to "home": one press clears every routing
+    // toggle (send/recv on V-Pots and Faders) so the strips return to
+    // their normal track-volume + pan view.
+    L1[ButtonId::Channel] = mkBuiltin("home", Behavior::Momentary, "HOME");
+
     // Quick keys: Q1=CS domain, Q2=BC domain, Q3 reserved (no factory binding —
     // falls through to legacy MCU path, matching today's behaviour).
     L1[ButtonId::Quick1] = mkBuiltin("domain_cs", Behavior::Momentary, "CS");
@@ -513,6 +520,9 @@ void serializeLayerBody_(const Layer& L, std::ostringstream& os,
            << int(bd.inactiveColor[2]) << "]";
         os << ", \"inactive_brightness\": ";
         appendEscaped(os, brightnessName(bd.inactiveBrightness));
+        if (bd.ledShowWhenEmpty) {
+            os << ", \"led_show_when_empty\": true";
+        }
 
         os << ", \"short\": ";
         serializeMatrixRow_(bd.shortPress, os);
@@ -657,6 +667,10 @@ bool parseLayer_(wdl_json_element* lobj, Layer& out)
         }
         if (auto* v = be->get_item_by_name("inactive_brightness"))
             bd.inactiveBrightness = brightnessFromName(v->get_string_value());
+        if (auto* v = be->get_item_by_name("led_show_when_empty"))
+            if (auto* s = v->get_string_value(true))
+                bd.ledShowWhenEmpty = (std::strcmp(s, "true") == 0
+                                    || std::strcmp(s, "1") == 0);
 
         // New-schema matrix. Both `short` and `long` are optional —
         // missing slots stay at default (Noop).

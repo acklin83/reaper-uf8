@@ -241,6 +241,15 @@ const char* hwFaceLabel(ButtonId id)
         case ButtonId::Nudge:       return "NUDGE";
         case ButtonId::EncFocus:    return "FOCUS";
         case ButtonId::ChannelPush: return "ENC PUSH";
+        case ButtonId::Channel:     return "CHANNEL";
+        case ButtonId::SendPlugin1: return "S/P 1";
+        case ButtonId::SendPlugin2: return "S/P 2";
+        case ButtonId::SendPlugin3: return "S/P 3";
+        case ButtonId::SendPlugin4: return "S/P 4";
+        case ButtonId::SendPlugin5: return "S/P 5";
+        case ButtonId::SendPlugin6: return "S/P 6";
+        case ButtonId::SendPlugin7: return "S/P 7";
+        case ButtonId::SendPlugin8: return "S/P 8";
         default:                    return uf8::bindings::toName(id);
     }
 }
@@ -435,19 +444,27 @@ void drawUf8Vector(ImGui_Context* ctx, ButtonId& sel)
     drawHwBtn(15, 108, 78, 24, ButtonId::Btn360, "360\xC2\xB0");
 
     drawGroupLabel(15, 136, "SEND / PLUGIN");
-    char buf[8];
-    for (int row = 0; row < 4; ++row) {
-        for (int col = 0; col < 2; ++col) {
-            std::snprintf(buf, sizeof(buf), "%d", row * 2 + col + 1);
-            drawLocked(13 + col * 42, 152 + row * 26, 38, 22, buf);
+    {
+        constexpr ButtonId kSp[8] = {
+            ButtonId::SendPlugin1, ButtonId::SendPlugin2,
+            ButtonId::SendPlugin3, ButtonId::SendPlugin4,
+            ButtonId::SendPlugin5, ButtonId::SendPlugin6,
+            ButtonId::SendPlugin7, ButtonId::SendPlugin8,
+        };
+        char buf[8];
+        for (int row = 0; row < 4; ++row) {
+            for (int col = 0; col < 2; ++col) {
+                const int idx = row * 2 + col;
+                std::snprintf(buf, sizeof(buf), "%d", idx + 1);
+                drawHwBtn(13 + col * 42, 152 + row * 26, 38, 22,
+                          kSp[idx], buf);
+            }
         }
     }
 
     // PLUGIN / CHANNEL — wider buttons so their silk-screen labels fit.
-    // CHANNEL is locked in v1 (DAW-mode-only on the real UF8) but the
-    // schematic shows it for layout fidelity.
     drawHwBtn(13, 260, 50, 22, ButtonId::PluginBtn, "PLUGIN");
-    drawLocked(67, 260, 50, 22, "CHANNEL");
+    drawHwBtn(67, 260, 50, 22, ButtonId::Channel,   "CHANNEL");
 
     // PAGE — label sits 18 px above the arrow row so the descenders
     // don't touch the button frame.
@@ -1108,6 +1125,22 @@ void drawBindingEditor(ImGui_Context* ctx, int layer, ButtonId id)
 
     drawLedRow("Active",   bd.color,         bd.brightness,         "act");
     drawLedRow("Inactive", bd.inactiveColor, bd.inactiveBrightness, "ina");
+
+    ImGui_Spacing(ctx);
+    // LED-when-empty override. Default is OFF — an unbound button stays
+    // dark so the surface visibly shows what's available vs assigned.
+    // Tick the checkbox to keep the configured Inactive colour glowing
+    // even when the binding has no action (useful for hardware labels
+    // / colour-coding rows that the user wants to keep visible).
+    {
+        bool en = bd.ledShowWhenEmpty;
+        if (ImGui_Checkbox(ctx,
+                "Show LED even when no action is assigned##ledforce",
+                &en)) {
+            bd.ledShowWhenEmpty = en;
+            dirty = true;
+        }
+    }
 
     ImGui_Spacing(ctx);
     ImGui_Separator(ctx);

@@ -62,6 +62,10 @@ enum class ButtonId : uint16_t {
     // (or Faders, when Flip is enabled) to a different send index.
     SendPlugin1, SendPlugin2, SendPlugin3, SendPlugin4,
     SendPlugin5, SendPlugin6, SendPlugin7, SendPlugin8,
+
+    // Channel — sits next to PLUGIN. Default action: HOME (clears every
+    // routing toggle so V-Pots / faders return to track volume + pan).
+    Channel,
 };
 
 // Map UF8 device byte (FF 22 03 <id> 00 <s>) to ButtonId. Returns None
@@ -154,6 +158,12 @@ struct Binding {
     bool        hasLongPress = false;
     ActionSlot  shortPress[kModifierCount];
     ActionSlot  longPress[kModifierCount];
+
+    // LED-when-empty override. Default false → if the binding has no
+    // action in any slot, the LED stays OFF. When the user wants to
+    // show the configured Inactive colour even on an unbound button
+    // (e.g. as a hardware label glow) they tick this checkbox.
+    bool        ledShowWhenEmpty = false;
 };
 
 struct Layer {

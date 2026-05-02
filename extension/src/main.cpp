@@ -5145,6 +5145,22 @@ void registerBindingHandlers()
         registerBuiltin("recv_this", d);
     }
 
+    // HOME — one-press exit from every routing toggle. Restores V-Pots
+    // and faders to their normal track-volume + pan view. Default for
+    // the Channel button so the user always has a "go back" button no
+    // matter how many routing modes they layered on.
+    registerBuiltin("home", DescBuilder{
+        [](bool firing, bool /*pressed*/, int /*param*/) {
+            if (!firing) return;
+            clearVpotRouting_();
+            clearFaderRouting_();
+        },
+        // No state to read — HOME is a one-shot. stateOf left unset so
+        // the LED render falls back to the binding's configured colours
+        // (default white).
+        nullptr, "Home (clear routing toggles)", false
+    });
+
     auto pageStep = [](int delta) {
         const auto fp = uf8::getFocusedParam();
         const auto domain = (fp.domain == uf8::Domain::BusComp)
