@@ -110,13 +110,20 @@ PluginMatch lookupPluginOnTrack(void* track, Domain domain, int instanceIdx = 0)
 
 ### Surface-Anzeige
 
-`displayShort` ist 4 chars, padded mit Spaces ("CS 2", "4K B"). Multi-Instance:
+`displayShort` ist 4 chars, padded mit Spaces ("CS 2", "4K B"). Multi-Instance — **dreistufiger Fallback**:
 
-- **Count == 1**: kein Suffix. "CS 2" wie heute.
-- **Count > 1**: Suffix a/b/c… ersetzt das Padding-Space. "CS2a", "CS2b" — passt in 4 chars ohne Layout-Bruch ([main.cpp:2565-2572](extension/src/main.cpp:2565)).
-- **UC1 7-Segment**: zeigt nur die Zahl wenn Count==1. Wenn >1 → "2a"/"2b". Display-Format vom User explizit so spezifiziert.
+1. **User hat den FX-Slot in REAPER umbenannt** ("Vocal", "Pre", "Side"…) → Rename-Name (4 chars truncated, uppercase) statt "CS 2". Holen via `TrackFX_GetNamedConfigParm(tr, fx, "renamed_name", buf, sz)`. Macht die Anzeige semantisch: "VOC " neben "PRE " neben "SIDE" sagt mehr als "CS2a/b/c".
+2. **Kein Rename, aber Count > 1** → automatisches a/b/c-Suffix. "CS2a", "CS2b". Passt in 4 chars ohne Layout-Bruch ([main.cpp:2565-2572](extension/src/main.cpp:2565)).
+3. **Count == 1** → `displayShort` wie heute, "CS 2" / "4K B" / etc.
 
-Gilt für 4K B/E/G analog: "4KEa" / "4KEb". Bei 4-Buchstaben-Plugins (z.B. user-defined "FFP4") bricht das Schema — Suffix muss letztes Char ersetzen ("FFPa"). Edge-Case akzeptieren oder `displayShort` auf 3 Chars beschränken wenn `count > 1`.
+**UC1 7-Segment**: bleibt Zahlen-only. Wenn User-Rename existiert → trotzdem "2a"/"2b" (kein Platz für Buchstaben). Plugin-Mixer-Window zeigt den vollen Rename als Text — dort ist Platz.
+
+**Plugin-Mixer-Window (ImGui)**: voller Rename-Name + Domain-Tag immer sichtbar wenn gesetzt. "Vocal Channel (CS 2)" liest sich gut.
+
+**Edge-Cases:**
+- Bei 4-Buchstaben-`displayShort` (z.B. user-defined "FFP4") bricht das a/b/c-Schema — Suffix ersetzt letztes Char ("FFPa"). Akzeptieren oder `displayShort` auf 3 Chars beschränken wenn `count > 1`.
+- Rename mit Sonderzeichen / Umlaute → wir filtern auf ASCII-uppercase (das Display kann eh nur ASCII).
+- Rename leer / nur whitespace → behandelt als nicht-gesetzt, fallback auf a/b/c.
 
 ### Navigation — Builtins
 
