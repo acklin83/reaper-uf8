@@ -46,6 +46,11 @@ void reasixty_exportDiagnostic();  // shows confirmation dialog itself
 // domain: 0 = ChannelStrip, 1 = BusComp.
 const char* const* reasixty_softkeyStockLabels(int domain, int bank);
 int                reasixty_softkeyStockBankCount();
+// Currently active SSL soft-key PAGE bank — used by the schematic
+// to highlight the matching V-POT/Bank tile and by the per-binding
+// editor header to surface the live bank context.
+int                reasixty_softkeyCurrentBank();
+const char*        reasixty_softkeyCurrentBankName();
 // Bindings save/load to user-chosen path. Both spawn a native file
 // dialog and persist via uf8::bindings::exportLayerTo / importLayerFrom
 // for the layer index passed in. Returns true on success, false on
@@ -513,13 +518,34 @@ void drawUf8Vector(ImGui_Context* ctx, ButtonId& sel)
     // ---- Right panel ----
     // SSL soft-key bank selectors — 2×3 grid. Each switches the active
     // PAGE bank (V-POT / Bank 1..5) via the softkey_bank_select
-    // builtin. User can rebind to anything via the editor.
-    drawHwBtn(852, 22, 42, 20, ButtonId::VPotBank,     "V-POT");
-    drawHwBtn(898, 22, 42, 20, ButtonId::SoftKey1Bank, "1");
-    drawHwBtn(944, 22, 41, 20, ButtonId::SoftKey2Bank, "2");
-    drawHwBtn(852, 46, 42, 20, ButtonId::SoftKey3Bank, "3");
-    drawHwBtn(898, 46, 42, 20, ButtonId::SoftKey4Bank, "4");
-    drawHwBtn(944, 46, 41, 20, ButtonId::SoftKey5Bank, "5");
+    // builtin. User can rebind to anything via the editor. The
+    // currently-active bank gets an extra green ring around its tile
+    // so the user always sees which bank the top-soft-key labels are
+    // sourced from right now.
+    {
+        const int activeBank = reasixty_softkeyCurrentBank();
+        struct BankBtn { float x, y, w; ButtonId id; const char* lbl; int idx; };
+        const BankBtn banks[6] = {
+            {852, 22, 42, ButtonId::VPotBank,     "V-POT", 0},
+            {898, 22, 42, ButtonId::SoftKey1Bank, "1",     1},
+            {944, 22, 41, ButtonId::SoftKey2Bank, "2",     2},
+            {852, 46, 42, ButtonId::SoftKey3Bank, "3",     3},
+            {898, 46, 42, ButtonId::SoftKey4Bank, "4",     4},
+            {944, 46, 41, ButtonId::SoftKey5Bank, "5",     5},
+        };
+        for (auto& b : banks) {
+            drawHwBtn(b.x, b.y, b.w, 20, b.id, b.lbl);
+            if (b.idx == activeBank) {
+                // Inset green outline to mark the live bank without
+                // fighting the existing select/hover highlight.
+                ImGui_DrawList_AddRect(c.dl,
+                    c.ox + b.x - 2, c.oy + b.y - 2,
+                    c.ox + b.x + b.w + 2, c.oy + b.y + 22,
+                    0x40C040FF, /*rounding*/ nullptr,
+                    /*flags*/ nullptr, /*thickness*/ nullptr);
+            }
+        }
+    }
 
     // PAN + FINE — own row below SOFT KEYS, with breathing room.
     drawHwBtn(852, 80, 64, 22, ButtonId::Pan,  "PAN");
@@ -986,9 +1012,23 @@ void drawBindingEditor(ImGui_Context* ctx, int layer, ButtonId id)
     Binding bd    = getBinding(layer, id);
     bool    dirty = false;
 
-    char header[80];
-    std::snprintf(header, sizeof(header),
-                  "Editing: %s   (Layer %d)", hwFaceLabel(id), layer + 1);
+    char header[120];
+    // Top-soft-keys' default action follows the live PAGE bank — show
+    // it in the header so the user always knows which bank's slot N
+    // they're looking at on the hardware right now.
+    const bool isTopSoftKey =
+        id >= ButtonId::TopSoftKey1 && id <= ButtonId::TopSoftKey8;
+    if (isTopSoftKey) {
+        std::snprintf(header, sizeof(header),
+                      "Editing: %s — %s   (Layer %d)",
+                      hwFaceLabel(id),
+                      reasixty_softkeyCurrentBankName(),
+                      layer + 1);
+    } else {
+        std::snprintf(header, sizeof(header),
+                      "Editing: %s   (Layer %d)",
+                      hwFaceLabel(id), layer + 1);
+    }
     ImGui_Text(ctx, header);
     ImGui_Separator(ctx);
 

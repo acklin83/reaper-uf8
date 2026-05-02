@@ -4537,6 +4537,23 @@ const char* const* reasixty_softkeyStockLabels(int domain, int bank)
 }
 int reasixty_softkeyStockBankCount() { return 6; }
 
+// Current SSL soft-key PAGE bank (0 = V-POT, 1..5 = Bank N) — read by
+// the Settings editor so the per-soft-key edit header shows the live
+// bank context ("Soft-Key N - Bank M (Layer L)") and the schematic
+// can highlight the active V-POT/Bank tile.
+int reasixty_softkeyCurrentBank()
+{
+    return std::clamp(g_softKeyBank.load(), 0, 5);
+}
+const char* reasixty_softkeyCurrentBankName()
+{
+    static const char* kNames[6] = {
+        "V-POT", "Bank 1", "Bank 2", "Bank 3", "Bank 4", "Bank 5",
+    };
+    const int b = reasixty_softkeyCurrentBank();
+    return kNames[b];
+}
+
 const char* reasixty_uf8Serial()
 {
     if (!g_dev) return "";
