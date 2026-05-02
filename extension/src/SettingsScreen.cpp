@@ -845,6 +845,28 @@ bool drawActionPicker(ImGui_Context* ctx, const char* prefix,
                 if (ImGui_Combo(ctx, idbuf, &slot, comboItems, nullptr)) {
                     *f.param = slot;
                     dirty = true;
+                    // Auto-fill the slot's display label with the SSL
+                    // function name so it shows on the LCD without the
+                    // user typing it in. The user can still override
+                    // afterwards — we only auto-fill when the label
+                    // either is empty or matches the previous slot's
+                    // SSL name (i.e. wasn't a user override).
+                    if (f.label && labels) {
+                        const char* prevName =
+                            labels[std::clamp(slot, 0, 7)];
+                        // To detect "was previously the SSL name", we
+                        // accept any of the bank's labels as a hint.
+                        bool wasAutoFilled = f.label->empty();
+                        for (int j = 0; !wasAutoFilled && j < 8; ++j) {
+                            if (labels[j] && *labels[j]
+                                && *f.label == labels[j]) {
+                                wasAutoFilled = true;
+                            }
+                        }
+                        if (wasAutoFilled && prevName && *prevName) {
+                            *f.label = prevName;
+                        }
+                    }
                 }
                 ImGui_PopItemWidth(ctx);
             } else {
@@ -1609,63 +1631,22 @@ void drawUserBankEditor_(ImGui_Context* ctx, int bankIdx,
     }
 }
 
-// Render a read-only stock SSL bank — just shows what each top-soft-key
-// will display when the SSL Channel Strip plug-in is in front and that
-// bank is selected via PAGE ←/→. No editing — these come from the
-// hardcoded SSL plug-in maps in main.cpp's softkey:: namespace.
-void drawSslStockBank_(ImGui_Context* ctx, int bankIdx)
-{
-    const char* const* labels = reasixty_softkeyStockLabels(0, bankIdx);
-    if (!labels) {
-        ImGui_TextDisabled(ctx, "(unavailable)");
-        return;
-    }
-    ImGui_TextWrapped(ctx,
-        "Read-only — these are the SSL Channel Strip plug-in's stock "
-        "soft-key parameters for the selected bank. PAGE ← / PAGE → "
-        "switches between them on the hardware. To customise the row, "
-        "use one of the User Banks tabs.");
-    ImGui_Spacing(ctx);
-    ImGui_Separator(ctx);
-    ImGui_Spacing(ctx);
-    for (int i = 0; i < 8; ++i) {
-        char line[80];
-        const char* lbl = labels[i] ? labels[i] : "";
-        if (*lbl == '\0') {
-            std::snprintf(line, sizeof(line), "Slot %d   —", i + 1);
-            ImGui_TextDisabled(ctx, line);
-        } else {
-            std::snprintf(line, sizeof(line), "Slot %d   %s", i + 1, lbl);
-            ImGui_Text(ctx, line);
-        }
-    }
-}
-
 void SettingsScreen::drawSoftKeyBanks(ImGui_Context* ctx)
 {
     using namespace uf8::bindings;
 
-    ImGui_Text(ctx, "Soft-Key Banks");
+    ImGui_Text(ctx, "User Soft-Key Banks");
     ImGui_TextDisabled(ctx,
-        "6 stock SSL Channel Strip banks (read-only) + 12 user-defined "
-        "banks. Bind a button to \"Show user soft-key bank\" (param "
-        "0..11) to activate one of the user banks at runtime.");
+        "12 user-defined banks. Bind a button to \"Show user soft-key "
+        "bank\" (param 0..11) to activate one of these banks at "
+        "runtime — the top-soft-key row above the V-Pots loads the "
+        "bank's 8 slot bindings. SSL Channel-Strip stock banks are "
+        "addressable directly via the \"SSL Standard Bank N\" actions "
+        "in the per-binding action picker; no separate page needed.");
     ImGui_Spacing(ctx);
 
     int barFlags = 0;
     if (!ImGui_BeginTabBar(ctx, "skbanks_tabs", &barFlags)) return;
-
-    // ---- 6 stock SSL banks (read-only) ---------------------------------
-    static const char* kSslTabs[6] = {
-        "SSL V-POT", "SSL Bank 1", "SSL Bank 2",
-        "SSL Bank 3", "SSL Bank 4", "SSL Bank 5",
-    };
-    for (int i = 0; i < 6; ++i) {
-        if (ImGui_BeginTabItem(ctx, kSslTabs[i], nullptr, nullptr)) {
-            drawSslStockBank_(ctx, i);
-            ImGui_EndTabItem(ctx);
-        }
-    }
 
     // ---- 12 user banks (editable) --------------------------------------
     for (int i = 0; i < uf8::bindings::kUserBankCount; ++i) {
