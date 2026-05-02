@@ -704,6 +704,13 @@ bool drawActionPicker(ImGui_Context* ctx, const char* prefix,
             const bool isMod = (*f.action == "mod_shift"
                              || *f.action == "mod_cmd"
                              || *f.action == "mod_ctrl");
+            // Send/receive routing builtins use param as a Flip flag
+            // (0 = Faders default, 1 = V-Pots).
+            const bool isRouting =
+                f.action->rfind("send_all_", 0) == 0
+             || f.action->rfind("recv_all_", 0) == 0
+             || *f.action == "send_this"
+             || *f.action == "recv_this";
             if (isMod) {
                 static char kModeItems[] =
                     "Momentary (held = active)\0"
@@ -717,6 +724,15 @@ bool drawActionPicker(ImGui_Context* ctx, const char* prefix,
                     dirty = true;
                 }
                 ImGui_PopItemWidth(ctx);
+            } else if (isRouting) {
+                std::snprintf(idbuf, sizeof(idbuf),
+                              "Flip onto V-Pots (default: Faders)##%s_routeflip",
+                              prefix);
+                bool flipped = (*f.param == 1);
+                if (ImGui_Checkbox(ctx, idbuf, &flipped)) {
+                    *f.param = flipped ? 1 : 0;
+                    dirty = true;
+                }
             } else {
                 std::snprintf(idbuf, sizeof(idbuf), "Param##%s_bparam", prefix);
                 double pw = 90;

@@ -4999,105 +4999,98 @@ void registerBindingHandlers()
         nullptr, "Bank → (8-strip scroll right)", false
     });
 
-    // ---- Send-routing builtins -----------------------------------------
-    // 8 + 8 + 1 + 1 = 18 toggleable sources. Each press flips its target
-    // state on; pressing the same binding (or another in the same domain)
-    // turns it off. The render pipeline (V-Pots / faders / scribble
-    // strips) reads g_sendVpot* / g_sendFader* in a follow-up commit;
-    // these handlers are state-only for now so bindings can be wired and
-    // tested in the editor without breaking the existing render paths.
+    // ---- Send / Receive routing builtins -------------------------------
+    // 8 + 1 per category (sends, receives) = 18 builtins. Each one
+    // toggles a routing mode on/off; the binding's `param` selects the
+    // physical output:
+    //   param = 0  → Faders   (default, shown as "Flip" unchecked)
+    //   param = 1  → V-Pots   (shown as "Flip" checked)
+    // Each handler reads its own param to decide which atomic to flip.
+    // Modes within one physical output stay mutually exclusive (handled
+    // by clearVpotRouting_ / clearFaderRouting_).
 
-    // Per-domain "all tracks, send/receive index N" handler factory.
-    // `out` is the atomic that holds the active index (-1 = off);
-    // `clearOthersOnOutput` clears every OTHER routing mode on the
-    // same physical output (V-Pot or Fader) before activating this one.
-    auto allHandler = [](std::atomic<int>* out, void (*clearOthersOnOutput)()) {
-        return [out, clearOthersOnOutput](int n) {
+    auto allHandler = [](std::atomic<int>* outFader, std::atomic<int>* outVpot,
+                         void (*clearVpotOthers)(), void (*clearFaderOthers)())
+    {
+        return [outFader, outVpot, clearVpotOthers, clearFaderOthers](int n) {
             return DescBuilder{
-                [out, clearOthersOnOutput, n](bool firing, bool, int) {
+                [outFader, outVpot, clearVpotOthers, clearFaderOthers, n]
+                (bool firing, bool, int param) {
                     if (!firing) return;
+                    auto* out = (param == 1) ? outVpot : outFader;
+                    auto  clr = (param == 1) ? clearVpotOthers : clearFaderOthers;
                     if (out->load() == n) {
                         out->store(-1);                     // toggle off
                     } else {
-                        clearOthersOnOutput();
+                        clr();
                         out->store(n);
                     }
                 },
-                [out, n](int) { return out->load() == n; },
-                "",                                         // injected below
-                false
+                // Both atomics light the LED; mode is "active" if EITHER
+                // physical output is currently routed to this index.
+                [outFader, outVpot, n](int) {
+                    return outFader->load() == n || outVpot->load() == n;
+                },
+                "",
+                true   // usesParam = true (Flip flag)
             };
         };
     };
-    auto sendVpotAll  = allHandler(&g_sendVpotAllIdx,  &clearVpotRouting_);
-    auto sendFaderAll = allHandler(&g_sendFaderAllIdx, &clearFaderRouting_);
-    auto recvVpotAll  = allHandler(&g_recvVpotAllIdx,  &clearVpotRouting_);
-    auto recvFaderAll = allHandler(&g_recvFaderAllIdx, &clearFaderRouting_);
+    auto sendAll = allHandler(&g_sendFaderAllIdx, &g_sendVpotAllIdx,
+                              &clearVpotRouting_, &clearFaderRouting_);
+    auto recvAll = allHandler(&g_recvFaderAllIdx, &g_recvVpotAllIdx,
+                              &clearVpotRouting_, &clearFaderRouting_);
 
     for (int n = 0; n < 8; ++n) {
-        char nameBuf[40], descBuf[64];
+        char nameBuf[24], descBuf[64];
 
-        std::snprintf(nameBuf, sizeof(nameBuf), "send_all_%d_vpot", n + 1);
+        std::snprintf(nameBuf, sizeof(nameBuf), "send_all_%d", n + 1);
         std::snprintf(descBuf, sizeof(descBuf),
-                      "Send %d ↦ all tracks (V-Pots)", n + 1);
-        auto v = sendVpotAll(n); v.displayName = descBuf;
-        registerBuiltin(nameBuf, v);
+                      "Send %d ↦ all tracks", n + 1);
+        auto s = sendAll(n); s.displayName = descBuf;
+        registerBuiltin(nameBuf, s);
 
-        std::snprintf(nameBuf, sizeof(nameBuf), "send_all_%d_fader", n + 1);
+        std::snprintf(nameBuf, sizeof(nameBuf), "recv_all_%d", n + 1);
         std::snprintf(descBuf, sizeof(descBuf),
-                      "Send %d ↦ all tracks (Faders)", n + 1);
-        auto f = sendFaderAll(n); f.displayName = descBuf;
-        registerBuiltin(nameBuf, f);
-
-        std::snprintf(nameBuf, sizeof(nameBuf), "recv_all_%d_vpot", n + 1);
-        std::snprintf(descBuf, sizeof(descBuf),
-                      "Receive %d ↦ all tracks (V-Pots)", n + 1);
-        auto rv = recvVpotAll(n); rv.displayName = descBuf;
-        registerBuiltin(nameBuf, rv);
-
-        std::snprintf(nameBuf, sizeof(nameBuf), "recv_all_%d_fader", n + 1);
-        std::snprintf(descBuf, sizeof(descBuf),
-                      "Receive %d ↦ all tracks (Faders)", n + 1);
-        auto rf = recvFaderAll(n); rf.displayName = descBuf;
-        registerBuiltin(nameBuf, rf);
+                      "Receive %d ↦ all tracks", n + 1);
+        auto r = recvAll(n); r.displayName = descBuf;
+        registerBuiltin(nameBuf, r);
     }
 
-    // "This track, 8 sends/receives" handler factory — same exclusion
-    // rules as the all-tracks variant.
-    auto thisHandler = [](std::atomic<bool>* out, void (*clearOthersOnOutput)()) {
+    // "This track, 8 sends/receives" handler — same param convention.
+    auto thisHandler = [](std::atomic<bool>* outFader, std::atomic<bool>* outVpot,
+                          void (*clearVpotOthers)(), void (*clearFaderOthers)())
+    {
         return DescBuilder{
-            [out, clearOthersOnOutput](bool firing, bool, int) {
+            [outFader, outVpot, clearVpotOthers, clearFaderOthers]
+            (bool firing, bool, int param) {
                 if (!firing) return;
+                auto* out = (param == 1) ? outVpot : outFader;
+                auto  clr = (param == 1) ? clearVpotOthers : clearFaderOthers;
                 if (out->load()) {
                     out->store(false);
                 } else {
-                    clearOthersOnOutput();
+                    clr();
                     out->store(true);
                 }
             },
-            [out](int) { return out->load(); },
-            "", false
+            [outFader, outVpot](int) {
+                return outFader->load() || outVpot->load();
+            },
+            "", true
         };
     };
     {
-        auto d = thisHandler(&g_sendVpotThisTrack,  &clearVpotRouting_);
-        d.displayName = "8 sends of focused track (V-Pots)";
-        registerBuiltin("send_this_vpot", d);
+        auto d = thisHandler(&g_sendFaderThisTrack, &g_sendVpotThisTrack,
+                             &clearVpotRouting_, &clearFaderRouting_);
+        d.displayName = "8 sends of focused track";
+        registerBuiltin("send_this", d);
     }
     {
-        auto d = thisHandler(&g_sendFaderThisTrack, &clearFaderRouting_);
-        d.displayName = "8 sends of focused track (Faders)";
-        registerBuiltin("send_this_fader", d);
-    }
-    {
-        auto d = thisHandler(&g_recvVpotThisTrack,  &clearVpotRouting_);
-        d.displayName = "8 receives of focused track (V-Pots)";
-        registerBuiltin("recv_this_vpot", d);
-    }
-    {
-        auto d = thisHandler(&g_recvFaderThisTrack, &clearFaderRouting_);
-        d.displayName = "8 receives of focused track (Faders)";
-        registerBuiltin("recv_this_fader", d);
+        auto d = thisHandler(&g_recvFaderThisTrack, &g_recvVpotThisTrack,
+                             &clearVpotRouting_, &clearFaderRouting_);
+        d.displayName = "8 receives of focused track";
+        registerBuiltin("recv_this", d);
     }
 
     auto pageStep = [](int delta) {

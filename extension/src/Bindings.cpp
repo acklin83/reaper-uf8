@@ -622,6 +622,30 @@ bool parseLayer_(wdl_json_element* lobj, Layer& out)
         if (sp.type == ActionType::Builtin && sp.action == "fine_modifier") {
             sp.action = "mod_shift";
         }
+        // Migration: send/receive routing builtins were originally split
+        // by physical output (`send_all_3_vpot`, `send_all_3_fader`,
+        // `send_this_vpot`, `send_this_fader`, plus recv_* twins). They
+        // collapsed to a single name + a "Flip" param (0 = Faders,
+        // 1 = V-Pots) — strip the suffix and set the param accordingly.
+        if (sp.type == ActionType::Builtin) {
+            auto endsWith = [](const std::string& s, const char* suffix) {
+                const size_t n = std::strlen(suffix);
+                return s.size() >= n
+                    && std::strncmp(s.c_str() + s.size() - n, suffix, n) == 0;
+            };
+            if ((sp.action.rfind("send_all_", 0) == 0
+              || sp.action.rfind("recv_all_", 0) == 0
+              || sp.action == "send_this_vpot" || sp.action == "send_this_fader"
+              || sp.action == "recv_this_vpot" || sp.action == "recv_this_fader")) {
+                if (endsWith(sp.action, "_vpot")) {
+                    sp.action.resize(sp.action.size() - 5);
+                    sp.param = 1;   // Flip → V-Pots
+                } else if (endsWith(sp.action, "_fader")) {
+                    sp.action.resize(sp.action.size() - 6);
+                    sp.param = 0;   // Default → Faders
+                }
+            }
+        }
 
         // Colour migration — pre-2026-05-02 configs were seeded with white
         // for ALL builtins. The hardware actually drives Auto*/Zoom* in
