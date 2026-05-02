@@ -538,15 +538,22 @@ struct PendingInput {
 enum class EncoderMode : uint8_t { Nav, Nudge, Focus };
 std::atomic<EncoderMode> g_encoderMode{EncoderMode::Nav};
 
-// Send-routing modes for the V-Pots and faders. Two domains (V-Pots,
-// Faders) each carry one of three states:
+// Send/Receive-routing modes for the V-Pots and faders. Four
+// independent state pairs (V-Pot vs Fader × Send vs Receive); each
+// pair carries one of three states:
 //   default                — V-Pots / faders show their normal source
-//   AllTracksSendN  (0..7) — all 8 strips show the same send-index
-//                            for whatever 8 tracks are in the bank
-//   ThisTrackSends         — the 8 strips show the focused track's
-//                            first 8 sends instead of 8 tracks
-// Within a domain the modes are mutually exclusive: turning on
-// AllTracksSend2 cancels AllTracksSend1 and ThisTrackSends.
+//   AllTracksN      (0..7) — all 8 strips show the same send/receive
+//                            index for whatever 8 tracks are in the bank
+//   ThisTrack              — the 8 strips show the focused track's
+//                            first 8 sends/receives instead of 8 tracks
+// Within a domain (e.g. "V-Pots showing sends") the AllTracks-N and
+// ThisTrack states are mutually exclusive — turning AllTracksSend3 on
+// cancels AllTracksSend1 and ThisTrackSends. Send and Receive modes
+// on the same physical output (V-Pot vs Fader) are ALSO mutually
+// exclusive: enabling AllTracksReceive3 on the V-Pots cancels any
+// active Send mode on the V-Pots, since both want to redraw the same
+// strip area. The two physical outputs (V-Pots, Faders) stay
+// independent of each other.
 //
 // Phase: state model only. The actual V-Pot / fader render pipeline
 // reads these atomics in a follow-up commit; for now the bindings
@@ -555,18 +562,47 @@ std::atomic<int>  g_sendVpotAllIdx     {-1};   // 0..7 = active, -1 = off
 std::atomic<bool> g_sendVpotThisTrack  {false};
 std::atomic<int>  g_sendFaderAllIdx    {-1};
 std::atomic<bool> g_sendFaderThisTrack {false};
+std::atomic<int>  g_recvVpotAllIdx     {-1};
+std::atomic<bool> g_recvVpotThisTrack  {false};
+std::atomic<int>  g_recvFaderAllIdx    {-1};
+std::atomic<bool> g_recvFaderThisTrack {false};
 
-// REAPER's GetTrackSendName produces the send's display name (usually
-// the destination track's name, or a user-overridden label). The
-// scribble strips will pull this when a Send-mode is active so each
-// strip's top line shows e.g. "REVERB" instead of generic "Send 3".
-// Returns empty string when the send doesn't exist or REAPER didn't
-// fill the buffer.
+// Helper: clear every other Send/Receive mode on the same physical
+// output (V-Pot or Fader) so the user can never end up with two
+// conflicting routing modes pointing at the same strip area.
+void clearVpotRouting_()
+{
+    g_sendVpotAllIdx.store(-1);
+    g_sendVpotThisTrack.store(false);
+    g_recvVpotAllIdx.store(-1);
+    g_recvVpotThisTrack.store(false);
+}
+void clearFaderRouting_()
+{
+    g_sendFaderAllIdx.store(-1);
+    g_sendFaderThisTrack.store(false);
+    g_recvFaderAllIdx.store(-1);
+    g_recvFaderThisTrack.store(false);
+}
+
+// REAPER's GetTrackSendName / GetTrackReceiveName produce the
+// send/receive's display name (usually the destination/source track's
+// name, or a user-overridden label). The scribble strips will pull
+// these when a Send/Receive-mode is active so each strip's top line
+// shows e.g. "REVERB" instead of generic "Send 3". Return empty
+// string when the index doesn't exist or REAPER didn't fill the buffer.
 std::string getTrackSendName(MediaTrack* tr, int sendIdx)
 {
     if (!tr || sendIdx < 0) return {};
     char buf[256] = {0};
     if (!GetTrackSendName(tr, sendIdx, buf, sizeof(buf))) return {};
+    return std::string(buf);
+}
+std::string getTrackReceiveName(MediaTrack* tr, int recvIdx)
+{
+    if (!tr || recvIdx < 0) return {};
+    char buf[256] = {0};
+    if (!GetTrackReceiveName(tr, recvIdx, buf, sizeof(buf))) return {};
     return std::string(buf);
 }
 
@@ -4771,88 +4807,98 @@ void registerBindingHandlers()
     // these handlers are state-only for now so bindings can be wired and
     // tested in the editor without breaking the existing render paths.
 
-    auto sendVpotAll = [](int n) {
-        return DescBuilder{
-            [n](bool firing, bool /*pressed*/, int /*param*/) {
-                if (!firing) return;
-                const int cur = g_sendVpotAllIdx.load();
-                if (cur == n) {
-                    g_sendVpotAllIdx.store(-1);          // toggle off
-                } else {
-                    g_sendVpotAllIdx.store(n);
-                    g_sendVpotThisTrack.store(false);    // mutually exclusive
-                }
-            },
-            [n](int) { return g_sendVpotAllIdx.load() == n; },
-            "",   // displayName injected per-builtin below
-            false
+    // Per-domain "all tracks, send/receive index N" handler factory.
+    // `out` is the atomic that holds the active index (-1 = off);
+    // `clearOthersOnOutput` clears every OTHER routing mode on the
+    // same physical output (V-Pot or Fader) before activating this one.
+    auto allHandler = [](std::atomic<int>* out, void (*clearOthersOnOutput)()) {
+        return [out, clearOthersOnOutput](int n) {
+            return DescBuilder{
+                [out, clearOthersOnOutput, n](bool firing, bool, int) {
+                    if (!firing) return;
+                    if (out->load() == n) {
+                        out->store(-1);                     // toggle off
+                    } else {
+                        clearOthersOnOutput();
+                        out->store(n);
+                    }
+                },
+                [out, n](int) { return out->load() == n; },
+                "",                                         // injected below
+                false
+            };
         };
     };
-    auto sendFaderAll = [](int n) {
-        return DescBuilder{
-            [n](bool firing, bool /*pressed*/, int /*param*/) {
-                if (!firing) return;
-                const int cur = g_sendFaderAllIdx.load();
-                if (cur == n) {
-                    g_sendFaderAllIdx.store(-1);
-                } else {
-                    g_sendFaderAllIdx.store(n);
-                    g_sendFaderThisTrack.store(false);
-                }
-            },
-            [n](int) { return g_sendFaderAllIdx.load() == n; },
-            "",
-            false
-        };
-    };
+    auto sendVpotAll  = allHandler(&g_sendVpotAllIdx,  &clearVpotRouting_);
+    auto sendFaderAll = allHandler(&g_sendFaderAllIdx, &clearFaderRouting_);
+    auto recvVpotAll  = allHandler(&g_recvVpotAllIdx,  &clearVpotRouting_);
+    auto recvFaderAll = allHandler(&g_recvFaderAllIdx, &clearFaderRouting_);
 
     for (int n = 0; n < 8; ++n) {
-        char nameBuf[32];
-        char descBuf[64];
+        char nameBuf[40], descBuf[64];
 
         std::snprintf(nameBuf, sizeof(nameBuf), "send_all_%d_vpot", n + 1);
         std::snprintf(descBuf, sizeof(descBuf),
                       "Send %d ↦ all tracks (V-Pots)", n + 1);
-        auto vd = sendVpotAll(n);
-        vd.displayName = descBuf;
-        registerBuiltin(nameBuf, vd);
+        auto v = sendVpotAll(n); v.displayName = descBuf;
+        registerBuiltin(nameBuf, v);
 
         std::snprintf(nameBuf, sizeof(nameBuf), "send_all_%d_fader", n + 1);
         std::snprintf(descBuf, sizeof(descBuf),
                       "Send %d ↦ all tracks (Faders)", n + 1);
-        auto fd = sendFaderAll(n);
-        fd.displayName = descBuf;
-        registerBuiltin(nameBuf, fd);
+        auto f = sendFaderAll(n); f.displayName = descBuf;
+        registerBuiltin(nameBuf, f);
+
+        std::snprintf(nameBuf, sizeof(nameBuf), "recv_all_%d_vpot", n + 1);
+        std::snprintf(descBuf, sizeof(descBuf),
+                      "Receive %d ↦ all tracks (V-Pots)", n + 1);
+        auto rv = recvVpotAll(n); rv.displayName = descBuf;
+        registerBuiltin(nameBuf, rv);
+
+        std::snprintf(nameBuf, sizeof(nameBuf), "recv_all_%d_fader", n + 1);
+        std::snprintf(descBuf, sizeof(descBuf),
+                      "Receive %d ↦ all tracks (Faders)", n + 1);
+        auto rf = recvFaderAll(n); rf.displayName = descBuf;
+        registerBuiltin(nameBuf, rf);
     }
 
-    registerBuiltin("send_this_vpot", DescBuilder{
-        [](bool firing, bool /*pressed*/, int /*param*/) {
-            if (!firing) return;
-            const bool cur = g_sendVpotThisTrack.load();
-            if (cur) {
-                g_sendVpotThisTrack.store(false);
-            } else {
-                g_sendVpotThisTrack.store(true);
-                g_sendVpotAllIdx.store(-1);
-            }
-        },
-        [](int) { return g_sendVpotThisTrack.load(); },
-        "8 sends of focused track (V-Pots)", false
-    });
-    registerBuiltin("send_this_fader", DescBuilder{
-        [](bool firing, bool /*pressed*/, int /*param*/) {
-            if (!firing) return;
-            const bool cur = g_sendFaderThisTrack.load();
-            if (cur) {
-                g_sendFaderThisTrack.store(false);
-            } else {
-                g_sendFaderThisTrack.store(true);
-                g_sendFaderAllIdx.store(-1);
-            }
-        },
-        [](int) { return g_sendFaderThisTrack.load(); },
-        "8 sends of focused track (Faders)", false
-    });
+    // "This track, 8 sends/receives" handler factory — same exclusion
+    // rules as the all-tracks variant.
+    auto thisHandler = [](std::atomic<bool>* out, void (*clearOthersOnOutput)()) {
+        return DescBuilder{
+            [out, clearOthersOnOutput](bool firing, bool, int) {
+                if (!firing) return;
+                if (out->load()) {
+                    out->store(false);
+                } else {
+                    clearOthersOnOutput();
+                    out->store(true);
+                }
+            },
+            [out](int) { return out->load(); },
+            "", false
+        };
+    };
+    {
+        auto d = thisHandler(&g_sendVpotThisTrack,  &clearVpotRouting_);
+        d.displayName = "8 sends of focused track (V-Pots)";
+        registerBuiltin("send_this_vpot", d);
+    }
+    {
+        auto d = thisHandler(&g_sendFaderThisTrack, &clearFaderRouting_);
+        d.displayName = "8 sends of focused track (Faders)";
+        registerBuiltin("send_this_fader", d);
+    }
+    {
+        auto d = thisHandler(&g_recvVpotThisTrack,  &clearVpotRouting_);
+        d.displayName = "8 receives of focused track (V-Pots)";
+        registerBuiltin("recv_this_vpot", d);
+    }
+    {
+        auto d = thisHandler(&g_recvFaderThisTrack, &clearFaderRouting_);
+        d.displayName = "8 receives of focused track (Faders)";
+        registerBuiltin("recv_this_fader", d);
+    }
 
     auto pageStep = [](int delta) {
         const auto fp = uf8::getFocusedParam();
