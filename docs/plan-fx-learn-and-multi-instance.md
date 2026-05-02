@@ -60,9 +60,17 @@ Plugin-Modifier (`ssl_strip_mode_toggle` / `g_pluginFaderMode`) routet Fader auf
 
 **Fallback wenn Fader/Pan nicht gelernt:** `findSlotByLinkIdx` returnt nullptr → Modifier-Mode-Code fällt auf REAPER-Track-Volume / -Pan zurück. Akzeptables Verhalten für Plugins ohne sinnvolle Master-Fader (Multiband-Comps, EQs ohne Output-Stage, …).
 
-### Learn-Flow (UI) — primär: visuelles Schematic
+### Learn-Flow (UI) — primär: visuelles Schematic + Param-Liste
 
-**Wir haben das richtige Werkzeug schon: `drawUf8Vector`** ([SettingsScreen.cpp:353](extension/src/SettingsScreen.cpp:353)) ist ein 1000×490 Vector-Canvas mit Hit-Test-Patterns (`drawHwBtn`) und etabliertem Hover/Select-Verhalten. Dasselbe Toolset ergibt eine **virtuelle Channel-Strip-Topologie** im Mixer-Window — visuell wie SSL 360 Link's Plugin-GUI, aber direkt in unserem ImGui-Window statt als VST3.
+**Vorbild: SSL 360 Link Plugin** (Recherche siehe [SSL 360 Link User-Guide](https://support.solidstatelogic.com/hc/en-gb/articles/17183407536285)). Deren UI ist zweispaltig — links virtueller Channel-Strip, rechts scrollbare Param-Liste des hosted Plugins. Drei parallele Mapping-Methoden, alle gleich offiziell:
+
+1. **Drag-and-drop** — Param-Eintrag aus der Liste auf die virtuelle Strip-Control ziehen.
+2. **Click-and-turn (Software)** — Klick auf virtuelle Control → "listening" (hellblau-Ring) → entweder Klick auf Param in Liste, oder im hosted Plugin-GUI wackeln (`GetLastTouchedFX`).
+3. **Click-and-turn (Hardware)** — Klick auf virtuelle Control → "listening" → UF8/UC1-Knopf bewegen → der gerade fokussierte Slot kriegt den Param.
+
+**Wir haben das Toolkit schon: `drawUf8Vector`** ([SettingsScreen.cpp:353](extension/src/SettingsScreen.cpp:353)) ist ein 1000×490 Vector-Canvas mit Hit-Test-Patterns (`drawHwBtn`). Dasselbe Toolset ergibt die **virtuelle Channel-Strip-Topologie** in unserem Mixer-Window — visuell wie 360 Link, aber ohne VST3-Wrapper.
+
+**Drag-and-drop-Mechanik in ImGui**: ReaImGui v0.10 hat `BeginDragDropSource` / `BeginDragDropTarget` (oder Manual-Drag via `IsItemActive` + Mouse-Delta). Erste Iteration wahrscheinlich manuell drawListed: Param-Item gegrabbt → semi-transparent Cursor-Sticker → über Slot loslassen → bind. Eine Zeile-Demo bauen und sehen wie's sich anfühlt.
 
 #### Layout pro Domain
 
@@ -81,6 +89,24 @@ Plugin-Modifier (`ssl_strip_mode_toggle` / `g_pluginFaderMode`) routet Fader auf
 **UC1-Schematic** (analog, separater Tab im Learn-UI):
 - UC1 hat dedicated Hardware-Knöpfe für Channel-Strip-Topologie — die Schematic zeigt den **physischen** UC1-Layout. Für FX Learn weniger relevant (UC1 mappt automatisch was die Domain-Map liefert), aber sinnvoll für Verification-View: "welche meiner gelernten Slots erreicht UC1?".
 
+#### Right-Side: Param-Liste-Panel
+
+Zweispaltige Aufteilung wie 360 Link. Rechts vom Schematic ein Panel mit zwei Listen:
+
+**"Assignable Parameters"** — alle VST3-Params des hosted Plugins, abrufbar via `TrackFX_GetNumParams` + `TrackFX_GetParamName` + `TrackFX_GetParamIdent` (ident liefert herstellerstabilen Identifier wenn vorhanden, robuster gegen Plugin-Updates als der Index alleine).
+
+- Scrollbare Liste, Such-Filter oben.
+- Pro Eintrag: Param-Name + Index + ggf. ident-String. Kleines Drag-Handle links.
+- Klickbar (für click-and-turn-Workflow) und drag-source.
+- Visuell markiert wenn der Param **schon gemappt** ist (mit Slot-Name daneben: "→ HF Gain"). Erlaubt Multi-Map zu erkennen.
+
+**"Assignable Meter Data"** — Read-Only-Params, separat sektioniert (Konvention von 360 Link). Dafür beim Param-Listing filtern auf:
+
+- VST3 Param-Flag `kIsReadOnly` (über `TrackFX_GetNamedConfigParm` mit `param.<n>.flags` oder direkt aus dem VST3-Wrapper — REAPER exposed das via Identifier-Strings)
+- Plus heuristisch: Param-Names die `gain reduction` / `GR` / `Reduction` enthalten
+
+In Phase 1 minimal: alle Params zeigen, der User entscheidet was Meter ist. In Phase 2: automatic split via `kIsReadOnly`-Flag.
+
 #### Slot-Status-Anzeige
 
 Jeder Slot im Schematic wird in einem von drei Zuständen gerendert:
@@ -93,11 +119,20 @@ Inverted-Flag als kleiner "↺"-Indikator am Slot, Rechts-Klick toggled.
 
 #### Interaktion
 
-- **Linksklick auf Slot** → Slot in "Listening" schalten. Nur ein Slot listening at a time. Nächster Plugin-Param-Wackel fängt → bindet → grün.
-- **Cmd+Klick / Bulk-Mode** → "Sequential Listen": nach jedem Bind springt der Listen-Status automatisch zum nächsten unmapped Slot in der Topologie. Erlaubt Quick-Mass-Mapping (Slot 1 wackeln, Slot 2 wackeln, …) ohne zwischen jedem in die UI zurückzuwechseln.
-- **Rechtsklick** → Inverted-Flag toggle / Mapping löschen / Param-Re-Pick.
+- **Linksklick auf Slot** → Slot in "Listening" schalten. Nur ein Slot listening at a time. Drei Dinge können den Listen-State auflösen:
+  - User klickt auf Param-Eintrag in der Liste → bindet
+  - User wackelt Param im hosted Plugin-GUI → `GetLastTouchedFX` bindet
+  - User bewegt Hardware-Knopf (UF8/UC1) → bindet (für Hardware-first-Mapping wie 360 Link's "click-and-turn hardware")
+- **Drag-and-drop** — Param-Eintrag aus der Liste auf einen Slot ziehen → bindet direkt. Kein Listen-State zwischendrin nötig.
+- **Cmd+Klick / Bulk-Mode** → "Sequential Listen": nach jedem Bind springt Listen-Status automatisch zum nächsten unmapped Slot in der Topologie. Quick-Mass-Mapping ohne UI-Wechsel.
+- **Drag GR-Param auf GR-Meter-Sektion** → die virtuelle Strip-Topologie hat einen Comp/Gate-GR-Meter-Bereich (kleiner LED-Strip / Bargraph in der Dynamics-Section). Dragging eines Read-Only-Params dorthin bindet das Metering. Mit kleinem Calibration-Offset-Slider darunter (1-zu-1 oder Skalierung) — manche 3rd-party-Plugins liefern GR mit anderem Range, Offset gleicht das aus. Wir picken den Wert per `TrackFX_GetParam` / `TrackFX_GetParamNormalized` während des Render-Ticks und schicken ihn auf UC1's GR-Meter / UF8's per-strip-GR-Indikator.
+- **Rechtsklick auf Slot** → Context-Menü: Inverted toggle, Mapping löschen, Re-Pick, "Set as default fader/pan slot" (für Slots die linkIdx 1 oder 3 nicht haben aber doch Master-Fader sind).
 - **ESC** → Listening abbrechen.
 - **Plugin-Selector oben** im Schematic-Header: Dropdown der FX-Chain auf dem focused Track plus Domain-Radio (CS/BC). Wechselt die UserPluginMap, an der gerade gearbeitet wird.
+
+#### Help-Tooltip-Mode
+
+360 Link hat einen `?`-Button der Hover-Tooltips aktiviert — Hover über jede virtuelle Control zeigt kurze Beschreibung des Slots ("HF Gain — high-frequency shelving boost / cut, ±18 dB"). Übernehmen wir analog: ein Hilfe-Toggle im Header, danach Hover-Tooltips aus den Slot-Names der PluginMap.
 
 #### Identität-Footer
 
@@ -106,6 +141,29 @@ Unter dem Schematic ein kleiner Footer mit:
 - `displayShort` 4-char Feld (auto-vorbelegt vom getrimmten FX-Namen).
 - Checkbox "Make this the default for CS / BC".
 - Save-Button (oder live-save bei jedem Mapping-Edit, wenn die UX flüssig genug ist).
+- "Import / Export…" Buttons für JSON-Map-Sharing zwischen Usern.
+
+#### Factory Maps
+
+360 Link liefert Factory-Maps für Slate Digital, UAD, Waves, Brainworx, Plugin Alliance, Harrison. Wir können das Konzept übernehmen:
+
+- Repo-Subdir `extension/factory-maps/` mit JSON-Files pro bekanntem Plugin.
+- Beim ersten UserPluginCatalog-Load: Files aus dem Subdir parsen, in den Catalog einfügen wenn das matching Plugin in keiner User-Map vorkommt.
+- Editierbar — beim ersten Edit klont's eine Kopie in den User-Catalog (`user_plugins.json`), Factory-Original bleibt unangetastet.
+- Community-Beiträge per PR ins Repo.
+
+Erste Factory-Maps die wir mitliefern könnten (Reihenfolge nach Verbreitung): FabFilter Pro-Q, Pro-C; Waves SSL E/G Channel; UAD SSL 4000 E; TDR Nova; ReaEQ.
+
+### GR-Metering (Tech-Stack)
+
+Damit GR-Werte von 3rd-party-Plugins auf UC1's moving-coil-Meter und UF8 sichtbar werden, müssen wir den Wert pro Tick lesen und auf die Hardware schicken. Zwei Detection-Wege analog zu 360 Link:
+
+1. **VST3 Read-Only-Param** mit Flag `Vst::ParameterInfo::kIsReadOnly` — REAPER's `TrackFX_GetParameterStepSizes` / `TrackFX_GetNamedConfigParm` (z.B. `parm_flags.<n>`) liefert das Flag-Bitfield. Read-Only-Params sind by convention Output-Reporters (GR, Output-Level, etc.).
+2. **PreSonus IGainReductionInfo VST3-Extension** — Standard-Interface das mehrere Hersteller implementieren. Innerhalb REAPER nicht direkt zugänglich, müsste über einen kleinen VST3-Bridge (eigenes minimales Plugin als Hook?) oder über REAPER-API wenn die das exposed (Untersuchung erforderlich).
+
+Phase 1 reicht uns Methode 1: VST3-Read-Only-Param. Damit kriegen wir alle FabFilter-Pro-C-Plugins, alle moderne Waves/UAD, FabFilter Pro-Q (output-Level) etc. Methode 2 (IGainReductionInfo) als Phase-2-Bonus.
+
+**Lese-Pfad**: pro Render-Tick `TrackFX_GetParamNormalized(tr, fxIdx, vst3Param)` für den gemappten GR-Slot, durchschicken auf UC1 und UF8 per-strip GR-Anzeige. Calibration-Offset wird vorher angewendet. UC1 hat schon die GR-Meter-Render-Pipeline ([UC1Surface.cpp:2183](extension/src/UC1Surface.cpp:2183) liest `GainReduction_dB` für built-in CS) — das funktioniert für UserPluginMap automatisch wenn der Slot gebunden ist.
 
 ### Learn-Flow (UI) — sekundär: Wizard
 
