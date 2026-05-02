@@ -2395,7 +2395,17 @@ void pushZonesForVisibleSlots()
         }
     }
     const bool softKeyChanged = g_softKeyDirty.exchange(false);
-    if (pageChanged || softKeyChanged) {
+    // Modifier-snapshot change forces a top-soft-key label repaint —
+    // each strip's binding may carry a per-modifier label override
+    // that the LCD should switch to / away from on Shift / Cmd / Ctrl
+    // press / release. Cheap atomic compare; this tick decides which
+    // labels go out below.
+    static uf8::bindings::Modifier s_lastModifier =
+        uf8::bindings::Modifier::Plain;
+    const auto curModifier = uf8::bindings::currentModifierSnapshot();
+    const bool modifierChanged = (curModifier != s_lastModifier);
+    s_lastModifier = curModifier;
+    if (pageChanged || softKeyChanged || modifierChanged) {
         g_lastSlotLabel.fill({});
         g_lastValueLine.fill({});
         g_lastTopSoftKey.fill(-1);
@@ -2580,6 +2590,46 @@ void pushZonesForVisibleSlots()
                 }
             }
 
+            // Per-binding label override — top wins, fall through to
+            // the user-bank / SSL-plugin default. Resolution order:
+            //   1. shortPress[currentModifier].label  (if non-empty)
+            //   2. shortPress[Plain].label            (if non-empty)
+            //   3. user-bank slot label (when a user bank is active)
+            //   4. SSL plug-in's softkey::viewFor label
+            // Lets the user type a custom name in the editor and have
+            // it show on the LCD, AND have a different name appear
+            // when Shift / Cmd / Ctrl is held (one binding can carry a
+            // separate label per modifier slot).
+            std::string label;
+            {
+                static const uf8::bindings::ButtonId kTskIds[8] = {
+                    uf8::bindings::ButtonId::TopSoftKey1,
+                    uf8::bindings::ButtonId::TopSoftKey2,
+                    uf8::bindings::ButtonId::TopSoftKey3,
+                    uf8::bindings::ButtonId::TopSoftKey4,
+                    uf8::bindings::ButtonId::TopSoftKey5,
+                    uf8::bindings::ButtonId::TopSoftKey6,
+                    uf8::bindings::ButtonId::TopSoftKey7,
+                    uf8::bindings::ButtonId::TopSoftKey8,
+                };
+                const auto bd = uf8::bindings::getBinding(
+                    uf8::bindings::getActiveLayer(), kTskIds[s]);
+                const int mIdx = static_cast<int>(curModifier);
+                if (mIdx >= 0 && mIdx < uf8::bindings::kModifierCount
+                    && !bd.shortPress[mIdx].label.empty()) {
+                    label = bd.shortPress[mIdx].label;
+                } else {
+                    const auto& spPlain = bd.shortPress[
+                        static_cast<int>(uf8::bindings::Modifier::Plain)];
+                    if (!spPlain.label.empty()) {
+                        label = spPlain.label;
+                    }
+                }
+            }
+            if (label.empty()) {
+                label = (activeUserBank >= 0)
+                    ? userLabel : std::string(vSk.labels[s]);
+            }
             // Pad to 12 chars centred (leading + trailing spaces) so
             //  - shorter / empty labels actively overwrite any longer
             //    residue left in the LCD zone from the previous bank;
@@ -2589,8 +2639,6 @@ void pushZonesForVisibleSlots()
             // An empty payload (`FF 66 02 04 <strip>`) would flip the
             // strip into "slot empty" mode and darken the colour bar —
             // not what we want; we just want the label cleared.
-            std::string label = (activeUserBank >= 0)
-                ? userLabel : std::string(vSk.labels[s]);
             if (label.size() < 12) {
                 const size_t pad = 12 - label.size();
                 const size_t lead = pad / 2;
