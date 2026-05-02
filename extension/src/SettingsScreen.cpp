@@ -852,8 +852,13 @@ bool drawActionPicker(ImGui_Context* ctx, const char* prefix,
                     return "User Soft-Key Banks";
                 if (n == "flip" || n == "pan_force"
                  || n == "ssl_strip_mode_toggle"
-                 || n == "mixer_toggle" || n == "home")
+                 || n == "mixer_toggle" || n == "home"
+                 || n == "folder_mode" || n == "show_only_selected")
                     return "Mode Toggles";
+                if (n == "fx_learn")
+                    return "Modifiers";
+                if (n.rfind("selset_", 0) == 0)
+                    return "Selection Sets";
                 if (n == "domain_cs" || n == "domain_bc")
                     return "Domain";
                 if (n.rfind("__", 0) == 0)
@@ -865,6 +870,7 @@ bool drawActionPicker(ImGui_Context* ctx, const char* prefix,
                 "Bank / Page", "Automation", "Zoom",
                 "SSL Soft-Keys", "Domain",
                 "Sends", "Receives", "User Soft-Key Banks",
+                "Selection Sets",
                 "Other",
             };
             std::unordered_map<std::string, std::vector<std::string>> bucket;

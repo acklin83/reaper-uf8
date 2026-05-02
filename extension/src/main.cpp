@@ -149,6 +149,23 @@ std::atomic<bool> g_flip{false};
 // the Plugin LED feedback land in this commit.
 std::atomic<bool> g_pluginFaderMode{false};
 
+// Phase 2.5 mode toggles. State-of-record only — bind-able via builtins
+// registered in registerBindingHandlers() and surfaced as Settings
+// checkboxes. Filter / selection-set logic wires up in a follow-up phase.
+//
+// folder_mode: CSI-style surface filter — only parent tracks fill the 8
+// strips; long-press SEL on a parent expands its children. NOT REAPER's
+// I_FOLDERCOMPACT (the TCP folder state stays untouched).
+//
+// show_only_selected: surface filter that restricts strips to a saved
+// Selection Set (8 slots, recalled via selset_recall param 1..8).
+std::atomic<bool> g_folderMode{false};
+std::atomic<bool> g_showOnlySelected{false};
+
+// Active Selection-Set slot (1..8); 0 = none. selset_recall sets this,
+// LED feedback uses it so the bound button lights for the live slot.
+std::atomic<int>  g_selsetActive{0};
+
 // V-Pot has dedicated Pan UX (Plugin button → plug-in Pan; PAN button →
 // REAPER track pan; default → REAPER track pan). Clicking the Pan knob
 // in the SSL plug-in GUI fires GetLastTouchedFX, which chaseLastTouchedFx
@@ -4973,6 +4990,65 @@ void registerBindingHandlers()
         nullptr, "Open / close Plugin Mixer", false
     });
 
+    // ---- Phase 2.5 surface-filter modes ----------------------------------
+    // Toggles only — actual filter/expand/selection-set logic lands in a
+    // follow-up phase. Bind-able now so users can wire them to hardware
+    // and the LED feedback loop is in place when the rendering side ships.
+    // Pattern mirrors flip / pan_force above: atomic + ExtState + LED-cb.
+    registerBuiltin("folder_mode", DescBuilder{
+        [](bool firing, bool /*pressed*/, int /*param*/) {
+            if (!firing) return;
+            const bool next = !g_folderMode.load();
+            g_folderMode.store(next);
+            g_pageDirty.store(true);
+            SetExtState("ReaSixty", "folderMode", next ? "1" : "0", true);
+        },
+        [](int) { return g_folderMode.load(); },
+        "Folder Mode (parents only)", false
+    });
+
+    registerBuiltin("show_only_selected", DescBuilder{
+        [](bool firing, bool /*pressed*/, int /*param*/) {
+            if (!firing) return;
+            const bool next = !g_showOnlySelected.load();
+            g_showOnlySelected.store(next);
+            g_pageDirty.store(true);
+            SetExtState("ReaSixty", "showOnlySelected",
+                        next ? "1" : "0", true);
+        },
+        [](int) { return g_showOnlySelected.load(); },
+        "Show Only Selected", false
+    });
+
+    // Selection-Set recall — single param-driven builtin. param = slot 1..8.
+    // Tap recalls; long-press = save (wired by the Long-Press dispatcher
+    // when the Selection-Sets editor in Settings is built out).
+    registerBuiltin("selset_recall", DescBuilder{
+        [](bool firing, bool /*pressed*/, int param) {
+            if (!firing) return;
+            if (param < 1 || param > 8) return;
+            g_selsetActive.store(param);
+            g_pageDirty.store(true);
+            // TODO Phase 2.5b: pull GUID list from project ExtState
+            // (key "selset_<param>") and apply as surface filter.
+        },
+        [](int param) { return g_selsetActive.load() == param; },
+        "Recall Selection Slot", true   // usesParam → Slot spinner in UI
+    });
+
+    // FX Learn — momentary modifier semantics via param 0/1, but kept as
+    // a plain toggle for now (no Modifier enum slot yet — Generic FX
+    // Mapping in Phase 2.5d may promote this to a real Modifier).
+    registerBuiltin("fx_learn", DescBuilder{
+        [](bool firing, bool pressed, int param) {
+            const bool toggleMode = (param == 1);
+            // TODO Phase 2.5d: route the next V-Pot / Soft-Key press into
+            // the Generic FX Learn flow while this state is true.
+            (void)firing; (void)pressed; (void)toggleMode;
+        },
+        nullptr, "FX Learn (Generic FX Mapping)", true
+    });
+
     // Modifier builtins. `param` selects mode:
     //   0 = Momentary  → modifier active while button is held
     //   1 = Toggle     → press flips active state, second press releases
@@ -5460,6 +5536,14 @@ extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(
     if (const char* v = GetExtState("ReaSixty", "forcePan");
         v && v[0] == '1') {
         g_forcePan.store(true);
+    }
+    if (const char* v = GetExtState("ReaSixty", "folderMode");
+        v && v[0] == '1') {
+        g_folderMode.store(true);
+    }
+    if (const char* v = GetExtState("ReaSixty", "showOnlySelected");
+        v && v[0] == '1') {
+        g_showOnlySelected.store(true);
     }
     // Don't restore FLIP state — start with FLIP off so the user has
     // a known-good baseline. Re-enable persistence once the FLIP code
