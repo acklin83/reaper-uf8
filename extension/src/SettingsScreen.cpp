@@ -42,11 +42,12 @@ void reasixty_setSelFollowsColor(bool follow);
 int  reasixty_ballisticMode();
 void reasixty_setBallisticMode(int mode);
 void reasixty_exportDiagnostic();  // shows confirmation dialog itself
-// Bindings save/load to user-chosen path. Both spawn a native file dialog
-// and persist via uf8::bindings::exportTo / importFrom. Returns true on
-// success, false on cancel or I/O error.
-bool reasixty_exportBindingsViaDialog();
-bool reasixty_importBindingsViaDialog();
+// Bindings save/load to user-chosen path. Both spawn a native file
+// dialog and persist via uf8::bindings::exportLayerTo / importLayerFrom
+// for the layer index passed in. Returns true on success, false on
+// cancel or I/O error.
+bool reasixty_exportLayerViaDialog(int layer);
+bool reasixty_importLayerViaDialog(int layer);
 const char* reasixty_reaperVersion();
 void reasixty_openUrl(const char* url);
 void reasixty_revealInFinder(const char* path);
@@ -1016,7 +1017,7 @@ void drawBindingEditor(ImGui_Context* ctx, int layer, ButtonId id)
 // CsiImport.cpp for the translation rules.
 namespace {
 
-void drawCsiImportSection(ImGui_Context* ctx, int defaultLayer)
+void drawCsiImportSection(ImGui_Context* ctx, int editLayer)
 {
     if (!ImGui_CollapsingHeader(ctx, "Import from CSI configuration",
                                 /*p_visible*/ nullptr, /*flags*/ nullptr)) {
@@ -1025,14 +1026,15 @@ void drawCsiImportSection(ImGui_Context* ctx, int defaultLayer)
 
     static char s_path[1024] = {0};
     static bool s_pathInited = false;
-    static int  s_targetLayer = 0;
     static bool s_clearLayerFirst = true;
     static uf8::csi_import::ImportReport s_report;
 
+    // Target layer follows the editor's layer combo on every frame —
+    // avoids a duplicate selector here and keeps "Apply" semantically
+    // tied to the layer the user currently has open.
+    const int s_targetLayer = editLayer;
+
     if (!s_pathInited) {
-        // Seed the default once. User edits stick across re-opens of the
-        // header (statics live for the session).
-        s_targetLayer = defaultLayer;
         const std::string def = uf8::csi_import::defaultSurfaceDir();
         if (!def.empty()) {
             std::strncpy(s_path, def.c_str(), sizeof(s_path) - 1);
@@ -1065,14 +1067,12 @@ void drawCsiImportSection(ImGui_Context* ctx, int defaultLayer)
     }
 
     ImGui_Spacing(ctx);
-    ImGui_Text(ctx, "Target layer:");
-    static char kLayerItems[] = "Layer 1\0Layer 2\0Layer 3\0";
     {
-        double w = 160;
-        ImGui_PushItemWidth(ctx, w);
-        ImGui_Combo(ctx, "##csi_target_layer", &s_targetLayer, kLayerItems,
-                    /*popup_max_height_in_items*/ nullptr);
-        ImGui_PopItemWidth(ctx);
+        char info[64];
+        std::snprintf(info, sizeof(info),
+                      "Target: Layer %d  (follows the editor combo above)",
+                      s_targetLayer + 1);
+        ImGui_TextDisabled(ctx, info);
     }
     ImGui_Checkbox(ctx, "Clear target layer before import",
                    &s_clearLayerFirst);
@@ -1198,26 +1198,30 @@ void SettingsScreen::drawBindings(ImGui_Context* ctx)
         resetLayerToDefaults(s_editLayer);
     }
 
-    // ---- Portable save / load + CSI import ----
-    // Status line is sticky-but-cheap: the last action's outcome shows
-    // until the next action overwrites it. Empty string = no message.
+    // ---- Portable per-layer save / load ----
+    // Both buttons act on the layer currently selected in the editor
+    // (s_editLayer). The status line is sticky-but-cheap: the last
+    // action's outcome shows until the next action overwrites it.
     static std::string s_portMsg;
+    char btnSave[40], btnLoad[40];
+    std::snprintf(btnSave, sizeof(btnSave), "Save layer %d to file…",
+                  s_editLayer + 1);
+    std::snprintf(btnLoad, sizeof(btnLoad), "Load layer %d from file…",
+                  s_editLayer + 1);
     sameLine(ctx);
-    if (ImGui_Button(ctx, "Save to file…",
-                     /*size_w*/ nullptr, /*size_h*/ nullptr)) {
-        s_portMsg = reasixty_exportBindingsViaDialog()
-            ? "Bindings exported."
+    if (ImGui_Button(ctx, btnSave, /*size_w*/ nullptr, /*size_h*/ nullptr)) {
+        s_portMsg = reasixty_exportLayerViaDialog(s_editLayer)
+            ? "Layer exported."
             : "Export cancelled or failed.";
     }
     sameLine(ctx);
-    if (ImGui_Button(ctx, "Load from file…",
-                     /*size_w*/ nullptr, /*size_h*/ nullptr)) {
-        s_portMsg = reasixty_importBindingsViaDialog()
-            ? "Bindings imported."
+    if (ImGui_Button(ctx, btnLoad, /*size_w*/ nullptr, /*size_h*/ nullptr)) {
+        s_portMsg = reasixty_importLayerViaDialog(s_editLayer)
+            ? "Layer imported."
             : "Import cancelled or failed.";
     }
     // CSI import lives in its own panel at the top of this tab
-    // (drawCsiImportSection) — no inline button needed here.
+    // (drawCsiImportSection) — its target-layer follows s_editLayer.
     if (!s_portMsg.empty()) {
         ImGui_TextDisabled(ctx, s_portMsg.c_str());
     }

@@ -4276,33 +4276,42 @@ static BrowseForSaveFile_t loadBrowseForSaveFile_()
     return p;
 }
 
-// Bindings export — Save-As dialog → write JSON. Returns false on cancel
-// or write error.
-bool reasixty_exportBindingsViaDialog()
+// Per-layer export — Save-As dialog → write the single layer as a
+// {"type":"layer", ...} JSON file. The default filename embeds the layer
+// number so users with three saved layers can tell them apart.
+bool reasixty_exportLayerViaDialog(int layer)
 {
     auto* browse = loadBrowseForSaveFile_();
     if (!browse) return false;  // SWELL not reachable (very unexpected on macOS)
     char fn[4096] = {0};
+    char defName[64];
+    std::snprintf(defName, sizeof(defName),
+                  "rea-sixty-layer-%d.json", layer + 1);
+    char title[64];
+    std::snprintf(title, sizeof(title),
+                  "Export Rea-Sixty layer %d", layer + 1);
     // SWELL extlist format mirrors GetSaveFileName: pairs of label\0pattern\0
     // terminated by an extra \0. The string literal embeds the NULs.
-    if (!browse("Export Rea-Sixty bindings", nullptr,
-                "rea-sixty-bindings.json",
+    if (!browse(title, nullptr, defName,
                 "JSON files (*.json)\0*.json\0All files (*.*)\0*.*\0\0",
                 fn, sizeof(fn))) {
         return false;
     }
-    return uf8::bindings::exportTo(fn);
+    return uf8::bindings::exportLayerTo(layer, fn);
 }
 
-// Bindings import — Open dialog → parse + activate. Returns false on
-// cancel or parse error.
-bool reasixty_importBindingsViaDialog()
+// Per-layer import — Open dialog → parse + replace named layer. Returns
+// false on cancel or parse error.
+bool reasixty_importLayerViaDialog(int layer)
 {
     char buf[4096] = {0};
-    if (!GetUserFileNameForRead(buf, "Import Rea-Sixty bindings", "json")) {
+    char title[64];
+    std::snprintf(title, sizeof(title),
+                  "Import into Rea-Sixty layer %d", layer + 1);
+    if (!GetUserFileNameForRead(buf, title, "json")) {
         return false;
     }
-    return uf8::bindings::importFrom(buf);
+    return uf8::bindings::importLayerFrom(layer, buf);
 }
 
 // File picker → register ReaScript → return the action string suitable

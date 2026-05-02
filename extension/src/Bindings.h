@@ -195,6 +195,14 @@ void save();
 bool exportTo(const std::string& path);
 bool importFrom(const std::string& path);
 
+// Per-layer variants. exportLayerTo writes a single layer wrapped in a
+// {"version":1,"type":"layer","index":N,"layer":{…}} object so the
+// importer can refuse a mismatched payload. importLayerFrom reads the
+// file, replaces the named layer in the active Config, and persists.
+// Returns false on I/O, parse, or layer-index range errors.
+bool exportLayerTo(int layer, const std::string& path);
+bool importLayerFrom(int layer, const std::string& path);
+
 const Config& get();
 
 // Active-layer accessors. Phase B exposes these so the Layer LED-pusher

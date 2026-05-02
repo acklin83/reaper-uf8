@@ -324,6 +324,78 @@ void appendEscaped(std::ostringstream& os, const std::string& s)
     os << '"';
 }
 
+// Write one layer's body — name, flags, vpot mode, bindings map. The
+// `pad` strings are the indentation prefixes for the wrapping object's
+// fields and the bindings map keys, so the same helper formats both
+// the full-Config layer-array entry (4 / 8 spaces) and the standalone
+// per-layer file (2 / 4 spaces).
+void serializeLayerBody_(const Layer& L, std::ostringstream& os,
+                         const char* fieldPad, const char* bindingPad)
+{
+    os << fieldPad << "\"name\": ";
+    appendEscaped(os, L.name);
+    os << ",\n";
+    os << fieldPad << "\"auto_when_mixer_visible\": "
+       << (L.autoWhenMixerVisible ? "true" : "false") << ",\n";
+    os << fieldPad << "\"vpot_default_mode\": ";
+    appendEscaped(os, L.vpotDefaultMode);
+    os << ",\n";
+    os << fieldPad << "\"bindings\": {";
+    bool first = true;
+    for (auto& kv : L.bindings) {
+        const char* name = toName(kv.first);
+        if (!name || !*name) continue;
+        if (!first) os << ",";
+        first = false;
+        os << "\n" << bindingPad << "\"" << name << "\": {";
+        os << "\"type\": ";       appendEscaped(os, actionTypeName(kv.second.type));
+        os << ", \"behavior\": "; appendEscaped(os, behaviorName(kv.second.behavior));
+        os << ", \"action\": ";   appendEscaped(os, kv.second.action);
+        os << ", \"param\": "     << kv.second.param;
+        os << ", \"label\": ";    appendEscaped(os, kv.second.label);
+        os << ", \"color\": ["
+           << int(kv.second.color[0]) << ", "
+           << int(kv.second.color[1]) << ", "
+           << int(kv.second.color[2]) << "]";
+        os << ", \"brightness\": ";
+        appendEscaped(os, brightnessName(kv.second.brightness));
+        os << ", \"inactive_color\": ["
+           << int(kv.second.inactiveColor[0]) << ", "
+           << int(kv.second.inactiveColor[1]) << ", "
+           << int(kv.second.inactiveColor[2]) << "]";
+        os << ", \"inactive_brightness\": ";
+        appendEscaped(os, brightnessName(kv.second.inactiveBrightness));
+        if (kv.second.type == ActionType::Midi) {
+            os << ", \"midi\": {";
+            os << "\"device\": ";   appendEscaped(os, kv.second.midiDevice);
+            os << ", \"channel\": " << kv.second.midiChannel;
+            os << ", \"msg\": "     << kv.second.midiMsgType;
+            os << ", \"d1\": "      << kv.second.midiData1;
+            os << ", \"d2\": "      << kv.second.midiData2;
+            os << "}";
+        }
+        if (kv.second.hasLongPress) {
+            os << ", \"long_press\": {";
+            os << "\"type\": ";    appendEscaped(os, actionTypeName(kv.second.longPressType));
+            os << ", \"action\": "; appendEscaped(os, kv.second.longPressAction);
+            os << ", \"param\": "  << kv.second.longPressParam;
+            if (kv.second.longPressType == ActionType::Midi) {
+                os << ", \"midi\": {";
+                os << "\"device\": ";   appendEscaped(os, kv.second.longPressMidiDevice);
+                os << ", \"channel\": " << kv.second.longPressMidiChannel;
+                os << ", \"msg\": "     << kv.second.longPressMidiMsgType;
+                os << ", \"d1\": "      << kv.second.longPressMidiData1;
+                os << ", \"d2\": "      << kv.second.longPressMidiData2;
+                os << "}";
+            }
+            os << "}";
+        }
+        os << "}";
+    }
+    if (!first) os << "\n" << fieldPad;
+    os << "}\n";
+}
+
 std::string serialize(const Config& c)
 {
     std::ostringstream os;
@@ -332,73 +404,28 @@ std::string serialize(const Config& c)
     os << "  \"active_layer\": " << c.activeLayer << ",\n";
     os << "  \"layers\": [\n";
     for (int i = 0; i < 3; ++i) {
-        const auto& L = c.layers[i];
         os << "    {\n";
-        os << "      \"name\": ";
-        appendEscaped(os, L.name);
-        os << ",\n";
-        os << "      \"auto_when_mixer_visible\": "
-           << (L.autoWhenMixerVisible ? "true" : "false") << ",\n";
-        os << "      \"vpot_default_mode\": ";
-        appendEscaped(os, L.vpotDefaultMode);
-        os << ",\n";
-        os << "      \"bindings\": {";
-        bool first = true;
-        for (auto& kv : L.bindings) {
-            const char* name = toName(kv.first);
-            if (!name || !*name) continue;
-            if (!first) os << ",";
-            first = false;
-            os << "\n        \"" << name << "\": {";
-            os << "\"type\": ";       appendEscaped(os, actionTypeName(kv.second.type));
-            os << ", \"behavior\": "; appendEscaped(os, behaviorName(kv.second.behavior));
-            os << ", \"action\": ";   appendEscaped(os, kv.second.action);
-            os << ", \"param\": "     << kv.second.param;
-            os << ", \"label\": ";    appendEscaped(os, kv.second.label);
-            os << ", \"color\": ["
-               << int(kv.second.color[0]) << ", "
-               << int(kv.second.color[1]) << ", "
-               << int(kv.second.color[2]) << "]";
-            os << ", \"brightness\": ";
-            appendEscaped(os, brightnessName(kv.second.brightness));
-            os << ", \"inactive_color\": ["
-               << int(kv.second.inactiveColor[0]) << ", "
-               << int(kv.second.inactiveColor[1]) << ", "
-               << int(kv.second.inactiveColor[2]) << "]";
-            os << ", \"inactive_brightness\": ";
-            appendEscaped(os, brightnessName(kv.second.inactiveBrightness));
-            if (kv.second.type == ActionType::Midi) {
-                os << ", \"midi\": {";
-                os << "\"device\": ";   appendEscaped(os, kv.second.midiDevice);
-                os << ", \"channel\": " << kv.second.midiChannel;
-                os << ", \"msg\": "     << kv.second.midiMsgType;
-                os << ", \"d1\": "      << kv.second.midiData1;
-                os << ", \"d2\": "      << kv.second.midiData2;
-                os << "}";
-            }
-            if (kv.second.hasLongPress) {
-                os << ", \"long_press\": {";
-                os << "\"type\": ";    appendEscaped(os, actionTypeName(kv.second.longPressType));
-                os << ", \"action\": "; appendEscaped(os, kv.second.longPressAction);
-                os << ", \"param\": "  << kv.second.longPressParam;
-                if (kv.second.longPressType == ActionType::Midi) {
-                    os << ", \"midi\": {";
-                    os << "\"device\": ";   appendEscaped(os, kv.second.longPressMidiDevice);
-                    os << ", \"channel\": " << kv.second.longPressMidiChannel;
-                    os << ", \"msg\": "     << kv.second.longPressMidiMsgType;
-                    os << ", \"d1\": "      << kv.second.longPressMidiData1;
-                    os << ", \"d2\": "      << kv.second.longPressMidiData2;
-                    os << "}";
-                }
-                os << "}";
-            }
-            os << "}";
-        }
-        if (!first) os << "\n      ";
-        os << "}\n";
+        serializeLayerBody_(c.layers[i], os, "      ", "        ");
         os << "    }" << (i < 2 ? "," : "") << "\n";
     }
     os << "  ]\n";
+    os << "}\n";
+    return os.str();
+}
+
+// Standalone per-layer envelope. The "type" / "index" fields let
+// importLayerFrom verify the file before applying it (and let users
+// recognise the file at a glance).
+std::string serializeOneLayer_(const Layer& L, int idx)
+{
+    std::ostringstream os;
+    os << "{\n";
+    os << "  \"version\": 1,\n";
+    os << "  \"type\": \"layer\",\n";
+    os << "  \"index\": " << idx << ",\n";
+    os << "  \"layer\": {\n";
+    serializeLayerBody_(L, os, "    ", "      ");
+    os << "  }\n";
     os << "}\n";
     return os.str();
 }
@@ -683,6 +710,48 @@ bool importFrom(const std::string& path)
     {
         std::lock_guard<std::mutex> lk(g_cfgMutex);
         g_cfg = std::move(tmp);
+        ensureConfigDir_();
+        writeFile_(configPath_(), serialize(g_cfg));
+    }
+    return true;
+}
+
+bool exportLayerTo(int layer, const std::string& path)
+{
+    if (layer < 0 || layer > 2) return false;
+    std::lock_guard<std::mutex> lk(g_cfgMutex);
+    return writeFile_(path, serializeOneLayer_(g_cfg.layers[layer], layer));
+}
+
+bool importLayerFrom(int layer, const std::string& path)
+{
+    if (layer < 0 || layer > 2) return false;
+    std::string contents;
+    if (!readFile_(path, contents) || contents.empty()) return false;
+
+    wdl_json_parser p;
+    wdl_json_element* root = p.parse(contents.c_str(),
+                                     static_cast<int>(contents.size()));
+    if (!root || !root->is_object()) return false;
+
+    // Accept both the wrapped {"type":"layer", ...} form and a bare layer
+    // object (no "type" field) for forward-compat with hand-edited files.
+    wdl_json_element* layerObj = nullptr;
+    if (auto* t = root->get_item_by_name("type"); t) {
+        const char* ts = t->get_string_value();
+        if (!ts || std::strcmp(ts, "layer") != 0) return false;
+        layerObj = root->get_item_by_name("layer");
+    } else if (root->get_item_by_name("name")) {
+        layerObj = root;  // bare layer
+    }
+    if (!layerObj || !layerObj->is_object()) return false;
+
+    Layer tmp;
+    if (!parseLayer_(layerObj, tmp)) return false;
+
+    {
+        std::lock_guard<std::mutex> lk(g_cfgMutex);
+        g_cfg.layers[layer] = std::move(tmp);
         ensureConfigDir_();
         writeFile_(configPath_(), serialize(g_cfg));
     }
