@@ -60,9 +60,56 @@ Plugin-Modifier (`ssl_strip_mode_toggle` / `g_pluginFaderMode`) routet Fader auf
 
 **Fallback wenn Fader/Pan nicht gelernt:** `findSlotByLinkIdx` returnt nullptr → Modifier-Mode-Code fällt auf REAPER-Track-Volume / -Pan zurück. Akzeptables Verhalten für Plugins ohne sinnvolle Master-Fader (Multiband-Comps, EQs ohne Output-Stage, …).
 
-### Learn-Flow (UI)
+### Learn-Flow (UI) — primär: visuelles Schematic
 
-Das Mixer-Window beheimatet den Learn-Wizard. Reihenfolge der Schritte:
+**Wir haben das richtige Werkzeug schon: `drawUf8Vector`** ([SettingsScreen.cpp:353](extension/src/SettingsScreen.cpp:353)) ist ein 1000×490 Vector-Canvas mit Hit-Test-Patterns (`drawHwBtn`) und etabliertem Hover/Select-Verhalten. Dasselbe Toolset ergibt eine **virtuelle Channel-Strip-Topologie** im Mixer-Window — visuell wie SSL 360 Link's Plugin-GUI, aber direkt in unserem ImGui-Window statt als VST3.
+
+#### Layout pro Domain
+
+**Channel-Strip-Schematic** (für `Domain::ChannelStrip`):
+- Input-Section: Input Trim, Phase, Mic/Drive, Pre, Impedance — als kleine Pads links.
+- EQ-Section: vier Bänder (HF / HMF / LMF / LF) mit je Gain / Freq / Q als Knob-Trio. HF/LF Shelf-Toggle als kleiner Pad oben am Knob.
+- Filter-Section: HPF / LPF Cutoff + zugehörige Routing-Toggles.
+- Dynamics-Section: Comp + Gate jeweils als Block (Threshold / Ratio / Attack / Release / Range / Hold), plus External-S/C / Filter-Routing-Pads.
+- Output-Section: Width, Pan, Output Trim, **Fader Level** (gross hervorgehoben, bottom-right wie auf einem echten Strip).
+- Authoritative Slot-Liste aus [docs/ssl-native-params/VST3__SSL_360_Link_(SSL).md](docs/ssl-native-params/VST3__SSL_360_Link_(SSL).md).
+
+**Bus-Comp-Schematic** (für `Domain::BusComp`):
+- Eigene kleinere Topologie — Threshold / Ratio / Attack / Release / Make-up / Mix / Sidechain-HPF / etc.
+- Layout-Vorlage: [docs/ssl-native-params/VST3__SSL_360_Link_Bus_Compressor_(SSL).md](docs/ssl-native-params/VST3__SSL_360_Link_Bus_Compressor_(SSL).md).
+
+**UC1-Schematic** (analog, separater Tab im Learn-UI):
+- UC1 hat dedicated Hardware-Knöpfe für Channel-Strip-Topologie — die Schematic zeigt den **physischen** UC1-Layout. Für FX Learn weniger relevant (UC1 mappt automatisch was die Domain-Map liefert), aber sinnvoll für Verification-View: "welche meiner gelernten Slots erreicht UC1?".
+
+#### Slot-Status-Anzeige
+
+Jeder Slot im Schematic wird in einem von drei Zuständen gerendert:
+
+- **Unmapped** (grau, gestrichelter Border): noch nichts gelernt für diesen Slot auf dem aktuell editierten Plugin.
+- **Mapped** (grün, voller Border, kleiner Param-Index/Name daneben): `vst3Param` ist gebunden.
+- **Listening** (gelb pulsierend): aktiv im Lern-Modus — der nächste `GetLastTouchedFX` füttert diesen Slot.
+
+Inverted-Flag als kleiner "↺"-Indikator am Slot, Rechts-Klick toggled.
+
+#### Interaktion
+
+- **Linksklick auf Slot** → Slot in "Listening" schalten. Nur ein Slot listening at a time. Nächster Plugin-Param-Wackel fängt → bindet → grün.
+- **Cmd+Klick / Bulk-Mode** → "Sequential Listen": nach jedem Bind springt der Listen-Status automatisch zum nächsten unmapped Slot in der Topologie. Erlaubt Quick-Mass-Mapping (Slot 1 wackeln, Slot 2 wackeln, …) ohne zwischen jedem in die UI zurückzuwechseln.
+- **Rechtsklick** → Inverted-Flag toggle / Mapping löschen / Param-Re-Pick.
+- **ESC** → Listening abbrechen.
+- **Plugin-Selector oben** im Schematic-Header: Dropdown der FX-Chain auf dem focused Track plus Domain-Radio (CS/BC). Wechselt die UserPluginMap, an der gerade gearbeitet wird.
+
+#### Identität-Footer
+
+Unter dem Schematic ein kleiner Footer mit:
+- `match`-Substring (auto-vorbelegt vom FX-Namen, editierbar).
+- `displayShort` 4-char Feld (auto-vorbelegt vom getrimmten FX-Namen).
+- Checkbox "Make this the default for CS / BC".
+- Save-Button (oder live-save bei jedem Mapping-Edit, wenn die UX flüssig genug ist).
+
+### Learn-Flow (UI) — sekundär: Wizard
+
+Wenn ein User explizit nach Klick-Through fragt (zugänglicher für Anfänger): Reihenfolge der Schritte:
 
 **1. Quelle wählen**
 - User aktiviert `fx_learn` (Builtin existiert schon).
