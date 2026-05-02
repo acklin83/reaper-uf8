@@ -1053,7 +1053,8 @@ void drawCsiImportSection(ImGui_Context* ctx, int defaultLayer)
         ImGui_PushItemWidth(ctx, w);
         ImGui_InputTextWithHint(ctx, "##csi_path",
             "e.g. ~/Library/Application Support/REAPER/CSI/Surfaces/SSLUF8",
-            s_path, sizeof(s_path), /*flags*/ nullptr);
+            s_path, sizeof(s_path),
+            /*flags*/ nullptr, /*callback*/ nullptr);
         ImGui_PopItemWidth(ctx);
     }
     if (ImGui_Button(ctx, "Reset to default path",
