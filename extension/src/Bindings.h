@@ -72,6 +72,12 @@ ButtonId fromName(const char* name);
 enum class ActionType : uint8_t { Noop, Reaper, Keyboard, Builtin, Midi };
 enum class Behavior   : uint8_t { Momentary, Toggle, Hold };
 
+// LED brightness for the button while idle (when not lit by an active
+// state like Toggle=on or Hold=down). Mirrors GlobalLedState in
+// Protocol.h but lives here so the editor can persist a user choice
+// independent of which device class the button lives on.
+enum class Brightness : uint8_t { Off, Dim, Bright };
+
 // MIDI message presets — the UI surfaces these as a combo so users
 // don't have to remember status-byte hex.
 enum class MidiMsgType : uint8_t {
@@ -87,7 +93,19 @@ struct Binding {
     std::string action;        // builtin name / REAPER action id / keyboard chord
     int         param    = 0;
     std::string label;
-    uint8_t     color[3] = {0, 0, 0};
+
+    // LED appearance — split active / inactive state.
+    //   Active   = the "engaged" visual: Toggle=on, Hold=held, Momentary
+    //              while-pressed. Defaults to white@Bright.
+    //   Inactive = the idle visual. Defaults to (active colour) @ Dim,
+    //              matching SSL 360°'s baseline where unlit buttons glow
+    //              dim so they remain visible.
+    // Colours are 24-bit RGB; emitter quantises to the UF8 10-colour
+    // palette (see Protocol.cpp selPaletteRgb).
+    uint8_t     color[3]            = {0xFF, 0xFF, 0xFF};
+    Brightness  brightness          = Brightness::Bright;
+    uint8_t     inactiveColor[3]    = {0xFF, 0xFF, 0xFF};
+    Brightness  inactiveBrightness  = Brightness::Dim;
 
     // MIDI command fields — read only when `type == Midi`.
     //   midiDevice  output device name (REAPER GetMIDIOutputName, "" = all)
@@ -168,6 +186,14 @@ void load();
 
 // Write the current Config to disk.
 void save();
+
+// Portable export / import — read & write the same JSON as the on-disk
+// config but to an arbitrary path so users can move bindings between
+// machines. exportTo writes the current Config; importFrom replaces the
+// active Config with the contents of `path` (and persists to the
+// regular configPath). Both return false on I/O / parse errors.
+bool exportTo(const std::string& path);
+bool importFrom(const std::string& path);
 
 const Config& get();
 

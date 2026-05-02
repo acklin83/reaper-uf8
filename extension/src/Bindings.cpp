@@ -167,6 +167,24 @@ ActionType actionTypeFromName(const char* s)
     return ActionType::Noop;
 }
 
+const char* brightnessName(Brightness b)
+{
+    switch (b) {
+        case Brightness::Off:    return "off";
+        case Brightness::Dim:    return "dim";
+        case Brightness::Bright: return "bright";
+    }
+    return "bright";
+}
+
+Brightness brightnessFromName(const char* s)
+{
+    if (!s) return Brightness::Bright;
+    if (std::strcmp(s, "off") == 0) return Brightness::Off;
+    if (std::strcmp(s, "dim") == 0) return Brightness::Dim;
+    return Brightness::Bright;
+}
+
 // ---- Module state ---------------------------------------------------------
 
 std::mutex                                 g_cfgMutex;
@@ -242,21 +260,23 @@ void seedFactoryDefaults_(Config& c)
     L1[ButtonId::ChannelPush] = mkBuiltin("encoder_nav",   Behavior::Momentary, "");
 
     // Automation row — one builtin per mode (no magic params in JSON).
+    // Colours mirror the hardware LED table (Protocol.cpp kUf8GlobalLedTable)
+    // so the Bindings editor displays the same swatch the device shows.
     L1[ButtonId::AutoOff]   = mkBuiltin("auto_off",   Behavior::Momentary, "OFF");
-    L1[ButtonId::AutoRead]  = mkBuiltin("auto_read",  Behavior::Momentary, "READ");
-    L1[ButtonId::AutoWrite] = mkBuiltin("auto_write", Behavior::Momentary, "WRITE");
-    L1[ButtonId::AutoTrim]  = mkBuiltin("auto_trim",  Behavior::Momentary, "TRIM");
-    L1[ButtonId::AutoLatch] = mkBuiltin("auto_latch", Behavior::Momentary, "LATCH");
-    L1[ButtonId::AutoTouch] = mkBuiltin("auto_touch", Behavior::Momentary, "TOUCH");
+    L1[ButtonId::AutoRead]  = mkBuiltin("auto_read",  Behavior::Momentary, "READ",    0,   255,   0);  // green
+    L1[ButtonId::AutoWrite] = mkBuiltin("auto_write", Behavior::Momentary, "WRITE", 255,     0,   0);  // red
+    L1[ButtonId::AutoTrim]  = mkBuiltin("auto_trim",  Behavior::Momentary, "TRIM",  255,   128,   0);  // orange
+    L1[ButtonId::AutoLatch] = mkBuiltin("auto_latch", Behavior::Momentary, "LATCH", 255,     0,   0);  // red
+    L1[ButtonId::AutoTouch] = mkBuiltin("auto_touch", Behavior::Momentary, "TOUCH", 255,   255,   0);  // yellow
 
     // Zoom pad — bundled builtins (REAPER action + LED feedback). Phase B
     // collapses these into ActionType::Reaper once per-binding LED config
     // lands.
-    L1[ButtonId::ZoomUp]     = mkBuiltin("zoom_up",     Behavior::Momentary, "ZOOM UP");
-    L1[ButtonId::ZoomDown]   = mkBuiltin("zoom_down",   Behavior::Momentary, "ZOOM DOWN");
+    L1[ButtonId::ZoomUp]     = mkBuiltin("zoom_up",     Behavior::Momentary, "ZOOM UP",      0, 255,   0);  // green
+    L1[ButtonId::ZoomDown]   = mkBuiltin("zoom_down",   Behavior::Momentary, "ZOOM DOWN",  255, 255,   0);  // yellow
     L1[ButtonId::ZoomLeft]   = mkBuiltin("zoom_left",   Behavior::Momentary, "ZOOM LEFT");
     L1[ButtonId::ZoomRight]  = mkBuiltin("zoom_right",  Behavior::Momentary, "ZOOM RIGHT");
-    L1[ButtonId::ZoomCenter] = mkBuiltin("zoom_center", Behavior::Momentary, "FIT");
+    L1[ButtonId::ZoomCenter] = mkBuiltin("zoom_center", Behavior::Momentary, "FIT",        255,   0,   0);  // red
 
     // Mode toggles.
     L1[ButtonId::Flip]      = mkBuiltin("flip",                  Behavior::Toggle,    "FLIP");
@@ -339,6 +359,14 @@ std::string serialize(const Config& c)
                << int(kv.second.color[0]) << ", "
                << int(kv.second.color[1]) << ", "
                << int(kv.second.color[2]) << "]";
+            os << ", \"brightness\": ";
+            appendEscaped(os, brightnessName(kv.second.brightness));
+            os << ", \"inactive_color\": ["
+               << int(kv.second.inactiveColor[0]) << ", "
+               << int(kv.second.inactiveColor[1]) << ", "
+               << int(kv.second.inactiveColor[2]) << "]";
+            os << ", \"inactive_brightness\": ";
+            appendEscaped(os, brightnessName(kv.second.inactiveBrightness));
             if (kv.second.type == ActionType::Midi) {
                 os << ", \"midi\": {";
                 os << "\"device\": ";   appendEscaped(os, kv.second.midiDevice);
@@ -414,6 +442,26 @@ bool parseLayer_(wdl_json_element* lobj, Layer& out)
                 }
             }
         }
+        if (auto* v = be->get_item_by_name("brightness"))
+            bd.brightness = brightnessFromName(v->get_string_value());
+        if (auto* v = be->get_item_by_name("inactive_color"); v && v->is_array()) {
+            for (int k = 0; k < 3 && k < v->m_array->GetSize(); ++k) {
+                if (auto* s = v->enum_item(k)->get_string_value(true)) {
+                    int x = std::atoi(s);
+                    if (x < 0) x = 0; else if (x > 255) x = 255;
+                    bd.inactiveColor[k] = static_cast<uint8_t>(x);
+                }
+            }
+        } else {
+            // Back-compat: pre-split configs only carried `color`. Mirror it
+            // into the inactive colour so quantising into the same palette
+            // entry keeps the old visual identity.
+            bd.inactiveColor[0] = bd.color[0];
+            bd.inactiveColor[1] = bd.color[1];
+            bd.inactiveColor[2] = bd.color[2];
+        }
+        if (auto* v = be->get_item_by_name("inactive_brightness"))
+            bd.inactiveBrightness = brightnessFromName(v->get_string_value());
         // MIDI sub-object — only meaningful when type == Midi but we
         // parse it whenever present so the user can switch types in the
         // UI without losing previously-entered MIDI values.
@@ -450,6 +498,59 @@ bool parseLayer_(wdl_json_element* lobj, Layer& out)
                     if (auto* s = v->get_string_value(true)) bd.longPressMidiData1 = std::atoi(s);
                 if (auto* v = mi->get_item_by_name("d2"))
                     if (auto* s = v->get_string_value(true)) bd.longPressMidiData2 = std::atoi(s);
+            }
+        }
+        // Migration: pre-2026-05-02 configs were seeded with white for ALL
+        // builtins. The hardware actually drives Auto*/Zoom* in colour. If
+        // the user never overrode the colour (still pure white), patch in
+        // the hardware default so the editor's swatch matches reality.
+        // Skips bindings the user has explicitly customised (any non-white
+        // colour is treated as user intent).
+        if (bd.type == ActionType::Builtin
+            && bd.color[0] == 0xFF && bd.color[1] == 0xFF && bd.color[2] == 0xFF) {
+            struct Patch { const char* action; uint8_t r, g, b; };
+            static constexpr Patch kPatches[] = {
+                {"auto_read",    0,   255,   0},
+                {"auto_write",   255, 0,     0},
+                {"auto_trim",    255, 128,   0},
+                {"auto_latch",   255, 0,     0},
+                {"auto_touch",   255, 255,   0},
+                {"zoom_up",      0,   255,   0},
+                {"zoom_down",    255, 255,   0},
+                {"zoom_center",  255, 0,     0},
+            };
+            uint8_t pr = 0xFF, pg = 0xFF, pb = 0xFF;
+            bool patched = false;
+            for (const auto& p : kPatches) {
+                if (bd.action == p.action) {
+                    pr = p.r; pg = p.g; pb = p.b;
+                    patched = true;
+                    break;
+                }
+            }
+            // Older configs bound the automation row via the parameterised
+            // `automation_mode` builtin instead of the per-mode auto_* set.
+            // Map (button, param) → hardware colour. Param 0 is shared by
+            // OFF and TRIM in REAPER's mode enum, so the ButtonId is the
+            // tie-breaker. Param 4 = Latch, 5 = Latch Preview (both red).
+            if (!patched && bd.action == "automation_mode") {
+                switch (bd.param) {
+                    case 1: pr = 0;   pg = 255; pb = 0;   patched = true; break; // Read
+                    case 2: pr = 255; pg = 255; pb = 0;   patched = true; break; // Touch
+                    case 3: pr = 255; pg = 0;   pb = 0;   patched = true; break; // Write
+                    case 4:
+                    case 5: pr = 255; pg = 0;   pb = 0;   patched = true; break; // Latch
+                    case 0:
+                        if (bid == ButtonId::AutoTrim) {
+                            pr = 255; pg = 128; pb = 0; patched = true; // orange
+                        }
+                        // AutoOff at param 0 stays white.
+                        break;
+                }
+            }
+            if (patched) {
+                bd.color[0]         = pr; bd.color[1]         = pg; bd.color[2]         = pb;
+                bd.inactiveColor[0] = pr; bd.inactiveColor[1] = pg; bd.inactiveColor[2] = pb;
             }
         }
         out.bindings[bid] = std::move(bd);
@@ -562,6 +663,30 @@ void save()
     std::lock_guard<std::mutex> lk(g_cfgMutex);
     ensureConfigDir_();
     writeFile_(configPath_(), serialize(g_cfg));
+}
+
+bool exportTo(const std::string& path)
+{
+    std::lock_guard<std::mutex> lk(g_cfgMutex);
+    return writeFile_(path, serialize(g_cfg));
+}
+
+bool importFrom(const std::string& path)
+{
+    std::string contents;
+    if (!readFile_(path, contents) || contents.empty()) return false;
+
+    Config tmp;
+    seedFactoryDefaults_(tmp);
+    if (!tryParse_(contents, tmp)) return false;
+
+    {
+        std::lock_guard<std::mutex> lk(g_cfgMutex);
+        g_cfg = std::move(tmp);
+        ensureConfigDir_();
+        writeFile_(configPath_(), serialize(g_cfg));
+    }
+    return true;
 }
 
 const Config& get()

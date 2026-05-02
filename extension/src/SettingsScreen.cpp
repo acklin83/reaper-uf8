@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "Bindings.h"
+#include "Protocol.h"
 #include "reaper_imgui_functions.h"
 
 // Forward declarations of accessors defined in main.cpp. Same pattern as
@@ -40,6 +41,16 @@ void reasixty_setSelFollowsColor(bool follow);
 int  reasixty_ballisticMode();
 void reasixty_setBallisticMode(int mode);
 void reasixty_exportDiagnostic();  // shows confirmation dialog itself
+// Bindings save/load to user-chosen path. Both spawn a native file dialog
+// and persist via uf8::bindings::exportTo / importFrom. Returns true on
+// success, false on cancel or I/O error.
+bool reasixty_exportBindingsViaDialog();
+bool reasixty_importBindingsViaDialog();
+// CSI import — parses the user's CSI Surfaces/{SSLUF8|UF8}/Zones/*.zon
+// configs and overlays the resulting bindings onto the active layer.
+// Returns the number of bindings imported, or -1 on dialog-cancel /
+// parse error. Implemented in main.cpp once the CSI branch is merged.
+int  reasixty_importFromCsi();
 const char* reasixty_reaperVersion();
 void reasixty_openUrl(const char* url);
 void reasixty_revealInFinder(const char* path);
@@ -894,6 +905,100 @@ void drawBindingEditor(ImGui_Context* ctx, int layer, ButtonId id)
 
     ImGui_Spacing(ctx);
     ImGui_Separator(ctx);
+
+    // ---- LED appearance ----
+    // Two independent rows (Active / Inactive). Each row shows a single
+    // colour swatch displaying the current value; clicking it opens a
+    // popup with the 10 hardware-renderable colours from cap33 (SEL
+    // DAW-Colour palette: red, orange, yellow, green, cyan, blue,
+    // purple, magenta, pink, white). Brightness sits next to the
+    // swatch as Off/Dim/Bright radios.
+    //   Active   = lit-state (Toggle on / Hold held / Momentary press)
+    //   Inactive = idle state
+    ImGui_Text(ctx, "LED");
+    ImGui_Spacing(ctx);
+
+    auto drawLedRow = [&](const char* label,
+                          uint8_t (&rgb)[3],
+                          Brightness& bri,
+                          const char* idTag) {
+        ImGui_Text(ctx, label);
+        ImGui_SameLine(ctx, nullptr, nullptr);
+        const double labelColEnd = 80.0;
+        ImGui_SetCursorPosX(ctx, labelColEnd);
+
+        // Single swatch reflecting the currently-selected colour. Click
+        // opens the palette popup. Slightly wider than tall so it reads
+        // as a "field" rather than a single-cell pick.
+        const int curRgba =
+            (int(rgb[0]) << 24) |
+            (int(rgb[1]) << 16) |
+            (int(rgb[2]) <<  8) | 0xFF;
+        char btnId[32];
+        std::snprintf(btnId, sizeof(btnId), "##cur_%s", idTag);
+        int btnFlags = 0;
+        double bw = 56.0, bh = 22.0;
+        if (ImGui_ColorButton(ctx, btnId, curRgba, &btnFlags, &bw, &bh)) {
+            char popId[32];
+            std::snprintf(popId, sizeof(popId), "palette_%s", idTag);
+            ImGui_OpenPopup(ctx, popId, nullptr);
+        }
+
+        // Palette popup — 10 swatches in a 5x2 grid. Clicking a swatch
+        // commits the colour and closes the popup.
+        char popId[32];
+        std::snprintf(popId, sizeof(popId), "palette_%s", idTag);
+        if (ImGui_BeginPopup(ctx, popId, nullptr)) {
+            int paletteCount = 0;
+            const uf8::PaletteRgb* palette = uf8::selPaletteRgb(&paletteCount);
+            const double sw = 26.0;
+            const int perRow = 5;
+            for (int i = 0; i < paletteCount; ++i) {
+                const auto& p = palette[i];
+                const int packed =
+                    (int(p.r) << 24) |
+                    (int(p.g) << 16) |
+                    (int(p.b) <<  8) | 0xFF;
+                char swId[32];
+                std::snprintf(swId, sizeof(swId), "##pp_%s_%d", idTag, i);
+                int swFlags = 0;
+                double w = sw, h = sw;
+                if (ImGui_ColorButton(ctx, swId, packed, &swFlags, &w, &h)) {
+                    rgb[0] = p.r;
+                    rgb[1] = p.g;
+                    rgb[2] = p.b;
+                    dirty = true;
+                    ImGui_CloseCurrentPopup(ctx);
+                }
+                if ((i % perRow) != (perRow - 1) && i != paletteCount - 1)
+                    ImGui_SameLine(ctx, nullptr, nullptr);
+            }
+            ImGui_EndPopup(ctx);
+        }
+
+        // Brightness radios — same row, after the swatch.
+        ImGui_SameLine(ctx, nullptr, nullptr);
+        ImGui_Text(ctx, "  ");
+        ImGui_SameLine(ctx, nullptr, nullptr);
+        const char* names[] = {"Off", "Dim", "Bright"};
+        for (int i = 0; i < 3; ++i) {
+            char idbuf[32];
+            std::snprintf(idbuf, sizeof(idbuf), "%s##b_%s_%d",
+                          names[i], idTag, i);
+            if (ImGui_RadioButton(ctx, idbuf,
+                                  static_cast<int>(bri) == i)) {
+                bri = static_cast<Brightness>(i);
+                dirty = true;
+            }
+            if (i < 2) ImGui_SameLine(ctx, nullptr, nullptr);
+        }
+    };
+
+    drawLedRow("Active",   bd.color,         bd.brightness,         "act");
+    drawLedRow("Inactive", bd.inactiveColor, bd.inactiveBrightness, "ina");
+
+    ImGui_Spacing(ctx);
+    ImGui_Separator(ctx);
     if (ImGui_Button(ctx, "Clear binding (Do nothing)",
                      /*size_w*/ nullptr, /*size_h*/ nullptr)) {
         bd = Binding{};   // reset to default (Noop, Momentary)
@@ -962,6 +1067,39 @@ void SettingsScreen::drawBindings(ImGui_Context* ctx)
     if (ImGui_Button(ctx, "Reset this layer to factory defaults",
                      /*size_w*/ nullptr, /*size_h*/ nullptr)) {
         resetLayerToDefaults(s_editLayer);
+    }
+
+    // ---- Portable save / load + CSI import ----
+    // Status line is sticky-but-cheap: the last action's outcome shows
+    // until the next action overwrites it. Empty string = no message.
+    static std::string s_portMsg;
+    sameLine(ctx);
+    if (ImGui_Button(ctx, "Save to file…",
+                     /*size_w*/ nullptr, /*size_h*/ nullptr)) {
+        s_portMsg = reasixty_exportBindingsViaDialog()
+            ? "Bindings exported."
+            : "Export cancelled or failed.";
+    }
+    sameLine(ctx);
+    if (ImGui_Button(ctx, "Load from file…",
+                     /*size_w*/ nullptr, /*size_h*/ nullptr)) {
+        s_portMsg = reasixty_importBindingsViaDialog()
+            ? "Bindings imported."
+            : "Import cancelled or failed.";
+    }
+    sameLine(ctx);
+    if (ImGui_Button(ctx, "Import from CSI…",
+                     /*size_w*/ nullptr, /*size_h*/ nullptr)) {
+        const int n = reasixty_importFromCsi();
+        char buf[64];
+        if (n > 0)      std::snprintf(buf, sizeof(buf), "Imported %d binding%s from CSI.",
+                                       n, n == 1 ? "" : "s");
+        else if (n == 0) std::snprintf(buf, sizeof(buf), "CSI parsed but produced no bindings.");
+        else            std::snprintf(buf, sizeof(buf), "CSI import cancelled or failed.");
+        s_portMsg = buf;
+    }
+    if (!s_portMsg.empty()) {
+        ImGui_TextDisabled(ctx, s_portMsg.c_str());
     }
 
     ImGui_Separator(ctx);

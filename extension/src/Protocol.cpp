@@ -186,7 +186,7 @@ std::vector<uint8_t> buildLedCommand(uint8_t ledId, bool on)
 }
 
 // LED colour constants. Bright = lit, dim = unlit. cap31 (yellow/orange/
-// white) and cap33 (12-colour DAW palette) supply the byte pairs.
+// white) and cap33 (10-colour DAW palette) supply the byte pairs.
 LedColour ledColourYellow() { return {0xEF, 0xF0, 0x11, 0xF0}; }
 LedColour ledColourOrange() { return {0x3F, 0xF0, 0x12, 0xF0}; }
 LedColour ledColourRed()    { return {0x0F, 0xF0, 0x01, 0xF0}; }
@@ -203,10 +203,12 @@ LedColour ledColourClassDefault(LedClass cls)
 }
 
 namespace {
-// SEL DAW-Colour palette anchors — captured in cap33 by sweeping 12
-// REAPER track-colours through SSL360's quantizer.  Ordered so that the
-// nearest-match function below picks the visually-closest entry by
-// Euclidean RGB distance.
+// SEL DAW-Colour palette anchors — captured in cap33 by sweeping
+// REAPER track-colours through SSL360's quantizer. The hardware
+// renders these 10 distinct colours: red, orange, yellow, green, cyan,
+// blue, purple, magenta, pink, white. Ordered so that the nearest-match
+// function below picks the visually-closest entry by Euclidean RGB
+// distance.
 struct PaletteEntry {
     uint8_t r, g, b;
     LedColour bytes;
@@ -225,6 +227,17 @@ constexpr PaletteEntry kSelPalette[] = {
     {255, 255, 255, {0xFF, 0xFF, 0x11, 0xF1}}, // white
 };
 } // namespace
+
+const PaletteRgb* selPaletteRgb(int* count)
+{
+    static const PaletteRgb kRgb[] = {
+        {255,   0,   0}, {255, 128,   0}, {255, 255,   0}, {  0, 255,   0},
+        {  0, 255, 255}, {  0,   0, 255}, {128,   0, 255}, {255,   0, 255},
+        {255,   0, 128}, {255, 255, 255},
+    };
+    if (count) *count = static_cast<int>(sizeof(kRgb) / sizeof(kRgb[0]));
+    return kRgb;
+}
 
 LedColour ledColourForTrackRgb(uint32_t rgb)
 {

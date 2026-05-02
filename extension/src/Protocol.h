@@ -163,6 +163,13 @@ LedColour ledColourForTrackRgb(uint32_t rgb);
 // Default colour for a class when no track-colour override is requested.
 LedColour ledColourClassDefault(LedClass cls);
 
+// Per-strip LED palette anchors (cap33 SEL DAW-Colour sweep) — the
+// 24-bit RGB values that the UF8 hardware can faithfully render. Used
+// by the Bindings editor to constrain its colour picker to the swatches
+// the device actually supports. Returns count via the out-param.
+struct PaletteRgb { uint8_t r, g, b; };
+const PaletteRgb* selPaletteRgb(int* count);
+
 // Build the FF 38 + FF 39 frame pair as TWO separate 8-byte frames.
 // SSL360's captures show these always traverse the bus as independent USB
 // transfers — combining them into one transfer makes the UF8 firmware

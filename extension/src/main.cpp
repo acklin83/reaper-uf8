@@ -30,6 +30,7 @@
 #include <string>
 
 #include <sys/stat.h>
+#include <dlfcn.h>
 
 #ifdef __APPLE__
 #include <ApplicationServices/ApplicationServices.h>
@@ -4259,6 +4260,57 @@ std::string reasixty_resolveActionName(const std::string& action)
     if (cmd <= 0) return "(unresolved)";
     const char* n = kbd_getTextFromCmd(cmd, nullptr);
     return (n && *n) ? std::string(n) : std::string("(no name)");
+}
+
+// SWELL's BrowseForSaveFile is part of REAPER's binary on macOS; we
+// reach it via dlsym so we don't have to bootstrap the full SWELL
+// function table. REAPER's own GetUserFileNameForRead handles Open
+// dialogs but offers no Save-As variant, hence this small dlsym helper.
+using BrowseForSaveFile_t = bool(*)(const char* text, const char* initialdir,
+                                    const char* initialfile, const char* extlist,
+                                    char* fn, int fnsize);
+static BrowseForSaveFile_t loadBrowseForSaveFile_()
+{
+    static BrowseForSaveFile_t p =
+        reinterpret_cast<BrowseForSaveFile_t>(dlsym(RTLD_DEFAULT, "BrowseForSaveFile"));
+    return p;
+}
+
+// Bindings export — Save-As dialog → write JSON. Returns false on cancel
+// or write error.
+bool reasixty_exportBindingsViaDialog()
+{
+    auto* browse = loadBrowseForSaveFile_();
+    if (!browse) return false;  // SWELL not reachable (very unexpected on macOS)
+    char fn[4096] = {0};
+    // SWELL extlist format mirrors GetSaveFileName: pairs of label\0pattern\0
+    // terminated by an extra \0. The string literal embeds the NULs.
+    if (!browse("Export Rea-Sixty bindings", nullptr,
+                "rea-sixty-bindings.json",
+                "JSON files (*.json)\0*.json\0All files (*.*)\0*.*\0\0",
+                fn, sizeof(fn))) {
+        return false;
+    }
+    return uf8::bindings::exportTo(fn);
+}
+
+// Bindings import — Open dialog → parse + activate. Returns false on
+// cancel or parse error.
+bool reasixty_importBindingsViaDialog()
+{
+    char buf[4096] = {0};
+    if (!GetUserFileNameForRead(buf, "Import Rea-Sixty bindings", "json")) {
+        return false;
+    }
+    return uf8::bindings::importFrom(buf);
+}
+
+// CSI import — placeholder until the parser branch lands. Returns -1 so
+// the UI surfaces "cancelled or failed". Replaced once the CSI .zon
+// parser merges from the Mac Studio worktree.
+int reasixty_importFromCsi()
+{
+    return -1;
 }
 
 // File picker → register ReaScript → return the action string suitable
