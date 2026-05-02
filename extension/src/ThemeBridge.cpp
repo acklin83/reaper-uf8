@@ -50,22 +50,26 @@ inline int shade(int rgba, int amount)
 
 int ThemeBridge::pushAll(ImGui_Context* ctx)
 {
-    // REAPER theme indices that have stable meanings across versions
-    // (reaper_plugin.h:1327+). The ones we use here:
-    //   24 TRACKBG1  — main track background
-    //   25 TRACKBG2  — alternating track background
-    //   28 PEAKS1    — audio peak meter
-    //   29 PEAKS2    — peak meter clip
-    //   38 MARKER    — accent (timeline markers, also a reasonable Button highlight)
-    constexpr int IDX_TRACKBG1 = 24;
-    constexpr int IDX_TRACKBG2 = 25;
-    constexpr int IDX_PEAKS1   = 28;
-    constexpr int IDX_MARKER   = 38;
-
-    const int bg     = themeRgba(IDX_TRACKBG1, 0x202020);
-    const int bgAlt  = themeRgba(IDX_TRACKBG2, 0x282828);
-    const int peak   = themeRgba(IDX_PEAKS1,   0x40C040);
-    const int accent = themeRgba(IDX_MARKER,   0xC08040);
+    // Palette mirrors the UF8-schematic colours in drawUf8Vector so the
+    // surrounding ImGui surface reads as one continuous mock-up rather
+    // than "REAPER widget on top of a custom canvas". Hardware-button
+    // tones come from drawHwBtn (kSelFill 0x4477CC, idle 0x252A33,
+    // hover 0x3A4253, border 0x4A5060, txt 0xD0D4DA).
+    constexpr int kBg          = 0x1A1E24FF;   // canvas background
+    constexpr int kChild       = 0x202530FF;   // panel inset
+    constexpr int kFrame       = 0x252A33FF;   // input fields, combos
+    constexpr int kFrameHover  = 0x2E3440FF;
+    constexpr int kFrameActive = 0x3A4253FF;
+    constexpr int kBorder      = 0x4A5060FF;
+    constexpr int kButton      = 0x2A3140FF;
+    constexpr int kButtonHover = 0x3A4253FF;
+    constexpr int kButtonAct   = 0x4477CCFF;   // schematic selection blue
+    constexpr int kAccent      = 0x4477CCFF;   // headers / tabs / sliders
+    constexpr int kAccentBri   = 0x6699EEFF;   // hover lift
+    constexpr int kAccentDim   = 0x2A3F66FF;   // dimmed selection (inactive)
+    constexpr int kText        = 0xD0D4DAFF;   // primary text
+    constexpr int kTextDim     = 0x70747CFF;
+    constexpr int kSeparator   = 0x383C44FF;
 
     int n = 0;
     auto push = [&](int colIdx, int rgba) {
@@ -73,16 +77,47 @@ int ThemeBridge::pushAll(ImGui_Context* ctx)
         ++n;
     };
 
-    push(ImGui_Col_WindowBg,      bg);
-    push(ImGui_Col_ChildBg,       bgAlt);
-    push(ImGui_Col_FrameBg,       shade(bgAlt, +12));
-    push(ImGui_Col_FrameBgHovered, shade(bgAlt, +24));
-    push(ImGui_Col_FrameBgActive,  shade(bgAlt, +36));
-    push(ImGui_Col_Button,         shade(accent, -32));
-    push(ImGui_Col_ButtonHovered,  accent);
-    push(ImGui_Col_ButtonActive,   shade(accent, +24));
-    push(ImGui_Col_PlotLines,      peak);
-    push(ImGui_Col_PlotLinesHovered, shade(peak, +24));
+    push(ImGui_Col_WindowBg,        kBg);
+    push(ImGui_Col_ChildBg,         kChild);
+    push(ImGui_Col_PopupBg,         kChild);
+    push(ImGui_Col_Border,          kBorder);
+
+    push(ImGui_Col_FrameBg,         kFrame);
+    push(ImGui_Col_FrameBgHovered,  kFrameHover);
+    push(ImGui_Col_FrameBgActive,   kFrameActive);
+
+    push(ImGui_Col_TitleBg,         kBg);
+    push(ImGui_Col_TitleBgActive,   kChild);
+    push(ImGui_Col_TitleBgCollapsed, kBg);
+
+    push(ImGui_Col_Button,          kButton);
+    push(ImGui_Col_ButtonHovered,   kButtonHover);
+    push(ImGui_Col_ButtonActive,    kButtonAct);
+
+    push(ImGui_Col_Header,          kAccentDim);
+    push(ImGui_Col_HeaderHovered,   kAccentBri);
+    push(ImGui_Col_HeaderActive,    kAccent);
+
+    push(ImGui_Col_Tab,             kButton);
+    push(ImGui_Col_TabHovered,      kAccentBri);
+    push(ImGui_Col_TabActive,       kAccent);
+    push(ImGui_Col_TabUnfocused,    shade(kButton, -8));
+    push(ImGui_Col_TabUnfocusedActive, kAccentDim);
+
+    push(ImGui_Col_CheckMark,       kAccentBri);
+    push(ImGui_Col_SliderGrab,      kAccent);
+    push(ImGui_Col_SliderGrabActive, kAccentBri);
+
+    push(ImGui_Col_Separator,       kSeparator);
+    push(ImGui_Col_SeparatorHovered, kAccent);
+    push(ImGui_Col_SeparatorActive, kAccentBri);
+
+    push(ImGui_Col_Text,            kText);
+    push(ImGui_Col_TextDisabled,    kTextDim);
+    push(ImGui_Col_TextSelectedBg,  kAccentDim);
+
+    push(ImGui_Col_PlotLines,         0x40C040FF);
+    push(ImGui_Col_PlotLinesHovered,  0x60E060FF);
     return n;
 }
 

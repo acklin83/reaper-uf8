@@ -131,10 +131,14 @@ void MixerWindow::onRunTick()
     // Begin entirely — that's fine because we ALSO touch the context
     // through the SetNextWindowSize / SetNextWindowPos calls above
     // and through ThemeBridge::pushAll, all of which count as "use".
+    // Initial size sized to fit the UF8 schematic at full width without
+    // horizontal scroll. Schematic canvas is 1000×490 (drawUf8Vector);
+    // add the 160 px left rail + ~20 px frame padding either side +
+    // the 4×2 binding-editor matrix and CSI panel below = ~1280×1100.
     int condFirst = ImGui_Cond_FirstUseEver;
-    ImGui_SetNextWindowSize(impl_->ctx, /*w*/ 1100, /*h*/ 760,
+    ImGui_SetNextWindowSize(impl_->ctx, /*w*/ 1280, /*h*/ 1080,
                             &condFirst);
-    ImGui_SetNextWindowPos(impl_->ctx, /*x*/ 80, /*y*/ 80,
+    ImGui_SetNextWindowPos(impl_->ctx, /*x*/ 60, /*y*/ 60,
                            &condFirst, /*pivot_x*/ nullptr,
                            /*pivot_y*/ nullptr);
 
