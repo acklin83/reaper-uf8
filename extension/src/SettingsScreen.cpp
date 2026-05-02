@@ -879,6 +879,13 @@ void drawBindingEditor(ImGui_Context* ctx, int layer, ButtonId id)
             ImGui_Text(ctx, title);
             ImGui_Separator(ctx);
 
+            // Whether to render the slot rows after the header. Replaces
+            // the previous early-`return`s — those skipped EndChild and
+            // tore the parent window down (same ReaImGui v0.10 trap as
+            // commit c6bb9d0). Now the only exit point is the bottom of
+            // the lambda.
+            bool renderSlots = true;
+
             // Behavior combo lives only in the SHORT column — it
             // applies to both columns.
             if (!isLongCol) {
@@ -904,22 +911,27 @@ void drawBindingEditor(ImGui_Context* ctx, int layer, ButtonId id)
                     ImGui_TextDisabled(ctx,
                         "Long-press is only available for Momentary.");
                     if (bd.hasLongPress) { bd.hasLongPress = false; dirty = true; }
-                    return;  // nothing else to render in this column
-                }
-                bool en = bd.hasLongPress;
-                if (ImGui_Checkbox(ctx, "Enable long-press (held > 0.5 s)",
-                                   &en)) {
-                    bd.hasLongPress = en;
-                    if (en && slots[0].type == ActionType::Noop) {
-                        slots[0].type = ActionType::Builtin;
+                    renderSlots = false;
+                } else {
+                    bool en = bd.hasLongPress;
+                    if (ImGui_Checkbox(ctx, "Enable long-press (held > 0.5 s)",
+                                       &en)) {
+                        bd.hasLongPress = en;
+                        if (en && slots[0].type == ActionType::Noop) {
+                            slots[0].type = ActionType::Builtin;
+                        }
+                        dirty = true;
                     }
-                    dirty = true;
+                    if (!bd.hasLongPress) {
+                        renderSlots = false;
+                    } else {
+                        ImGui_Spacing(ctx);
+                        ImGui_Separator(ctx);
+                    }
                 }
-                if (!bd.hasLongPress) return;
-                ImGui_Spacing(ctx);
-                ImGui_Separator(ctx);
             }
 
+            if (renderSlots) {
             // Plain row — always drawn first; never collapsed.
             ImGui_Text(ctx, kModNames[0]);
             char slotPrefix[32];
@@ -957,6 +969,7 @@ void drawBindingEditor(ImGui_Context* ctx, int layer, ButtonId id)
                     }
                 }
             }
+            }   // if (renderSlots)
         }
         ImGui_EndChild(ctx);
     };
