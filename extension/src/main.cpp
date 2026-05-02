@@ -5036,18 +5036,9 @@ void registerBindingHandlers()
         "Recall Selection Slot", true   // usesParam → Slot spinner in UI
     });
 
-    // FX Learn — momentary modifier semantics via param 0/1, but kept as
-    // a plain toggle for now (no Modifier enum slot yet — Generic FX
-    // Mapping in Phase 2.5d may promote this to a real Modifier).
-    registerBuiltin("fx_learn", DescBuilder{
-        [](bool firing, bool pressed, int param) {
-            const bool toggleMode = (param == 1);
-            // TODO Phase 2.5d: route the next V-Pot / Soft-Key press into
-            // the Generic FX Learn flow while this state is true.
-            (void)firing; (void)pressed; (void)toggleMode;
-        },
-        nullptr, "FX Learn (Generic FX Mapping)", true
-    });
+    // FX Learn lebt als Settings-Tab im Mixer-Window, nicht als Builtin —
+    // Mapping ist eine Sit-Down-Aktivität (drag-and-drop, click-and-turn),
+    // nicht etwas das man auf einen Hardware-Knopf legt.
 
     // Modifier builtins. `param` selects mode:
     //   0 = Momentary  → modifier active while button is held

@@ -855,8 +855,6 @@ bool drawActionPicker(ImGui_Context* ctx, const char* prefix,
                  || n == "mixer_toggle" || n == "home"
                  || n == "folder_mode" || n == "show_only_selected")
                     return "Mode Toggles";
-                if (n == "fx_learn")
-                    return "Modifiers";
                 if (n.rfind("selset_", 0) == 0)
                     return "Selection Sets";
                 if (n == "domain_cs" || n == "domain_bc")

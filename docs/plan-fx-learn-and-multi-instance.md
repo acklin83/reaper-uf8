@@ -60,6 +60,12 @@ Plugin-Modifier (`ssl_strip_mode_toggle` / `g_pluginFaderMode`) routet Fader auf
 
 **Fallback wenn Fader/Pan nicht gelernt:** `findSlotByLinkIdx` returnt nullptr → Modifier-Mode-Code fällt auf REAPER-Track-Volume / -Pan zurück. Akzeptables Verhalten für Plugins ohne sinnvolle Master-Fader (Multiband-Comps, EQs ohne Output-Stage, …).
 
+### Einstiegspunkt: Settings-Tab
+
+Learn lebt als **eigener Tab im Mixer-Window** (neue `RailEntry` in [MixerWindow.cpp:40](extension/src/MixerWindow.cpp:40)), nicht als Bindings-Builtin. Mapping ist eine Sit-Down-Aktivität — drag-and-drop, click-and-turn — nicht etwas das man auf einen Hardware-Knopf legt. Der `fx_learn`-Builtin-Stub ist bewusst entfernt.
+
+Tab-Name: "FX Learn" oder "User Plugins". Sektion-Konstante `kSecFxLearn`. RailEntry-Eintrag zwischen "Soft-Key Banks" und "Modes".
+
 ### Learn-Flow (UI) — primär: visuelles Schematic + Param-Liste
 
 **Vorbild: SSL 360 Link Plugin** (Recherche siehe [SSL 360 Link User-Guide](https://support.solidstatelogic.com/hc/en-gb/articles/17183407536285)). Deren UI ist zweispaltig — links virtueller Channel-Strip, rechts scrollbare Param-Liste des hosted Plugins. Drei parallele Mapping-Methoden, alle gleich offiziell:
@@ -125,7 +131,7 @@ Inverted-Flag als kleiner "↺"-Indikator am Slot, Rechts-Klick toggled.
   - User bewegt Hardware-Knopf (UF8/UC1) → bindet (für Hardware-first-Mapping wie 360 Link's "click-and-turn hardware")
 - **Drag-and-drop** — Param-Eintrag aus der Liste auf einen Slot ziehen → bindet direkt. Kein Listen-State zwischendrin nötig.
 - **Cmd+Klick / Bulk-Mode** → "Sequential Listen": nach jedem Bind springt Listen-Status automatisch zum nächsten unmapped Slot in der Topologie. Quick-Mass-Mapping ohne UI-Wechsel.
-- **Drag GR-Param auf GR-Meter-Sektion** → die virtuelle Strip-Topologie hat einen Comp/Gate-GR-Meter-Bereich (kleiner LED-Strip / Bargraph in der Dynamics-Section). Dragging eines Read-Only-Params dorthin bindet das Metering. Mit kleinem Calibration-Offset-Slider darunter (1-zu-1 oder Skalierung) — manche 3rd-party-Plugins liefern GR mit anderem Range, Offset gleicht das aus. Wir picken den Wert per `TrackFX_GetParam` / `TrackFX_GetParamNormalized` während des Render-Ticks und schicken ihn auf UC1's GR-Meter / UF8's per-strip-GR-Indikator.
+- **Drag GR-Param auf GR-Meter-Sektion** → die virtuelle Strip-Topologie hat einen Comp/Gate-GR-Meter-Bereich (kleiner LED-Strip / Bargraph in der Dynamics-Section). Dragging eines Read-Only-Params dorthin bindet das Metering. **Calibration-Offset-Slider** darunter, Range **±12 dB**, Default 0.0 — deckt fast alle Hersteller-Range-Mismatches ab (FabFilter liefert -inf..0, manche Waves -12..0). Live-Vorschau auf der virtuellen GR-Bargraph + auf UC1's Hardware-Meter so der User Settings findet. Wir picken den Wert per `TrackFX_GetParamNormalized` während des Render-Ticks und schicken ihn auf UC1's GR-Meter / UF8's per-strip-GR-Indikator.
 - **Rechtsklick auf Slot** → Context-Menü: Inverted toggle, Mapping löschen, Re-Pick, "Set as default fader/pan slot" (für Slots die linkIdx 1 oder 3 nicht haben aber doch Master-Fader sind).
 - **ESC** → Listening abbrechen.
 - **Plugin-Selector oben** im Schematic-Header: Dropdown der FX-Chain auf dem focused Track plus Domain-Radio (CS/BC). Wechselt die UserPluginMap, an der gerade gearbeitet wird.
@@ -142,6 +148,60 @@ Unter dem Schematic ein kleiner Footer mit:
 - Checkbox "Make this the default for CS / BC".
 - Save-Button (oder live-save bei jedem Mapping-Edit, wenn die UX flüssig genug ist).
 - "Import / Export…" Buttons für JSON-Map-Sharing zwischen Usern (Community-getrieben, nicht von uns kuratiert).
+
+### Soft-Key-Bank Auto-Fill bei aktivem Plugin-Mode
+
+Settings-Toggle: **"Plugin-Mode auto-fills Soft-Key Banks"** (im FX-Learn-Tab oder Modes-Tab — vermutlich Modes). Ist analog dazu wie SSL CS die Soft-Key-Banks befüllt.
+
+- Wenn aktiv UND `g_pluginFaderMode == true`: die acht Soft-Key-Banks werden vom System gefüllt mit den **gemappten Slots** der aktiven UserPluginMap (oder Built-in PluginMap) auf dem focused Track.
+- Reihenfolge: SSL-Layout-Order (Bank 1 = HF/HMF/LMF/LF EQ-Section, Bank 2 = Filter, Bank 3 = Gate, Bank 4 = Comp, Bank 5 = Output, Bank 6 = Input, Bank 7 = Routing, Bank 8 = Misc) — analog Built-in-CS-Bank-Layout. Was schon im SSL-Style passt, mappt sich automatisch.
+- Slots ohne gelernten Param bleiben leer (graue Soft-Key wie heute bei nicht-belegten Slots).
+- Wenn Plugin-Mode aus: User-Banks aus dem klassischen Bindings-Layer wieder aktiv.
+
+**Datenmodell**: kein neuer State nötig — die Banks werden runtime-konstruiert aus der aktiven PluginMap. Render-Pfad checkt `g_pluginFaderMode` + `lookupPluginOnTrack`, projiziert Slots auf Banks per linkIdx-Tabelle (Konstante in PluginMap.cpp wie heute).
+
+**Setting persistiert** via `SetExtState("ReaSixty", "pluginMode_autoFillBanks", "1"|"0", true)`.
+
+### Persistenz: JSON-Schema für user_plugins.json
+
+```json
+{
+  "format_version": 1,
+  "plugins": [
+    {
+      "match": "FabFilter Pro-Q 4",
+      "domain": "ChannelStrip",
+      "displayShort": "FFP4",
+      "isDefault": false,
+      "slots": [
+        { "linkIdx": 1,  "vst3Param": 14, "inverted": false },
+        { "linkIdx": 3,  "vst3Param": 7,  "inverted": false },
+        { "linkIdx": 7,  "vst3Param": 22, "inverted": false }
+      ],
+      "metering": {
+        "gainReduction": { "vst3Param": 99, "offsetDb": 0.0 }
+      }
+    }
+  ]
+}
+```
+
+**Field-Spec:**
+- `format_version`: Integer, aktuell 1. Bei jedem Schema-Break inkrementieren — Loader weigert sich höhere Versionen zu lesen, schreibt aber gewarnt zurück (User entscheidet manuell).
+- `plugins[]`: Array von UserPluginMaps.
+- `match`: Substring von `TrackFX_GetFXName`. Case-sensitive (analog Built-in-Maps).
+- `domain`: String enum — `"ChannelStrip"` / `"BusComp"`.
+- `displayShort`: 4 chars, ASCII. Validiert beim Laden.
+- `isDefault`: Boolean. Pro Domain wird beim Laden enforced one-of (höchster Index gewinnt wenn JSON manipuliert wurde).
+- `slots[]`: Array von `{ linkIdx, vst3Param, inverted }`.
+  - `linkIdx`: Integer aus `SlotIds::*` (siehe [PluginMap.h](extension/src/PluginMap.h)). Werte 0..46 + 100..119 valide.
+  - `vst3Param`: nicht-negative Integer.
+  - `inverted`: Boolean, default false.
+- `metering` (optional): bisher nur `gainReduction`. Struktur: `{ vst3Param, offsetDb }`. `offsetDb` ist Float, valid range [-12.0, +12.0] dB.
+
+**Persistenz-Pfad:** `<REAPER_RESOURCE>/rea_sixty/user_plugins.json` (analog `bindings.json`).
+
+**Atomic-Write:** schreibe nach `*.tmp`, dann `rename` — kein Halb-File-Risiko bei Crash mid-write.
 
 ### GR-Metering (Tech-Stack)
 
@@ -320,4 +380,4 @@ A und B sind unabhängig — A kann ohne B leben, B kann ohne A leben. Aber zusa
 
 - **`displayShort` für UserPluginMap auto-vorgeben?** "FabFilter Pro-Q 4" → "FFP4"? Heuristik: Initialen + letzte Zahl. Oder einfach User entscheidet, default = erste 4 Chars.
 - **Learn auch für SlotIds::TrackPhase / PluginAB / PluginHQ?** Das sind synthetische Slots ohne VST3-Param. Nein — User-Map hat nur echte VST3-Params; synthetische Slots gibt's nur auf den eingebauten Plugins.
-- **Welche Soft-Key-Bank zeigt User-Plugins?** Bei einem User-Plugin gemappt als CS-Domain landet's im normalen CS-Bank-Layout — die Slots die er gelernt hat sind aktiv, Rest leer. Wie heute bei Plugins die nur 6 von 30 Slots ausfüllen.
+- **Mixer-Window-Disambiguation bei zwei gleichartigen User-Plugins auf einem Track** (z.B. zwei FabFilter-Pro-Q-Instanzen, beide gemappt durch dieselbe UserPluginMap, kein REAPER-Rename gesetzt) → wie unterscheiden? FX-Slot-Index in Klammer ("FFP4 [#3]") oder Pre/Post-Position ("FFP4 — pre fader") sind Optionen. Entscheidung beim Bauen des Mixer-Windows.
