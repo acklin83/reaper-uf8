@@ -74,6 +74,14 @@ enum class ButtonId : uint16_t {
     // behaviour. User can rebind to anything via Settings → Bindings.
     TopSoftKey1, TopSoftKey2, TopSoftKey3, TopSoftKey4,
     TopSoftKey5, TopSoftKey6, TopSoftKey7, TopSoftKey8,
+
+    // SSL plug-in soft-key bank selectors — V-POT (cell 0x68) plus
+    // Bank 1..5 (0x69..0x6D). Default action: softkey_bank_select
+    // with param 0..5 to switch g_softKeyBank, matching SSL 360°.
+    // User can rebind to anything (jump to user bank, fire arbitrary
+    // action, etc.).
+    VPotBank,
+    SoftKey1Bank, SoftKey2Bank, SoftKey3Bank, SoftKey4Bank, SoftKey5Bank,
 };
 
 // Map UF8 device byte (FF 22 03 <id> 00 <s>) to ButtonId. Returns None

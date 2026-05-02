@@ -87,6 +87,12 @@ constexpr NameEntry kNames[] = {
     { ButtonId::TopSoftKey6, "top_soft_6"   },
     { ButtonId::TopSoftKey7, "top_soft_7"   },
     { ButtonId::TopSoftKey8, "top_soft_8"   },
+    { ButtonId::VPotBank,      "vpot_bank"      },
+    { ButtonId::SoftKey1Bank,  "softkey_bank_1" },
+    { ButtonId::SoftKey2Bank,  "softkey_bank_2" },
+    { ButtonId::SoftKey3Bank,  "softkey_bank_3" },
+    { ButtonId::SoftKey4Bank,  "softkey_bank_4" },
+    { ButtonId::SoftKey5Bank,  "softkey_bank_5" },
 };
 
 } // namespace
@@ -156,6 +162,13 @@ ButtonId fromUf8DeviceId(uint8_t id)
         case 0x1D: return ButtonId::TopSoftKey6;
         case 0x1E: return ButtonId::TopSoftKey7;
         case 0x1F: return ButtonId::TopSoftKey8;
+        // SSL plug-in soft-key bank selectors 0x68..0x6D.
+        case 0x68: return ButtonId::VPotBank;
+        case 0x69: return ButtonId::SoftKey1Bank;
+        case 0x6A: return ButtonId::SoftKey2Bank;
+        case 0x6B: return ButtonId::SoftKey3Bank;
+        case 0x6C: return ButtonId::SoftKey4Bank;
+        case 0x6D: return ButtonId::SoftKey5Bank;
         default:   return ButtonId::None;
     }
 }
@@ -411,6 +424,26 @@ void seedFactoryDefaults_(Config& c)
         L1[kTopSoftKeyIds[i]] = mkBuiltin("ssl_softkey",
                                           Behavior::Momentary, label,
                                           255, 255, 255, /*param*/ i);
+    }
+
+    // SSL soft-key bank selectors. Default: each switches the SSL
+    // plug-in's PAGE bank (0 = V-POT, 1..5 = Bank N) — same row that
+    // SSL 360°'s PAGE ←/→ navigates between. User can rebind any
+    // button to softkey_bank_select with a different param to jump
+    // directly to a specific bank.
+    static const ButtonId kBankIds[6] = {
+        ButtonId::VPotBank,
+        ButtonId::SoftKey1Bank, ButtonId::SoftKey2Bank,
+        ButtonId::SoftKey3Bank, ButtonId::SoftKey4Bank,
+        ButtonId::SoftKey5Bank,
+    };
+    static const char* kBankLabels[6] = {
+        "V-POT", "BANK 1", "BANK 2", "BANK 3", "BANK 4", "BANK 5",
+    };
+    for (int i = 0; i < 6; ++i) {
+        L1[kBankIds[i]] = mkBuiltin("softkey_bank_select",
+                                    Behavior::Momentary, kBankLabels[i],
+                                    255, 255, 255, /*param*/ i);
     }
 
     // Quick keys: Q1=CS domain, Q2=BC domain, Q3 reserved (no factory binding —

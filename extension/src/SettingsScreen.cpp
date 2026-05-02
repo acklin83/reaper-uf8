@@ -262,7 +262,13 @@ const char* hwFaceLabel(ButtonId id)
         case ButtonId::TopSoftKey6: return "TSK 6";
         case ButtonId::TopSoftKey7: return "TSK 7";
         case ButtonId::TopSoftKey8: return "TSK 8";
-        default:                    return uf8::bindings::toName(id);
+        case ButtonId::VPotBank:     return "V-POT";
+        case ButtonId::SoftKey1Bank: return "BANK 1";
+        case ButtonId::SoftKey2Bank: return "BANK 2";
+        case ButtonId::SoftKey3Bank: return "BANK 3";
+        case ButtonId::SoftKey4Bank: return "BANK 4";
+        case ButtonId::SoftKey5Bank: return "BANK 5";
+        default:                     return uf8::bindings::toName(id);
     }
 }
 
@@ -405,11 +411,19 @@ void drawUf8Vector(ImGui_Context* ctx, ButtonId& sel)
 
     // ---- Centre: 8 strips ----
     constexpr float kStripX0 = 138, kStripW = 80, kStripGap = 7;
+    constexpr ButtonId kStripTsk[8] = {
+        ButtonId::TopSoftKey1, ButtonId::TopSoftKey2,
+        ButtonId::TopSoftKey3, ButtonId::TopSoftKey4,
+        ButtonId::TopSoftKey5, ButtonId::TopSoftKey6,
+        ButtonId::TopSoftKey7, ButtonId::TopSoftKey8,
+    };
     for (int i = 0; i < 8; ++i) {
         const float sx = kStripX0 + i * (kStripW + kStripGap);
-        // Top soft-key — taller (22 px) so a future label-text frame can
-        // fit. Stays locked in v1.
-        rect_(c, sx + 6, 12, kStripW - 12, 22, 0x252A33FF, 0x4A5060FF, 2.0);
+        // Top soft-key — clickable so the user can edit the per-strip
+        // binding directly from the schematic.
+        char tlbl[4];
+        std::snprintf(tlbl, sizeof(tlbl), "%d", i + 1);
+        drawHwBtn(sx + 6, 12, kStripW - 12, 22, kStripTsk[i], tlbl);
         // Scribble LCD with placeholder logo
         rect_(c, sx + 4, 40, kStripW - 8, 58, 0x080C12FF, 0x444A55FF, 2.0);
         drawTextCentered_(c, sx + kStripW / 2.0f, 60, 0x4488DDFF, "SSL");
@@ -496,39 +510,16 @@ void drawUf8Vector(ImGui_Context* ctx, ButtonId& sel)
     drawHwBtn(48,  396, 33, 22, ButtonId::AutoLatch, "LATCH");
     drawHwBtn(83,  396, 33, 22, ButtonId::AutoTouch, "TOUCH");
 
-    // ---- Top-soft-keys (per strip, above the V-Pots) ----
-    // The schematic doesn't render the 8 strips themselves; this row
-    // represents the 8 buttons sitting over them. Default action wired
-    // by the factory seed is `ssl_softkey` — same behaviour as SSL 360°.
-    {
-        constexpr ButtonId kTsk[8] = {
-            ButtonId::TopSoftKey1, ButtonId::TopSoftKey2,
-            ButtonId::TopSoftKey3, ButtonId::TopSoftKey4,
-            ButtonId::TopSoftKey5, ButtonId::TopSoftKey6,
-            ButtonId::TopSoftKey7, ButtonId::TopSoftKey8,
-        };
-        constexpr float bw = 60, bh = 22, gap = 4;
-        constexpr float total = bw * 8 + gap * 7;
-        constexpr float startX = (1000.0f - total) / 2.0f;
-        drawGroupLabel(startX + total / 2 - 70, 6,
-                       "TOP SOFT KEYS (PER STRIP)");
-        for (int i = 0; i < 8; ++i) {
-            char lbl[8];
-            std::snprintf(lbl, sizeof(lbl), "%d", i + 1);
-            drawHwBtn(startX + i * (bw + gap), 22, bw, bh, kTsk[i], lbl);
-        }
-    }
-
     // ---- Right panel ----
-    // SOFT KEYS — 2x3 grid spans the full right-panel width now that
-    // PAN / FINE moved underneath.
-    drawGroupLabel(852, 6, "SOFT KEYS");
-    drawLocked(852, 22, 42, 20, "V-POT");
-    drawLocked(898, 22, 42, 20, "1");
-    drawLocked(944, 22, 41, 20, "2");
-    drawLocked(852, 46, 42, 20, "3");
-    drawLocked(898, 46, 42, 20, "4");
-    drawLocked(944, 46, 41, 20, "5");
+    // SSL soft-key bank selectors — 2×3 grid. Each switches the active
+    // PAGE bank (V-POT / Bank 1..5) via the softkey_bank_select
+    // builtin. User can rebind to anything via the editor.
+    drawHwBtn(852, 22, 42, 20, ButtonId::VPotBank,     "V-POT");
+    drawHwBtn(898, 22, 42, 20, ButtonId::SoftKey1Bank, "1");
+    drawHwBtn(944, 22, 41, 20, ButtonId::SoftKey2Bank, "2");
+    drawHwBtn(852, 46, 42, 20, ButtonId::SoftKey3Bank, "3");
+    drawHwBtn(898, 46, 42, 20, ButtonId::SoftKey4Bank, "4");
+    drawHwBtn(944, 46, 41, 20, ButtonId::SoftKey5Bank, "5");
 
     // PAN + FINE — own row below SOFT KEYS, with breathing room.
     drawHwBtn(852, 80, 64, 22, ButtonId::Pan,  "PAN");

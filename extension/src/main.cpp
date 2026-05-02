@@ -1848,37 +1848,12 @@ void onUf8Input(const uint8_t* data, size_t len)
                 }
             }
 
-            // Per-strip + soft-key bank dispatch — stay hardcoded in v1.
-            // Architecture (memory bindings-architecture.md) says the PM-
-            // mode soft-key tables move into Layer 2/3 default bindings
-            // only when Phase B/C lands; v1 leaves them alone.
+            // Per-strip dispatch — stay hardcoded in v1. Soft-key bank
+            // selectors (0x68..0x6D) used to live here too, now route
+            // through bindings::dispatch above with a default
+            // softkey_bank_select factory binding.
             if (!handledNatively) {
-                if (id >= 0x68 && id <= 0x6D) {
-                    // Soft-key bank selectors: 0x68 = V-POT bank, 0x69..0x6D
-                    // = Bank 1..5. BC mode only has 0..1 — ignore higher.
-                    // Pressing any of these also clears global Pan override
-                    // (matches SSL paradigm: "I want params, not pan").
-                    if (pressed) {
-                        const int target = (id == 0x68) ? 0 : (id - 0x69 + 1);
-                        const auto fp = uf8::getFocusedParam();
-                        const auto domain = (fp.domain == uf8::Domain::BusComp)
-                            ? uf8::Domain::BusComp : uf8::Domain::ChannelStrip;
-                        if (target <= softkey::maxBankFor(domain)) {
-                            if (g_softKeyBank.exchange(target) != target) {
-                                g_softKeyDirty.store(true);
-                                char buf[8];
-                                std::snprintf(buf, sizeof(buf), "%d", target);
-                                SetExtState("ReaSixty", "softKeyBank", buf, true);
-                            }
-                        }
-                        if (g_forcePan.load()) {
-                            g_forcePan.store(false);
-                            g_pageDirty.store(true);
-                            SetExtState("ReaSixty", "forcePan", "0", true);
-                        }
-                    }
-                    handledNatively = true;
-                } else if (id >= 0x08 && id <= 0x0F) {
+                if (id >= 0x08 && id <= 0x0F) {
                     // V-Pot push: reset focused param / pan to neutral.
                     if (pressed) {
                         queueInput({PendingInput::PanCenter,
@@ -5202,6 +5177,38 @@ void registerBindingHandlers()
         d.displayName = "8 receives of focused track";
         registerBuiltin("recv_this", d);
     }
+
+    // SOFTKEY_BANK_SELECT — switches the SSL plug-in's PAGE bank
+    // (0 = V-POT, 1..5 = Bank N). Default for the V-POT/Bank1..5
+    // hardware row, equivalent to SSL 360°'s PAGE ← / →. Pressing also
+    // clears the global Pan override (matches SSL paradigm: "I want
+    // params, not pan"). Bank index is clamped to whatever
+    // softkey::maxBankFor reports for the focused domain.
+    registerBuiltin("softkey_bank_select", DescBuilder{
+        [](bool firing, bool /*pressed*/, int param) {
+            if (!firing) return;
+            const auto fp = uf8::getFocusedParam();
+            const auto domain = (fp.domain == uf8::Domain::BusComp)
+                ? uf8::Domain::BusComp : uf8::Domain::ChannelStrip;
+            const int maxBank = softkey::maxBankFor(domain);
+            int target = param;
+            if (target < 0)        target = 0;
+            if (target > maxBank)  target = maxBank;
+            if (g_softKeyBank.exchange(target) != target) {
+                g_softKeyDirty.store(true);
+                char buf[8];
+                std::snprintf(buf, sizeof(buf), "%d", target);
+                SetExtState("ReaSixty", "softKeyBank", buf, true);
+            }
+            if (g_forcePan.load()) {
+                g_forcePan.store(false);
+                g_pageDirty.store(true);
+                SetExtState("ReaSixty", "forcePan", "0", true);
+            }
+        },
+        [](int param) { return g_softKeyBank.load() == param; },
+        "Select SSL soft-key bank (param 0..5)", true
+    });
 
     // SSL_SOFTKEY — default action for the per-strip top-soft-keys.
     // param 0..7 = which strip the binding sits on. Looks up the
