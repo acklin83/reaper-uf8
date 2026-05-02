@@ -170,7 +170,9 @@ bindings::Binding translateAction_(const std::vector<std::string>& tokens,
     bindings::Binding bd;
     bd.behavior = bindings::Behavior::Momentary;
     bd.color[0] = bd.color[1] = bd.color[2] = 255;
+    bd.inactiveColor[0] = bd.inactiveColor[1] = bd.inactiveColor[2] = 255;
     warning = false;
+    auto& sp = bd.shortPress[static_cast<int>(bindings::Modifier::Plain)];
 
     if (tokens.empty()) {
         description = "(empty action)";
@@ -181,32 +183,27 @@ bindings::Binding translateAction_(const std::vector<std::string>& tokens,
 
     // ---- Reaper <id|_named> ----
     if (verb == "Reaper" && tokens.size() >= 2) {
-        bd.type   = bindings::ActionType::Reaper;
-        bd.action = tokens[1];
+        sp.type   = bindings::ActionType::Reaper;
+        sp.action = tokens[1];
         bd.label  = tokens[1];
-        const bool numeric = !bd.action.empty() &&
-                             std::all_of(bd.action.begin(), bd.action.end(),
+        const bool numeric = !sp.action.empty() &&
+                             std::all_of(sp.action.begin(), sp.action.end(),
                                          [](unsigned char c) { return std::isdigit(c); });
         if (numeric) {
-            description = "REAPER action " + bd.action;
+            description = "REAPER action " + sp.action;
         } else {
             // Named REAPER action (SWS / ReaPack / S&M etc.). Rea-Sixty's
             // dispatch resolves these via NamedCommandLookup at fire time.
-            // Only fires if the named action is currently registered in
-            // REAPER (e.g. SWS installed).
-            description = "REAPER named action " + bd.action;
+            description = "REAPER named action " + sp.action;
             warning = true;
         }
         return bd;
     }
 
     // ---- GoZone <Name> ----
-    // No equivalent in v1 (Rea-Sixty doesn't model CSI zones). Imported
-    // as a placeholder so the user can replace it manually with a
-    // matching builtin / REAPER action later.
     if (verb == "GoZone" && tokens.size() >= 2) {
-        bd.type   = bindings::ActionType::Noop;
-        bd.label  = "Go: " + tokens[1];
+        sp.type  = bindings::ActionType::Noop;
+        bd.label = "Go: " + tokens[1];
         description = "CSI GoZone — no Rea-Sixty equivalent (kept as placeholder)";
         warning = true;
         return bd;
@@ -217,15 +214,17 @@ bindings::Binding translateAction_(const std::vector<std::string>& tokens,
     static constexpr VerbMap kVerbs[] = {
         { "Flip",                  "flip",                bindings::Behavior::Toggle    },
         { "GlobalView",            "mixer_toggle",        bindings::Behavior::Momentary },
-        { "Shift",                 "fine_modifier",       bindings::Behavior::Hold      },
-        { "Option",                "fine_modifier",       bindings::Behavior::Hold      },
-        { "Control",               "fine_modifier",       bindings::Behavior::Hold      },
-        { "Alt",                   "fine_modifier",       bindings::Behavior::Hold      },
+        // Shift family — all routed to mod_shift; Cmd/Ctrl bindings get
+        // their own flavour via dedicated CSI verbs below.
+        { "Shift",                 "mod_shift",           bindings::Behavior::Hold      },
+        { "Option",                "mod_cmd",             bindings::Behavior::Hold      },
+        { "Control",               "mod_ctrl",            bindings::Behavior::Hold      },
+        { "Alt",                   "mod_cmd",             bindings::Behavior::Hold      },
     };
     for (auto& v : kVerbs) {
         if (verb == v.csi && v.builtin && *v.builtin) {
-            bd.type     = bindings::ActionType::Builtin;
-            bd.action   = v.builtin;
+            sp.type     = bindings::ActionType::Builtin;
+            sp.action   = v.builtin;
             bd.behavior = v.beh;
             bd.label    = v.csi;
             description = "Built-in: " + std::string(v.builtin);
@@ -235,40 +234,37 @@ bindings::Binding translateAction_(const std::vector<std::string>& tokens,
 
     // ---- TrackAutoMode <N> → matching auto_* builtin ----
     if (verb == "TrackAutoMode" && tokens.size() >= 2) {
-        bd.type     = bindings::ActionType::Builtin;
+        sp.type     = bindings::ActionType::Builtin;
         bd.behavior = bindings::Behavior::Momentary;
         const std::string& mode = tokens[1];
-        if      (mode == "0") bd.action = "auto_off";
-        else if (mode == "1") bd.action = "auto_read";
-        else if (mode == "2") bd.action = "auto_touch";
-        else if (mode == "3") bd.action = "auto_write";
-        else if (mode == "4") bd.action = "auto_trim";
-        else if (mode == "5") bd.action = "auto_latch";
-        else                  bd.action = "";
-        if (!bd.action.empty()) {
-            bd.label    = bd.action;
-            description = "Built-in: " + bd.action + " (TrackAutoMode " + mode + ")";
+        if      (mode == "0") sp.action = "auto_off";
+        else if (mode == "1") sp.action = "auto_read";
+        else if (mode == "2") sp.action = "auto_touch";
+        else if (mode == "3") sp.action = "auto_write";
+        else if (mode == "4") sp.action = "auto_trim";
+        else if (mode == "5") sp.action = "auto_latch";
+        else                  sp.action = "";
+        if (!sp.action.empty()) {
+            bd.label    = sp.action;
+            description = "Built-in: " + sp.action + " (TrackAutoMode " + mode + ")";
             return bd;
         }
     }
 
     // ---- Bank Track ±1 → page nav ---------------------------------------
-    // CSI's `Bank Track ±1` walks the channel bank by one strip. Closest
-    // Rea-Sixty equivalent is the soft-key page nav (different semantics
-    // but it's the only single-strip walk we have). Mark with a warning.
     if (verb == "Bank" && tokens.size() >= 3 && tokens[1] == "Track") {
         const std::string& delta = tokens[2];
         if (delta == "-1" || delta == "-8" || delta == "-999") {
-            bd.type   = bindings::ActionType::Builtin;
-            bd.action = "bank_left";
+            sp.type   = bindings::ActionType::Builtin;
+            sp.action = "bank_left";
             bd.label  = "BANK <";
             description = "CSI Bank Track " + delta + " → bank_left";
             warning = true;
             return bd;
         }
         if (delta == "1" || delta == "8" || delta == "999") {
-            bd.type   = bindings::ActionType::Builtin;
-            bd.action = "bank_right";
+            sp.type   = bindings::ActionType::Builtin;
+            sp.action = "bank_right";
             bd.label  = "BANK >";
             description = "CSI Bank Track " + delta + " → bank_right";
             warning = true;
@@ -277,7 +273,7 @@ bindings::Binding translateAction_(const std::vector<std::string>& tokens,
     }
 
     // ---- Catch-all: keep as Noop with a descriptive label ---------------
-    bd.type  = bindings::ActionType::Noop;
+    sp.type  = bindings::ActionType::Noop;
     bd.label = verb;
     if (tokens.size() > 1) {
         bd.label += " " + tokens[1];
@@ -352,55 +348,73 @@ bool parseZoneLine_(const std::string& line, ZoneLine& out)
 
 // ---- Per-binding: pick the import outcome --------------------------------
 
-void importLine_(const ZoneLine&            zl,
-                 ImportEntry&               entry,
-                 bindings::ButtonId&        outId,
-                 bindings::Binding&         outBd,
-                 bool&                      outShouldApply)
+// Map a CSI modifier prefix to a Rea-Sixty Modifier slot. Returns
+// `false` (and leaves `out` unchanged) for prefixes Rea-Sixty doesn't
+// have a slot for — the caller should skip those lines with a warning.
+bool csiModifierToSlot_(const std::string& csi, bindings::Modifier& out)
 {
-    entry.sourceLine = zl.raw;
-    entry.widget     = zl.widget;
-    {
-        std::string a;
-        for (size_t i = 0; i < zl.action.size(); ++i) {
-            if (i) a += ' ';
-            a += zl.action[i];
-        }
-        entry.action = a;
-    }
+    // Mac convention: CSI's Shift = Rea-Sixty Shift; Option = Cmd
+    // (because Option is the macOS modifier most often substituted for
+    // Cmd in cross-platform configs); Control = Ctrl; Alt is treated
+    // as Cmd to keep PC-flavoured CSI configs sensible. Anything else
+    // (Global, Hold, Marker, Zoom, …) maps to nothing.
+    if (csi == "Shift")   { out = bindings::Modifier::Shift; return true; }
+    if (csi == "Option")  { out = bindings::Modifier::Cmd;   return true; }
+    if (csi == "Alt")     { out = bindings::Modifier::Cmd;   return true; }
+    if (csi == "Control") { out = bindings::Modifier::Ctrl;  return true; }
+    return false;
+}
 
-    outShouldApply = false;
-    outId          = bindings::ButtonId::None;
+// Outcome of parsing one Home.zon line. The caller (scan_) merges this
+// into a working Binding for the widget — multiple lines for the same
+// widget (one Plain + N modifiers) accumulate in a single Binding.
+struct ParsedLine {
+    bindings::ButtonId   bid       = bindings::ButtonId::None;
+    bindings::Modifier   mod       = bindings::Modifier::Plain;
+    bindings::ActionSlot slot;
+    bindings::Behavior   behavior  = bindings::Behavior::Momentary;
+    std::string          label;
+    std::string          description;
+    bool                 warning   = false;
+    std::string          skipReason;   // non-empty = skip with this message
+};
+
+ParsedLine parseImportLine_(const ZoneLine& zl)
+{
+    ParsedLine p;
 
     if (zl.perStrip) {
-        entry.mappedTo = "skipped — per-strip binding (Rea-Sixty hardcodes per-strip)";
-        return;
+        p.skipReason = "per-strip binding (Rea-Sixty hardcodes per-strip)";
+        return p;
+    }
+
+    // Translate modifier prefix (if any). Multi-modifier prefixes
+    // ("Shift+Option+Widget") are too rare to model — skip them.
+    if (zl.modifiers.size() > 1) {
+        p.skipReason = "multi-modifier prefix (\"" + zl.modifiers.front()
+                     + "+" + zl.modifiers[1] + "+\") not supported";
+        return p;
     }
     if (!zl.modifiers.empty()) {
-        entry.mappedTo = "skipped — modifier prefix (\""
-                       + zl.modifiers.front()
-                       + "+\") not supported in v1";
-        return;
+        if (!csiModifierToSlot_(zl.modifiers.front(), p.mod)) {
+            p.skipReason = "modifier prefix \"" + zl.modifiers.front()
+                         + "+\" has no Rea-Sixty slot";
+            return p;
+        }
     }
 
-    auto bid = widgetToButtonId_(zl.widget);
-    if (bid == bindings::ButtonId::None) {
-        entry.mappedTo = "skipped — CSI widget \"" + zl.widget
-                       + "\" has no Rea-Sixty bindable equivalent";
-        return;
+    p.bid = widgetToButtonId_(zl.widget);
+    if (p.bid == bindings::ButtonId::None) {
+        p.skipReason = "CSI widget \"" + zl.widget
+                     + "\" has no Rea-Sixty bindable equivalent";
+        return p;
     }
 
-    std::string desc;
-    bool        warn = false;
-    auto bd = translateAction_(zl.action, desc, warn);
-    bd.label = (bd.label.empty() ? zl.widget : bd.label);
-
-    entry.mappedTo = std::string(bindings::toName(bid)) + "  ←  " + desc;
-    entry.warning  = warn;
-
-    outId          = bid;
-    outBd          = bd;
-    outShouldApply = true;
+    bindings::Binding tmp = translateAction_(zl.action, p.description, p.warning);
+    p.slot     = tmp.shortPress[static_cast<int>(bindings::Modifier::Plain)];
+    p.behavior = tmp.behavior;
+    p.label    = tmp.label.empty() ? zl.widget : tmp.label;
+    return p;
 }
 
 ImportReport scan_(const std::string& surfaceDir, bool doApply,
@@ -460,20 +474,59 @@ ImportReport scan_(const std::string& surfaceDir, bool doApply,
         // Re-seed the layer-select bindings on the cleared layer so the
         // user can navigate back. Mirrors seedFactoryDefaults_.
         bindings::Binding ls;
-        ls.type     = bindings::ActionType::Builtin;
         ls.behavior = bindings::Behavior::Momentary;
         ls.color[0] = ls.color[1] = ls.color[2] = 255;
-        ls.action = "layer_select_1"; ls.label = "LAYER 1";
+        ls.inactiveColor[0] = ls.inactiveColor[1] = ls.inactiveColor[2] = 255;
+        auto& lsSp = ls.shortPress[static_cast<int>(bindings::Modifier::Plain)];
+        lsSp.type = bindings::ActionType::Builtin;
+        lsSp.action = "layer_select_1"; ls.label = "LAYER 1";
         bindings::setBinding(targetLayer, bindings::ButtonId::Layer1, ls);
-        ls.action = "layer_select_2"; ls.label = "LAYER 2";
+        lsSp.action = "layer_select_2"; ls.label = "LAYER 2";
         bindings::setBinding(targetLayer, bindings::ButtonId::Layer2, ls);
-        ls.action = "layer_select_3"; ls.label = "LAYER 3";
+        lsSp.action = "layer_select_3"; ls.label = "LAYER 3";
         bindings::setBinding(targetLayer, bindings::ButtonId::Layer3, ls);
     }
 
-    // Walk every line. We don't track CSI's `Zone <name>` boundaries
-    // because Home.zon is the only file we read — every binding inside
-    // is "the home zone".
+    // Walk every line. We accumulate into a local map<ButtonId, Binding>
+    // so multiple lines for the same widget (one Plain + N modifiers)
+    // merge into a single Binding without later lines overwriting
+    // earlier slots. The map is written out via setBinding only at the
+    // end (apply mode).
+    std::unordered_map<bindings::ButtonId, bindings::Binding> accum;
+
+    auto recordEntry = [&](const ZoneLine& zl, const ParsedLine& p) {
+        ImportEntry e;
+        e.sourceLine = zl.raw;
+        e.widget     = zl.widget;
+        {
+            std::string a;
+            for (size_t i = 0; i < zl.action.size(); ++i) {
+                if (i) a += ' ';
+                a += zl.action[i];
+            }
+            e.action = a;
+        }
+        if (!p.skipReason.empty()) {
+            e.mappedTo = "skipped — " + p.skipReason;
+            ++r.skippedCount;
+        } else {
+            const char* modTag = "";
+            switch (p.mod) {
+                case bindings::Modifier::Plain: modTag = "";          break;
+                case bindings::Modifier::Shift: modTag = " (Shift+)"; break;
+                case bindings::Modifier::Cmd:   modTag = " (Cmd+)";   break;
+                case bindings::Modifier::Ctrl:  modTag = " (Ctrl+)";  break;
+            }
+            e.mappedTo = std::string(bindings::toName(p.bid))
+                       + modTag + "  ←  " + p.description;
+            e.warning  = p.warning;
+            e.applied  = true;
+            ++r.appliedCount;
+        }
+        if (e.warning) ++r.warningCount;
+        r.entries.push_back(std::move(e));
+    };
+
     size_t pos = 0;
     while (pos < contents.size()) {
         size_t eol = contents.find('\n', pos);
@@ -485,27 +538,44 @@ ImportReport scan_(const std::string& surfaceDir, bool doApply,
         ZoneLine zl;
         if (!parseZoneLine_(line, zl)) continue;
 
-        ImportEntry e;
-        bindings::ButtonId bid;
-        bindings::Binding  bd;
-        bool               shouldApply;
-        importLine_(zl, e, bid, bd, shouldApply);
+        ParsedLine p = parseImportLine_(zl);
+        recordEntry(zl, p);
+        if (!p.skipReason.empty()) continue;
 
-        if (shouldApply && doApply &&
-            targetLayer >= 0 && targetLayer <= 2 &&
-            bid != bindings::ButtonId::None) {
-            bindings::setBinding(targetLayer, bid, bd);
-            e.applied = true;
-            ++r.appliedCount;
-        } else if (shouldApply) {
-            // preview mode — count as "would apply"
-            e.applied = true;
-            ++r.appliedCount;
+        bindings::Binding& bd = accum[p.bid];
+        if (p.mod == bindings::Modifier::Plain) {
+            bd.behavior = p.behavior;
+            bd.label    = p.label;
+            bd.shortPress[static_cast<int>(bindings::Modifier::Plain)] = p.slot;
         } else {
-            ++r.skippedCount;
+            bd.shortPress[static_cast<int>(p.mod)] = p.slot;
+            // If we've never seen a plain line for this widget yet, leave
+            // its plain slot empty — the user can fill it in via the editor.
+            // Behavior defaults to Momentary, which is the correct mode for
+            // modifier-prefixed lines anyway.
         }
-        if (e.warning) ++r.warningCount;
-        r.entries.push_back(std::move(e));
+    }
+
+    // Default colours for newly-imported bindings. setBinding overwrites
+    // whatever was on the layer (or seeded by the optional clear pass),
+    // so we ensure each accumulated binding carries a sensible LED.
+    for (auto& kv : accum) {
+        bindings::Binding& bd = kv.second;
+        if (bd.color[0] == 0 && bd.color[1] == 0 && bd.color[2] == 0) {
+            bd.color[0] = bd.color[1] = bd.color[2] = 255;
+        }
+        if (bd.inactiveColor[0] == 0 && bd.inactiveColor[1] == 0
+            && bd.inactiveColor[2] == 0) {
+            bd.inactiveColor[0] = bd.color[0];
+            bd.inactiveColor[1] = bd.color[1];
+            bd.inactiveColor[2] = bd.color[2];
+        }
+    }
+
+    if (doApply && targetLayer >= 0 && targetLayer <= 2) {
+        for (auto& kv : accum) {
+            bindings::setBinding(targetLayer, kv.first, kv.second);
+        }
     }
 
     return r;

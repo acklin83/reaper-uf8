@@ -790,9 +790,23 @@ bool drawActionPicker(ImGui_Context* ctx, const char* prefix,
     return dirty;
 }
 
-// Editor panel — two-column layout. Left: primary action + behavior.
-// Right: long-press (only when primary behavior == Momentary).
-// Auto-saves on every change.
+// Helper: render an ActionSlot's picker. `prefix` must be unique within
+// the editor (the picker uses it for ImGui IDs).
+bool drawSlotPicker(ImGui_Context* ctx, const char* prefix,
+                    int layer, ButtonId id, uf8::bindings::ActionSlot& s,
+                    bool isLongPress)
+{
+    ActionFieldsRef ref{
+        &s.type, &s.action, &s.param,
+        &s.midiDevice, &s.midiChannel, &s.midiMsgType,
+        &s.midiData1, &s.midiData2,
+    };
+    return drawActionPicker(ctx, prefix, ref, layer, id, isLongPress);
+}
+
+// Editor panel — two-column matrix. Left: SHORT PRESS (Plain row + 3
+// modifier collapsibles). Right: LONG PRESS (same shape, only for
+// Momentary). Auto-saves on every change.
 void drawBindingEditor(ImGui_Context* ctx, int layer, ButtonId id)
 {
     using namespace uf8::bindings;
@@ -809,93 +823,145 @@ void drawBindingEditor(ImGui_Context* ctx, int layer, ButtonId id)
     ImGui_PushID(ctx, uf8::bindings::toName(id));
     const int themePushed = pushBindingsTheme(ctx);
 
-    // Two columns. Each child sized half the available width with
-    // matching height so the bordered panels read as a pair.
+    // True when the binding's plain short slot maps a button to a
+    // Modifier role. Combining a modifier with itself is undefined, so
+    // we hide the modifier rows + long press for these bindings.
+    auto& shortPlain = bd.shortPress[static_cast<int>(Modifier::Plain)];
+    const bool plainIsModifier =
+        shortPlain.type == ActionType::Builtin
+        && (shortPlain.action == "mod_shift"
+         || shortPlain.action == "mod_cmd"
+         || shortPlain.action == "mod_ctrl");
+
+    const bool momentary = (bd.behavior == Behavior::Momentary);
+    const bool modifiersAvailable = momentary && !plainIsModifier;
+
+    // Two side-by-side columns. Each child sized half the available
+    // width with matching height so the bordered panels read as a pair.
     double availX = 0, availY = 0;
     ImGui_GetContentRegionAvail(ctx, &availX, &availY);
     double colW = (availX - 16) / 2.0;
-    if (colW < 280) colW = 280;
-    const double colH = 320;
+    if (colW < 320) colW = 320;
+    const double colH = 480;
 
-    // ---- Left column: PRIMARY ACTION ----
-    // child_flags = ChildFlags_Borders matches the previous "bool border=true"
-    // intent under v0.1.1. v0.10 BeginChild's 5th arg is int* child_flags
-    // (vendored header patched 2026-05-02 — see learnings rule 17).
+    static const char* kModNames[]   = { "Plain", "+ Shift / Fine",
+                                         "+ Cmd",  "+ Ctrl" };
+    static const char* kModSlugs[]   = { "pl", "sh", "cm", "ct" };
+
+    auto drawColumn = [&](const char* title, const char* tag,
+                          ActionSlot* slots, bool isLongCol)
     {
         double w = colW, h = colH;
         int childFlags = ImGui_ChildFlags_Borders;
-        if (ImGui_BeginChild(ctx, "primary_col", &w, &h, &childFlags, nullptr)) {
-            ImGui_Text(ctx, "PRIMARY ACTION");
+        char childId[32];
+        std::snprintf(childId, sizeof(childId), "%s_col", tag);
+        if (ImGui_BeginChild(ctx, childId, &w, &h, &childFlags, nullptr)) {
+            ImGui_Text(ctx, title);
             ImGui_Separator(ctx);
 
-            ActionFieldsRef pri{
-                &bd.type, &bd.action, &bd.param,
-                &bd.midiDevice, &bd.midiChannel, &bd.midiMsgType,
-                &bd.midiData1, &bd.midiData2,
-            };
-            if (drawActionPicker(ctx, "pri", pri, layer, id,
-                                 /*isLongPress*/ false)) dirty = true;
-
-            ImGui_Spacing(ctx);
-            ImGui_Separator(ctx);
-
-            static char kBehaviorItems[] =
-                "Momentary (fire on press)\0"
-                "Toggle (flip on each press)\0"
-                "Hold (state mirrors button)\0";
-            int b = static_cast<int>(bd.behavior);
-            double bw = 240;
-            ImGui_PushItemWidth(ctx, bw);
-            if (ImGui_Combo(ctx, "Behavior##pri_beh", &b, kBehaviorItems,
-                            nullptr)) {
-                bd.behavior = static_cast<Behavior>(b);
-                dirty = true;
-            }
-            ImGui_PopItemWidth(ctx);
-        }
-        ImGui_EndChild(ctx);
-    }
-
-    ImGui_SameLine(ctx, /*offset_from_start_x*/ nullptr,
-                   /*spacing*/ nullptr);
-
-    // ---- Right column: LONG-PRESS ACTION ----
-    {
-        double w = colW, h = colH;
-        int childFlags = ImGui_ChildFlags_Borders;
-        if (ImGui_BeginChild(ctx, "longpress_col", &w, &h, &childFlags, nullptr)) {
-            ImGui_Text(ctx, "LONG-PRESS  (held > 0.5 s)");
-            ImGui_Separator(ctx);
-
-            if (bd.behavior != Behavior::Momentary) {
-                ImGui_Text(ctx, "Long-press is only available for");
-                ImGui_Text(ctx, "Momentary primary actions.");
-                if (bd.hasLongPress) {
-                    bd.hasLongPress = false;
+            // Behavior combo lives only in the SHORT column — it
+            // applies to both columns.
+            if (!isLongCol) {
+                static char kBehaviorItems[] =
+                    "Momentary (fire on press)\0"
+                    "Toggle (flip on each press)\0"
+                    "Hold (state mirrors button)\0";
+                int b = static_cast<int>(bd.behavior);
+                double bw = 240;
+                ImGui_PushItemWidth(ctx, bw);
+                if (ImGui_Combo(ctx, "Behavior##pri_beh", &b, kBehaviorItems,
+                                nullptr)) {
+                    bd.behavior = static_cast<Behavior>(b);
                     dirty = true;
                 }
+                ImGui_PopItemWidth(ctx);
+                ImGui_Spacing(ctx);
+                ImGui_Separator(ctx);
             } else {
+                // Long column gets an explicit enable toggle. Greyed
+                // out for non-Momentary behaviours.
+                if (!momentary) {
+                    ImGui_TextDisabled(ctx,
+                        "Long-press is only available for Momentary.");
+                    if (bd.hasLongPress) { bd.hasLongPress = false; dirty = true; }
+                    return;  // nothing else to render in this column
+                }
                 bool en = bd.hasLongPress;
-                if (ImGui_Checkbox(ctx, "Enable long-press action##lp_en", &en)) {
+                if (ImGui_Checkbox(ctx, "Enable long-press (held > 0.5 s)",
+                                   &en)) {
                     bd.hasLongPress = en;
-                    if (en && bd.longPressType == ActionType::Noop) {
-                        bd.longPressType = ActionType::Builtin;
+                    if (en && slots[0].type == ActionType::Noop) {
+                        slots[0].type = ActionType::Builtin;
                     }
                     dirty = true;
                 }
-                if (bd.hasLongPress) {
+                if (!bd.hasLongPress) return;
+                ImGui_Spacing(ctx);
+                ImGui_Separator(ctx);
+            }
+
+            // Plain row — always drawn first; never collapsed.
+            ImGui_Text(ctx, kModNames[0]);
+            char slotPrefix[32];
+            std::snprintf(slotPrefix, sizeof(slotPrefix), "%s_pl", tag);
+            if (drawSlotPicker(ctx, slotPrefix, layer, id, slots[0], isLongCol))
+                dirty = true;
+
+            // Modifier rows — each in its own collapsing header. Hidden
+            // entirely when this binding is itself a modifier.
+            if (plainIsModifier) {
+                ImGui_Spacing(ctx);
+                ImGui_TextDisabled(ctx,
+                    "(Modifier rows hidden — this button IS a modifier.)");
+            } else {
+                for (int m = 1; m < kModifierCount; ++m) {
                     ImGui_Spacing(ctx);
-                    ActionFieldsRef lp{
-                        &bd.longPressType, &bd.longPressAction,
-                        &bd.longPressParam,
-                        &bd.longPressMidiDevice, &bd.longPressMidiChannel,
-                        &bd.longPressMidiMsgType,
-                        &bd.longPressMidiData1, &bd.longPressMidiData2,
-                    };
-                    if (drawActionPicker(ctx, "lp", lp, layer, id,
-                                         /*isLongPress*/ true)) dirty = true;
+                    ImGui_Separator(ctx);
+                    char hdr[64];
+                    if (slots[m].type != ActionType::Noop && !slots[m].action.empty()) {
+                        std::snprintf(hdr, sizeof(hdr), "%s   →  %s",
+                                      kModNames[m], slots[m].action.c_str());
+                    } else {
+                        std::snprintf(hdr, sizeof(hdr), "%s   (empty)",
+                                      kModNames[m]);
+                    }
+                    char hdrId[80];
+                    std::snprintf(hdrId, sizeof(hdrId), "%s##%s_h_%s",
+                                  hdr, tag, kModSlugs[m]);
+                    if (ImGui_CollapsingHeader(ctx, hdrId, nullptr, nullptr)) {
+                        char modPrefix[32];
+                        std::snprintf(modPrefix, sizeof(modPrefix), "%s_%s",
+                                      tag, kModSlugs[m]);
+                        if (drawSlotPicker(ctx, modPrefix, layer, id,
+                                           slots[m], isLongCol)) dirty = true;
+                    }
                 }
             }
+        }
+        ImGui_EndChild(ctx);
+    };
+
+    drawColumn("SHORT PRESS", "sp", bd.shortPress, /*isLongCol*/ false);
+    ImGui_SameLine(ctx, nullptr, nullptr);
+    if (modifiersAvailable) {
+        drawColumn("LONG PRESS", "lp", bd.longPress, /*isLongCol*/ true);
+    } else {
+        // Placeholder column so the editor's two panels stay balanced
+        // for Toggle/Hold or modifier-self bindings (where long-press
+        // doesn't apply).
+        double w = colW, h = colH;
+        int childFlags = ImGui_ChildFlags_Borders;
+        if (ImGui_BeginChild(ctx, "lp_col_disabled", &w, &h, &childFlags, nullptr)) {
+            ImGui_Text(ctx, "LONG PRESS");
+            ImGui_Separator(ctx);
+            if (!momentary) {
+                ImGui_TextDisabled(ctx,
+                    "Long-press only available for Momentary primary.");
+            } else {
+                ImGui_TextDisabled(ctx,
+                    "Long-press disabled — this button IS a modifier.");
+            }
+            if (bd.hasLongPress) { bd.hasLongPress = false; dirty = true; }
         }
         ImGui_EndChild(ctx);
     }

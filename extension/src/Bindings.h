@@ -87,11 +87,40 @@ enum class MidiMsgType : uint8_t {
     ProgramChange,
 };
 
-struct Binding {
+// One actionable cell of a binding. Captures every field needed to
+// describe a single action — used 8x per Binding (4 modifier rows ×
+// 2 press kinds). Default-constructed = "do nothing for this combo".
+struct ActionSlot {
     ActionType  type     = ActionType::Noop;
-    Behavior    behavior = Behavior::Momentary;
     std::string action;        // builtin name / REAPER action id / keyboard chord
     int         param    = 0;
+    // MIDI command fields — read only when `type == Midi`.
+    //   midiDevice  output device name (REAPER GetMIDIOutputName, "" = all)
+    //   midiChannel 1..16 (stored 1-based for human-readability)
+    //   midiMsgType see MidiMsgType — picks status nibble + interpretation
+    //   midiData1   note number / CC number / program number
+    //   midiData2   velocity / CC value (ignored for ProgramChange)
+    std::string midiDevice;
+    int         midiChannel = 1;
+    int         midiMsgType = 0;
+    int         midiData1   = 60;
+    int         midiData2   = 127;
+};
+
+// Modifier-prefix index into Binding::shortPress / Binding::longPress.
+// Plain slot = no modifier held at press-time. Order matches a fixed
+// precedence used by dispatch when multiple modifiers are simultaneously
+// held: Ctrl > Cmd > Shift (most-specific wins).
+enum class Modifier : uint8_t {
+    Plain = 0,
+    Shift = 1,
+    Cmd   = 2,
+    Ctrl  = 3,
+};
+constexpr int kModifierCount = 4;
+
+struct Binding {
+    Behavior    behavior = Behavior::Momentary;
     std::string label;
 
     // LED appearance — split active / inactive state.
@@ -107,32 +136,17 @@ struct Binding {
     uint8_t     inactiveColor[3]    = {0xFF, 0xFF, 0xFF};
     Brightness  inactiveBrightness  = Brightness::Dim;
 
-    // MIDI command fields — read only when `type == Midi`.
-    //   midiDevice  output device name (REAPER GetMIDIOutputName, "" = all)
-    //   midiChannel 1..16 (stored 1-based for human-readability)
-    //   midiMsgType see MidiMsgType — picks status nibble + interpretation
-    //   midiData1   note number / CC number / program number
-    //   midiData2   velocity / CC value (ignored for ProgramChange)
-    std::string midiDevice;
-    int         midiChannel = 1;
-    int         midiMsgType = 0;
-    int         midiData1   = 60;
-    int         midiData2   = 127;
-
-    // Long-press secondary action. When `hasLongPress` is true AND the
-    // primary `behavior` is Momentary, holding the button longer than
-    // ~500 ms fires the long-press action instead of the primary action.
-    // Toggle / Hold primary behaviours ignore long-press (semantics are
-    // ambiguous; UI greys the long-press section out for those).
-    bool        hasLongPress     = false;
-    ActionType  longPressType    = ActionType::Noop;
-    std::string longPressAction;
-    int         longPressParam   = 0;
-    std::string longPressMidiDevice;
-    int         longPressMidiChannel = 1;
-    int         longPressMidiMsgType = 0;
-    int         longPressMidiData1   = 60;
-    int         longPressMidiData2   = 127;
+    // 4×2 action matrix — [Modifier index][short=0 / long=1].
+    //   shortPress[m] : fires on release-edge (or while-held for Hold
+    //                    behaviour). The modifier `m` is snapshotted at
+    //                    PRESS time and re-used for the release decision.
+    //   longPress[m]  : fires when the press exceeds the long-press
+    //                    threshold (~500 ms). Same modifier snapshot.
+    // Behavior::Toggle / ::Hold collapse to shortPress[Plain] only;
+    // hasLongPress is forced false and the editor greys out the rest.
+    bool        hasLongPress = false;
+    ActionSlot  shortPress[kModifierCount];
+    ActionSlot  longPress[kModifierCount];
 };
 
 struct Layer {
@@ -194,6 +208,14 @@ void save();
 // regular configPath). Both return false on I/O / parse errors.
 bool exportTo(const std::string& path);
 bool importFrom(const std::string& path);
+
+// Modifier state — set by main.cpp's mod_shift / mod_cmd / mod_ctrl
+// builtin handlers when their button is pressed/released. Read by
+// dispatch() at press-edge to snapshot the current modifier into the
+// in-flight press record. Atomics so the libusb input thread can
+// publish without locking.
+void     setModifierHeld(Modifier m, bool held);
+Modifier currentModifierSnapshot();
 
 // Per-layer variants. exportLayerTo writes a single layer wrapped in a
 // {"version":1,"type":"layer","index":N,"layer":{…}} object so the

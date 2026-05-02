@@ -4349,8 +4349,9 @@ void reasixty_actionPickerPoll()
     else           actionStr = std::to_string(r);
     using namespace uf8::bindings;
     Binding bd = getBinding(g_pickerLayer, g_pickerId);
-    if (g_pickerLongPress) bd.longPressAction = actionStr;
-    else                   bd.action          = actionStr;
+    const int plain = static_cast<int>(Modifier::Plain);
+    if (g_pickerLongPress) bd.longPress[plain].action  = actionStr;
+    else                   bd.shortPress[plain].action = actionStr;
     setBinding(g_pickerLayer, g_pickerId, bd);
 }
 
@@ -4554,13 +4555,30 @@ void registerBindingHandlers()
         nullptr, "Open / close Plugin Mixer", false
     });
 
-    // Hold behaviour — state mirrors the physical button.
-    registerBuiltin("fine_modifier", DescBuilder{
+    // Modifier builtins — Hold behaviour. Each handler publishes the
+    // press state into Bindings so dispatch() can snapshot the active
+    // modifier at press-edge of any other button. g_shiftHeld stays in
+    // sync (legacy callers in this TU still read it for fine-grained
+    // fader/scrub speed) — the mod_shift handler shadows both atomics.
+    registerBuiltin("mod_shift", DescBuilder{
         [](bool /*firing*/, bool pressed, int /*param*/) {
             g_shiftHeld.store(pressed);
+            uf8::bindings::setModifierHeld(uf8::bindings::Modifier::Shift, pressed);
         },
         [](int) { return g_shiftHeld.load(); },
-        "Fine modifier (Shift)", false
+        "Modifier: Shift / Fine", false
+    });
+    registerBuiltin("mod_cmd", DescBuilder{
+        [](bool /*firing*/, bool pressed, int /*param*/) {
+            uf8::bindings::setModifierHeld(uf8::bindings::Modifier::Cmd, pressed);
+        },
+        nullptr, "Modifier: Cmd", false
+    });
+    registerBuiltin("mod_ctrl", DescBuilder{
+        [](bool /*firing*/, bool pressed, int /*param*/) {
+            uf8::bindings::setModifierHeld(uf8::bindings::Modifier::Ctrl, pressed);
+        },
+        nullptr, "Modifier: Ctrl", false
     });
 
     registerBuiltin("encoder_nav", DescBuilder{

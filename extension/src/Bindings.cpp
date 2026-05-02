@@ -13,6 +13,7 @@
 #include "Bindings.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -203,7 +204,24 @@ int g_savedLayer = -1;
 // worker thread, so this map needs no locking. Threshold is 500 ms
 // (matches generic "tap vs hold" UX expectations).
 constexpr std::chrono::milliseconds kLongPressThreshold{500};
-std::unordered_map<uint32_t, std::chrono::steady_clock::time_point> g_pressStart;
+
+// Per-press record so the long-press path knows both WHEN the press
+// started AND WHICH modifier was held at press time. Snapshot stays
+// stable across the press window even if the user releases the
+// modifier mid-hold — gives predictable Shift+button semantics.
+struct PressRecord {
+    std::chrono::steady_clock::time_point start;
+    Modifier                              mod;
+};
+std::unordered_map<uint32_t, PressRecord> g_pressStart;
+
+// Modifier state, set by main.cpp's mod_shift / mod_cmd / mod_ctrl
+// builtin handlers. dispatch reads currentModifierSnapshot() at press
+// edge; precedence at snapshot time is Ctrl > Cmd > Shift > Plain so
+// the most specific bind wins when multiple modifiers are held.
+std::atomic<bool> g_modShiftHeld{false};
+std::atomic<bool> g_modCmdHeld  {false};
+std::atomic<bool> g_modCtrlHeld {false};
 
 uint32_t pressKey(int layer, ButtonId id)
 {
@@ -218,12 +236,16 @@ Binding mkBuiltin(const char* name, Behavior b, const char* label,
                   int param = 0)
 {
     Binding bd;
-    bd.type     = ActionType::Builtin;
     bd.behavior = b;
-    bd.action   = name;
     bd.label    = label;
-    bd.param    = param;
     bd.color[0] = r; bd.color[1] = g; bd.color[2] = b_;
+    bd.inactiveColor[0] = r;
+    bd.inactiveColor[1] = g;
+    bd.inactiveColor[2] = b_;
+    auto& s = bd.shortPress[static_cast<int>(Modifier::Plain)];
+    s.type   = ActionType::Builtin;
+    s.action = name;
+    s.param  = param;
     return bd;
 }
 
@@ -329,6 +351,70 @@ void appendEscaped(std::ostringstream& os, const std::string& s)
 // fields and the bindings map keys, so the same helper formats both
 // the full-Config layer-array entry (4 / 8 spaces) and the standalone
 // per-layer file (2 / 4 spaces).
+
+const char* modifierKeyName_(int m)
+{
+    switch (m) {
+        case static_cast<int>(Modifier::Plain): return "plain";
+        case static_cast<int>(Modifier::Shift): return "shift";
+        case static_cast<int>(Modifier::Cmd):   return "cmd";
+        case static_cast<int>(Modifier::Ctrl):  return "ctrl";
+    }
+    return "plain";
+}
+
+int modifierFromKey_(const char* s)
+{
+    if (!s) return -1;
+    if (std::strcmp(s, "plain") == 0) return static_cast<int>(Modifier::Plain);
+    if (std::strcmp(s, "shift") == 0) return static_cast<int>(Modifier::Shift);
+    if (std::strcmp(s, "cmd")   == 0) return static_cast<int>(Modifier::Cmd);
+    if (std::strcmp(s, "ctrl")  == 0) return static_cast<int>(Modifier::Ctrl);
+    return -1;
+}
+
+bool slotIsEmpty_(const ActionSlot& s)
+{
+    return s.type == ActionType::Noop && s.action.empty();
+}
+
+// Emit a single ActionSlot's fields inline (no surrounding braces) —
+// caller owns the wrapping object.
+void serializeSlotFields_(const ActionSlot& s, std::ostringstream& os)
+{
+    os << "\"type\": ";   appendEscaped(os, actionTypeName(s.type));
+    os << ", \"action\": "; appendEscaped(os, s.action);
+    os << ", \"param\": " << s.param;
+    if (s.type == ActionType::Midi) {
+        os << ", \"midi\": {";
+        os << "\"device\": ";   appendEscaped(os, s.midiDevice);
+        os << ", \"channel\": " << s.midiChannel;
+        os << ", \"msg\": "     << s.midiMsgType;
+        os << ", \"d1\": "      << s.midiData1;
+        os << ", \"d2\": "      << s.midiData2;
+        os << "}";
+    }
+}
+
+// Emit the {plain, shift, cmd, ctrl} matrix object for one row of the
+// short/long matrix. Slots with no action set are omitted to keep the
+// JSON compact for the common case (most bindings only use plain).
+void serializeMatrixRow_(const ActionSlot (&row)[kModifierCount],
+                         std::ostringstream& os)
+{
+    os << "{";
+    bool first = true;
+    for (int m = 0; m < kModifierCount; ++m) {
+        if (slotIsEmpty_(row[m])) continue;
+        if (!first) os << ", ";
+        first = false;
+        os << "\"" << modifierKeyName_(m) << "\": {";
+        serializeSlotFields_(row[m], os);
+        os << "}";
+    }
+    os << "}";
+}
+
 void serializeLayerBody_(const Layer& L, std::ostringstream& os,
                          const char* fieldPad, const char* bindingPad)
 {
@@ -347,48 +433,29 @@ void serializeLayerBody_(const Layer& L, std::ostringstream& os,
         if (!name || !*name) continue;
         if (!first) os << ",";
         first = false;
+        const Binding& bd = kv.second;
         os << "\n" << bindingPad << "\"" << name << "\": {";
-        os << "\"type\": ";       appendEscaped(os, actionTypeName(kv.second.type));
-        os << ", \"behavior\": "; appendEscaped(os, behaviorName(kv.second.behavior));
-        os << ", \"action\": ";   appendEscaped(os, kv.second.action);
-        os << ", \"param\": "     << kv.second.param;
-        os << ", \"label\": ";    appendEscaped(os, kv.second.label);
+        os << "\"behavior\": "; appendEscaped(os, behaviorName(bd.behavior));
+        os << ", \"label\": ";  appendEscaped(os, bd.label);
         os << ", \"color\": ["
-           << int(kv.second.color[0]) << ", "
-           << int(kv.second.color[1]) << ", "
-           << int(kv.second.color[2]) << "]";
+           << int(bd.color[0]) << ", "
+           << int(bd.color[1]) << ", "
+           << int(bd.color[2]) << "]";
         os << ", \"brightness\": ";
-        appendEscaped(os, brightnessName(kv.second.brightness));
+        appendEscaped(os, brightnessName(bd.brightness));
         os << ", \"inactive_color\": ["
-           << int(kv.second.inactiveColor[0]) << ", "
-           << int(kv.second.inactiveColor[1]) << ", "
-           << int(kv.second.inactiveColor[2]) << "]";
+           << int(bd.inactiveColor[0]) << ", "
+           << int(bd.inactiveColor[1]) << ", "
+           << int(bd.inactiveColor[2]) << "]";
         os << ", \"inactive_brightness\": ";
-        appendEscaped(os, brightnessName(kv.second.inactiveBrightness));
-        if (kv.second.type == ActionType::Midi) {
-            os << ", \"midi\": {";
-            os << "\"device\": ";   appendEscaped(os, kv.second.midiDevice);
-            os << ", \"channel\": " << kv.second.midiChannel;
-            os << ", \"msg\": "     << kv.second.midiMsgType;
-            os << ", \"d1\": "      << kv.second.midiData1;
-            os << ", \"d2\": "      << kv.second.midiData2;
-            os << "}";
-        }
-        if (kv.second.hasLongPress) {
-            os << ", \"long_press\": {";
-            os << "\"type\": ";    appendEscaped(os, actionTypeName(kv.second.longPressType));
-            os << ", \"action\": "; appendEscaped(os, kv.second.longPressAction);
-            os << ", \"param\": "  << kv.second.longPressParam;
-            if (kv.second.longPressType == ActionType::Midi) {
-                os << ", \"midi\": {";
-                os << "\"device\": ";   appendEscaped(os, kv.second.longPressMidiDevice);
-                os << ", \"channel\": " << kv.second.longPressMidiChannel;
-                os << ", \"msg\": "     << kv.second.longPressMidiMsgType;
-                os << ", \"d1\": "      << kv.second.longPressMidiData1;
-                os << ", \"d2\": "      << kv.second.longPressMidiData2;
-                os << "}";
-            }
-            os << "}";
+        appendEscaped(os, brightnessName(bd.inactiveBrightness));
+
+        os << ", \"short\": ";
+        serializeMatrixRow_(bd.shortPress, os);
+
+        if (bd.hasLongPress) {
+            os << ", \"long\": ";
+            serializeMatrixRow_(bd.longPress, os);
         }
         os << "}";
     }
@@ -430,6 +497,48 @@ std::string serializeOneLayer_(const Layer& L, int idx)
     return os.str();
 }
 
+// Read a single ActionSlot's fields from a JSON object. Returns false
+// if `obj` is null/non-object; otherwise fills `out` from whatever keys
+// are present (others stay at their default value).
+bool parseSlotFields_(wdl_json_element* obj, ActionSlot& out)
+{
+    if (!obj || !obj->is_object()) return false;
+    if (auto* v = obj->get_item_by_name("type"))
+        out.type = actionTypeFromName(v->get_string_value());
+    if (auto* v = obj->get_item_by_name("action"))
+        if (auto* s = v->get_string_value()) out.action = s;
+    if (auto* v = obj->get_item_by_name("param"))
+        if (auto* s = v->get_string_value(true)) out.param = std::atoi(s);
+    if (auto* mi = obj->get_item_by_name("midi"); mi && mi->is_object()) {
+        if (auto* v = mi->get_item_by_name("device"))
+            if (auto* s = v->get_string_value()) out.midiDevice = s;
+        if (auto* v = mi->get_item_by_name("channel"))
+            if (auto* s = v->get_string_value(true)) out.midiChannel = std::atoi(s);
+        if (auto* v = mi->get_item_by_name("msg"))
+            if (auto* s = v->get_string_value(true)) out.midiMsgType = std::atoi(s);
+        if (auto* v = mi->get_item_by_name("d1"))
+            if (auto* s = v->get_string_value(true)) out.midiData1 = std::atoi(s);
+        if (auto* v = mi->get_item_by_name("d2"))
+            if (auto* s = v->get_string_value(true)) out.midiData2 = std::atoi(s);
+    }
+    return true;
+}
+
+// Read a {plain, shift, cmd, ctrl} matrix-row object into the 4-element
+// slot array. Missing modifier keys leave their slot at default (Noop).
+void parseMatrixRow_(wdl_json_element* obj, ActionSlot (&row)[kModifierCount])
+{
+    if (!obj || !obj->is_object()) return;
+    const int n = obj->m_array ? obj->m_array->GetSize() : 0;
+    for (int i = 0; i < n; ++i) {
+        const char* key = obj->enum_item_name(i);
+        wdl_json_element* it = obj->enum_item(i);
+        const int m = modifierFromKey_(key);
+        if (m < 0) continue;
+        parseSlotFields_(it, row[m]);
+    }
+}
+
 bool parseLayer_(wdl_json_element* lobj, Layer& out)
 {
     if (!lobj || !lobj->is_object()) return false;
@@ -450,14 +559,9 @@ bool parseLayer_(wdl_json_element* lobj, Layer& out)
         ButtonId bid = fromName(key);
         if (bid == ButtonId::None) continue;  // forward-compat: skip unknown keys
         Binding bd;
-        if (auto* v = be->get_item_by_name("type"))
-            bd.type = actionTypeFromName(v->get_string_value());
+
         if (auto* v = be->get_item_by_name("behavior"))
             bd.behavior = behaviorFromName(v->get_string_value());
-        if (auto* v = be->get_item_by_name("action"))
-            if (auto* s = v->get_string_value()) bd.action = s;
-        if (auto* v = be->get_item_by_name("param"))
-            if (auto* s = v->get_string_value(true)) bd.param = std::atoi(s);
         if (auto* v = be->get_item_by_name("label"))
             if (auto* s = v->get_string_value()) bd.label = s;
         if (auto* v = be->get_item_by_name("color"); v && v->is_array()) {
@@ -480,60 +584,51 @@ bool parseLayer_(wdl_json_element* lobj, Layer& out)
                 }
             }
         } else {
-            // Back-compat: pre-split configs only carried `color`. Mirror it
-            // into the inactive colour so quantising into the same palette
-            // entry keeps the old visual identity.
+            // Pre-split configs only carried `color`. Mirror it into
+            // inactiveColor so quantising into the same palette entry
+            // keeps the old visual identity.
             bd.inactiveColor[0] = bd.color[0];
             bd.inactiveColor[1] = bd.color[1];
             bd.inactiveColor[2] = bd.color[2];
         }
         if (auto* v = be->get_item_by_name("inactive_brightness"))
             bd.inactiveBrightness = brightnessFromName(v->get_string_value());
-        // MIDI sub-object — only meaningful when type == Midi but we
-        // parse it whenever present so the user can switch types in the
-        // UI without losing previously-entered MIDI values.
-        if (auto* mi = be->get_item_by_name("midi"); mi && mi->is_object()) {
-            if (auto* v = mi->get_item_by_name("device"))
-                if (auto* s = v->get_string_value()) bd.midiDevice = s;
-            if (auto* v = mi->get_item_by_name("channel"))
-                if (auto* s = v->get_string_value(true)) bd.midiChannel = std::atoi(s);
-            if (auto* v = mi->get_item_by_name("msg"))
-                if (auto* s = v->get_string_value(true)) bd.midiMsgType = std::atoi(s);
-            if (auto* v = mi->get_item_by_name("d1"))
-                if (auto* s = v->get_string_value(true)) bd.midiData1 = std::atoi(s);
-            if (auto* v = mi->get_item_by_name("d2"))
-                if (auto* s = v->get_string_value(true)) bd.midiData2 = std::atoi(s);
-        }
-        // Long-press is optional — omit means hasLongPress stays false,
-        // so older configs that predate this field still load cleanly.
-        if (auto* lp = be->get_item_by_name("long_press"); lp && lp->is_object()) {
+
+        // New-schema matrix. Both `short` and `long` are optional —
+        // missing slots stay at default (Noop).
+        if (auto* v = be->get_item_by_name("short"))
+            parseMatrixRow_(v, bd.shortPress);
+        if (auto* v = be->get_item_by_name("long"); v && v->is_object()) {
             bd.hasLongPress = true;
-            if (auto* v = lp->get_item_by_name("type"))
-                bd.longPressType = actionTypeFromName(v->get_string_value());
-            if (auto* v = lp->get_item_by_name("action"))
-                if (auto* s = v->get_string_value()) bd.longPressAction = s;
-            if (auto* v = lp->get_item_by_name("param"))
-                if (auto* s = v->get_string_value(true)) bd.longPressParam = std::atoi(s);
-            if (auto* mi = lp->get_item_by_name("midi"); mi && mi->is_object()) {
-                if (auto* v = mi->get_item_by_name("device"))
-                    if (auto* s = v->get_string_value()) bd.longPressMidiDevice = s;
-                if (auto* v = mi->get_item_by_name("channel"))
-                    if (auto* s = v->get_string_value(true)) bd.longPressMidiChannel = std::atoi(s);
-                if (auto* v = mi->get_item_by_name("msg"))
-                    if (auto* s = v->get_string_value(true)) bd.longPressMidiMsgType = std::atoi(s);
-                if (auto* v = mi->get_item_by_name("d1"))
-                    if (auto* s = v->get_string_value(true)) bd.longPressMidiData1 = std::atoi(s);
-                if (auto* v = mi->get_item_by_name("d2"))
-                    if (auto* s = v->get_string_value(true)) bd.longPressMidiData2 = std::atoi(s);
-            }
+            parseMatrixRow_(v, bd.longPress);
         }
-        // Migration: pre-2026-05-02 configs were seeded with white for ALL
-        // builtins. The hardware actually drives Auto*/Zoom* in colour. If
-        // the user never overrode the colour (still pure white), patch in
-        // the hardware default so the editor's swatch matches reality.
-        // Skips bindings the user has explicitly customised (any non-white
-        // colour is treated as user intent).
-        if (bd.type == ActionType::Builtin
+
+        // Old-schema fallback: pre-modifier-matrix configs carried bare
+        // `type`/`action`/`param`/`midi` + `long_press` at the binding
+        // level. Both the binding object and the `long_press` object
+        // happen to use the same {type,action,param,midi:{}} shape that
+        // parseSlotFields_ already understands — re-use it. Skipped if
+        // the new matrix already populated the corresponding plain slot.
+        ActionSlot& sp = bd.shortPress[static_cast<int>(Modifier::Plain)];
+        if (slotIsEmpty_(sp)) parseSlotFields_(be, sp);
+        if (auto* lp = be->get_item_by_name("long_press"); lp && lp->is_object()
+            && slotIsEmpty_(bd.longPress[static_cast<int>(Modifier::Plain)])) {
+            bd.hasLongPress = true;
+            parseSlotFields_(lp, bd.longPress[static_cast<int>(Modifier::Plain)]);
+        }
+
+        // Migration: rename the legacy `fine_modifier` builtin to the
+        // generic `mod_shift` so it slots into the new modifier framework.
+        if (sp.type == ActionType::Builtin && sp.action == "fine_modifier") {
+            sp.action = "mod_shift";
+        }
+
+        // Colour migration — pre-2026-05-02 configs were seeded with white
+        // for ALL builtins. The hardware actually drives Auto*/Zoom* in
+        // colour; patch in the hardware default so the editor's swatch
+        // matches reality. Reads sp (shortPress[Plain]) since that's where
+        // the old action/param landed.
+        if (sp.type == ActionType::Builtin
             && bd.color[0] == 0xFF && bd.color[1] == 0xFF && bd.color[2] == 0xFF) {
             struct Patch { const char* action; uint8_t r, g, b; };
             static constexpr Patch kPatches[] = {
@@ -549,29 +644,23 @@ bool parseLayer_(wdl_json_element* lobj, Layer& out)
             uint8_t pr = 0xFF, pg = 0xFF, pb = 0xFF;
             bool patched = false;
             for (const auto& p : kPatches) {
-                if (bd.action == p.action) {
+                if (sp.action == p.action) {
                     pr = p.r; pg = p.g; pb = p.b;
                     patched = true;
                     break;
                 }
             }
-            // Older configs bound the automation row via the parameterised
-            // `automation_mode` builtin instead of the per-mode auto_* set.
-            // Map (button, param) → hardware colour. Param 0 is shared by
-            // OFF and TRIM in REAPER's mode enum, so the ButtonId is the
-            // tie-breaker. Param 4 = Latch, 5 = Latch Preview (both red).
-            if (!patched && bd.action == "automation_mode") {
-                switch (bd.param) {
-                    case 1: pr = 0;   pg = 255; pb = 0;   patched = true; break; // Read
-                    case 2: pr = 255; pg = 255; pb = 0;   patched = true; break; // Touch
-                    case 3: pr = 255; pg = 0;   pb = 0;   patched = true; break; // Write
+            if (!patched && sp.action == "automation_mode") {
+                switch (sp.param) {
+                    case 1: pr = 0;   pg = 255; pb = 0;   patched = true; break;
+                    case 2: pr = 255; pg = 255; pb = 0;   patched = true; break;
+                    case 3: pr = 255; pg = 0;   pb = 0;   patched = true; break;
                     case 4:
-                    case 5: pr = 255; pg = 0;   pb = 0;   patched = true; break; // Latch
+                    case 5: pr = 255; pg = 0;   pb = 0;   patched = true; break;
                     case 0:
                         if (bid == ButtonId::AutoTrim) {
-                            pr = 255; pg = 128; pb = 0; patched = true; // orange
+                            pr = 255; pg = 128; pb = 0; patched = true;
                         }
-                        // AutoOff at param 0 stays white.
                         break;
                 }
             }
@@ -765,35 +854,7 @@ const Config& get()
 
 namespace {
 
-// Snapshot of the fields needed to run a single action — captures both
-// the primary and long-press paths in one struct so dispatch doesn't
-// have to branch on which sub-bundle of fields to read.
-struct ActionSet {
-    ActionType  type;
-    std::string action;
-    int         param;
-    std::string midiDevice;
-    int         midiChannel;
-    int         midiMsgType;
-    int         midiData1;
-    int         midiData2;
-};
-
-ActionSet primaryActionOf(const Binding& bd)
-{
-    return { bd.type, bd.action, bd.param,
-             bd.midiDevice, bd.midiChannel, bd.midiMsgType,
-             bd.midiData1, bd.midiData2 };
-}
-ActionSet longPressActionOf(const Binding& bd)
-{
-    return { bd.longPressType, bd.longPressAction, bd.longPressParam,
-             bd.longPressMidiDevice, bd.longPressMidiChannel,
-             bd.longPressMidiMsgType, bd.longPressMidiData1,
-             bd.longPressMidiData2 };
-}
-
-void runAction_(const ActionSet& a, bool firing, bool pressed)
+void runAction_(const ActionSlot& a, bool firing, bool pressed)
 {
     switch (a.type) {
         case ActionType::Noop:
@@ -845,6 +906,27 @@ void runAction_(const ActionSet& a, bool firing, bool pressed)
 
 } // namespace
 
+void setModifierHeld(Modifier m, bool held)
+{
+    switch (m) {
+        case Modifier::Shift: g_modShiftHeld.store(held); break;
+        case Modifier::Cmd:   g_modCmdHeld.store(held);   break;
+        case Modifier::Ctrl:  g_modCtrlHeld.store(held);  break;
+        case Modifier::Plain: break;  // no state to set
+    }
+}
+
+Modifier currentModifierSnapshot()
+{
+    // Precedence Ctrl > Cmd > Shift > Plain. Most-specific-modifier-wins
+    // matches typical keyboard-shortcut conventions; the editor will let
+    // the user route Ctrl+Shift+button via the Ctrl slot only.
+    if (g_modCtrlHeld.load())  return Modifier::Ctrl;
+    if (g_modCmdHeld.load())   return Modifier::Cmd;
+    if (g_modShiftHeld.load()) return Modifier::Shift;
+    return Modifier::Plain;
+}
+
 bool dispatch(ButtonId id, bool pressed)
 {
     if (id == ButtonId::None) return false;
@@ -862,38 +944,63 @@ bool dispatch(ButtonId id, bool pressed)
 
     // Long-press support (Momentary primary only). Defer the primary-
     // action fire until release-edge so we can choose between primary
-    // and long-press based on the held duration.
+    // and long-press based on the held duration. Modifier snapshot is
+    // taken at PRESS time and re-used on release / threshold so the
+    // press commits to a slot even if the user releases the modifier
+    // mid-hold.
     const bool longPressArmed =
         bd.hasLongPress && bd.behavior == Behavior::Momentary;
     if (longPressArmed) {
         const uint32_t k = pressKey(layer, id);
         if (pressed) {
-            g_pressStart[k] = std::chrono::steady_clock::now();
+            g_pressStart[k] = { std::chrono::steady_clock::now(),
+                                currentModifierSnapshot() };
         } else {
             auto it = g_pressStart.find(k);
             if (it != g_pressStart.end()) {
-                const auto held = std::chrono::steady_clock::now() - it->second;
+                const auto held = std::chrono::steady_clock::now() - it->second.start;
+                const int  m    = static_cast<int>(it->second.mod);
                 g_pressStart.erase(it);
                 if (held >= kLongPressThreshold) {
-                    runAction_(longPressActionOf(bd), /*firing*/ true,
-                               /*pressed*/ false);
+                    runAction_(bd.longPress[m],
+                               /*firing*/ true, /*pressed*/ false);
                 } else {
-                    runAction_(primaryActionOf(bd),   /*firing*/ true,
-                               /*pressed*/ false);
+                    runAction_(bd.shortPress[m],
+                               /*firing*/ true, /*pressed*/ false);
                 }
             }
         }
         return true;
     }
 
-    // Standard (no long-press) path — fire per behavior.
+    // Standard (no long-press) path — fire per behavior. Modifier slot
+    // is selected at the press edge and re-used for the release edge so
+    // a Momentary binding's release matches its press even if the user
+    // dropped the modifier between. Toggle and Hold ignore modifiers
+    // (their semantics with a modifier are ambiguous) and always fire
+    // the Plain slot.
+    int slotIdx = static_cast<int>(Modifier::Plain);
+    if (bd.behavior == Behavior::Momentary) {
+        const uint32_t k = pressKey(layer, id);
+        if (pressed) {
+            g_pressStart[k] = { std::chrono::steady_clock::now(),
+                                currentModifierSnapshot() };
+            slotIdx = static_cast<int>(g_pressStart[k].mod);
+        } else {
+            auto it = g_pressStart.find(k);
+            if (it != g_pressStart.end()) {
+                slotIdx = static_cast<int>(it->second.mod);
+                g_pressStart.erase(it);
+            }
+        }
+    }
     bool firing;
     switch (bd.behavior) {
         case Behavior::Momentary: firing = pressed; break;
         case Behavior::Toggle:    firing = pressed; break;
         case Behavior::Hold:      firing = true;    break;
     }
-    runAction_(primaryActionOf(bd), firing, pressed);
+    runAction_(bd.shortPress[slotIdx], firing, pressed);
     return true;
 }
 
