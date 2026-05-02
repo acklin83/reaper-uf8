@@ -52,22 +52,51 @@ struct UserPluginCatalog {
 
 Damit der Rest der Pipeline (V-Pot push, Render, Focus, Multi-instance) **null Änderungen** braucht: User-Maps werden zu `PluginMap`-Instanzen synthetisiert (gleiche Struktur, slots aus den UserSlotBindings). Domain-Aware-Lookup, FocusedParam, alles funktioniert.
 
+### Fader und Pan im Plugin-Modifier-Mode
+
+Plugin-Modifier (`ssl_strip_mode_toggle` / `g_pluginFaderMode`) routet Fader auf den Plugin-Output-Fader und V-Pot auf den Plugin-Pan. Bei Built-in-Maps sind das die Slots mit **linkIdx=1** ("FaderLevel") und **linkIdx=3** ("Pan") — ganz normale Einträge in der `slots`-Liste ([PluginMap.cpp:274-276](extension/src/PluginMap.cpp:274)). Der Modifier-Code macht effektiv `findSlotByLinkIdx(map, 1)` / `findSlotByLinkIdx(map, 3)`.
+
+**Konsequenz für FX Learn:** wenn der User beim Lernen die Slots mit linkIdx 1 und 3 mappt, sind sie automatisch Fader/Pan im Plugin-Modifier-Mode. Kein extra Datenfeld in `UserPluginMap` nötig — alles geht durch denselben Slot-Mechanismus. Beim Learn-Wizard werden Fader und Pan einfach prominent als die ersten zwei Slots vorgeschlagen, weil sie für den Plugin-Modifier-Mode kritisch sind.
+
+**Fallback wenn Fader/Pan nicht gelernt:** `findSlotByLinkIdx` returnt nullptr → Modifier-Mode-Code fällt auf REAPER-Track-Volume / -Pan zurück. Akzeptables Verhalten für Plugins ohne sinnvolle Master-Fader (Multiband-Comps, EQs ohne Output-Stage, …).
+
 ### Learn-Flow (UI)
 
-1. User aktiviert `fx_learn` (Toggle oder gehalten — Builtin existiert schon, param 0/1 = Momentary/Toggle).
-2. Im Plugin-Mixer-Window erscheint ein "Learning…" Banner mit:
-   - Plugin-Name (vom focused Track gegrabbt — `GetLastTouchedFX` oder erste FX im Slot wenn keine touched).
-   - Domain-Wahl: ChannelStrip / BusComp Radio-Buttons.
-   - DisplayShort-Editor: 4 Char Feld.
-   - "Slot to map next" Combo: alle 30+ bekannten LinkIdx mit Klartext-Namen ("HF Gain", "Comp Threshold", …).
-3. User wackelt einen Param im Plugin-GUI → `GetLastTouchedFX` liefert den `vst3Param`.
-4. UI zeigt: "Bind 'HF Gain' to '<plugin name>: param 14'?" → Confirm-Button.
-5. Eintrag landet im UserPluginMap, sofort persistiert.
-6. Repeat für weitere Slots.
-7. **Optional Checkbox: "Make default for CS"** (oder BC, je nach Domain). Setzt `isDefault = true` und löscht den Flag bei allen anderen UserPluginMaps derselben Domain — pro Domain darf nur einer Default sein. Beeinflusst nur den Initial-Picker für neue Tracks; bestehende per-Track-Stickiness bleibt unangetastet.
-8. "Done" — UserPluginMap ist jetzt aktiv für jeden Track der dieses Plugin hostet.
+Das Mixer-Window beheimatet den Learn-Wizard. Reihenfolge der Schritte:
 
-**Alternative (schneller):** User klickt im Plugin auf einen Knopf, drückt dann auf der UF8 die V-Pot-Position wo's hin soll — die Soft-Key-Bank kennt für CS-Domain die V-Pot-Slot-Belegung. Klassischer "wackel zuerst Hardware, dann Software"-Learn. Ist wie SSL 360 das macht. Erfordert aber dass die UF8 zur Learn-Zeit schon einen Bank zeigt der mit "CS-virtual" populated ist — Henne-Ei. Erste Iteration: Software-only Learn-UI.
+**1. Quelle wählen**
+- User aktiviert `fx_learn` (Builtin existiert schon).
+- Mixer-Window schaltet auf Learn-UI um.
+- Plugin-Source: entweder `GetLastTouchedFX` (wenn der User gerade einen Param wackelt → wir wissen track + fxIdx + vst3Param sofort), oder Dropdown der FX-Chain auf dem focused Track. Festgehalten als FX-Name via `TrackFX_GetFXName` → wird der `match`-Substring der UserPluginMap.
+
+**2. Domain wählen**
+- Radio-Buttons ChannelStrip / BusComp.
+- Pro UserPluginMap genau eine Domain. Wer ein Plugin als beides will, legt zwei Maps an (einmal pro Domain).
+
+**3. Slots mappen — Wizard**
+Slot-Liste, vorsortiert nach Wichtigkeit für Plugin-Modifier-Mode:
+- linkIdx=1 "Fader Level" — kritisch für Modifier-Fader-Mode
+- linkIdx=3 "Pan" — kritisch für Modifier-V-Pot-Mode
+- Dann der Rest der Domain in 360-Link-Reihenfolge (HF Gain, HMF Gain, …).
+
+Pro Slot:
+- UI zeigt den Slot-Namen + kurze Erklärung.
+- Drei Aktionen:
+  - **Learn next touched param**: User wackelt im Plugin-GUI → wir lesen `GetLastTouchedFX().vst3Param` und binden.
+  - **Skip**: Slot bleibt unbelegt (Plugin hat ihn nicht / User will ihn nicht).
+  - **Back**: einen Slot zurück, korrigieren.
+- Inverted-Checkbox pro Slot.
+- Confirm-Button schreibt den Eintrag in den UserPluginMap-Entwurf.
+
+**4. Identität bestätigen**
+- `displayShort`: 4-char Feld, default-vorbelegt aus dem getrimmten FX-Namen ("FabFilter Pro-Q 4" → "FABF").
+- Checkbox "Make this the default for CS" (oder BC). Setzt `isDefault = true`, löscht den Flag bei allen anderen UserPluginMaps derselben Domain (UI enforced one-of).
+
+**5. Speichern**
+- "Done" → UserPluginMap landet im Catalog, JSON wird sofort persistiert.
+- Live-Test: User kann die Hardware drehen, sollte direkt den richtigen Param treiben.
+
+**Alternative (schneller, später):** "wackel zuerst Hardware, dann Software" wie SSL 360 das macht. Erste Iteration ist Software-only Wizard, weil weniger Henne-Ei.
 
 ### Edge Cases
 
