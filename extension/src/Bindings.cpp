@@ -916,6 +916,17 @@ void setModifierHeld(Modifier m, bool held)
     }
 }
 
+bool modifierHeld(Modifier m)
+{
+    switch (m) {
+        case Modifier::Shift: return g_modShiftHeld.load();
+        case Modifier::Cmd:   return g_modCmdHeld.load();
+        case Modifier::Ctrl:  return g_modCtrlHeld.load();
+        case Modifier::Plain: return false;
+    }
+    return false;
+}
+
 Modifier currentModifierSnapshot()
 {
     // Precedence Ctrl > Cmd > Shift > Plain. Most-specific-modifier-wins

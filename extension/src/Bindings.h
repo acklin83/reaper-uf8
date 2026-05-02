@@ -215,6 +215,7 @@ bool importFrom(const std::string& path);
 // in-flight press record. Atomics so the libusb input thread can
 // publish without locking.
 void     setModifierHeld(Modifier m, bool held);
+bool     modifierHeld(Modifier m);
 Modifier currentModifierSnapshot();
 
 // Per-layer variants. exportLayerTo writes a single layer wrapped in a

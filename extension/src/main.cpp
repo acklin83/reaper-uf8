@@ -4555,30 +4555,39 @@ void registerBindingHandlers()
         nullptr, "Open / close Plugin Mixer", false
     });
 
-    // Modifier builtins — Hold behaviour. Each handler publishes the
-    // press state into Bindings so dispatch() can snapshot the active
-    // modifier at press-edge of any other button. g_shiftHeld stays in
-    // sync (legacy callers in this TU still read it for fine-grained
-    // fader/scrub speed) — the mod_shift handler shadows both atomics.
+    // Modifier builtins. `param` selects mode:
+    //   0 = Momentary  → modifier active while button is held
+    //   1 = Toggle     → press flips active state, second press releases
+    // Each handler publishes the resulting state into Bindings so
+    // dispatch() can snapshot the active modifier at press-edge of any
+    // other button. g_shiftHeld stays in sync for the legacy in-TU
+    // fader/scrub-speed readers — mod_shift shadows both atomics.
+    auto modHandler = [](uf8::bindings::Modifier m, std::atomic<bool>* legacyMirror) {
+        return [m, legacyMirror](bool firing, bool pressed, int param) {
+            const bool toggleMode = (param == 1);
+            bool newState;
+            if (toggleMode) {
+                if (!firing || !pressed) return;   // press-edge only
+                newState = !uf8::bindings::modifierHeld(m);
+            } else {
+                newState = pressed;
+            }
+            uf8::bindings::setModifierHeld(m, newState);
+            if (legacyMirror) legacyMirror->store(newState);
+        };
+    };
     registerBuiltin("mod_shift", DescBuilder{
-        [](bool /*firing*/, bool pressed, int /*param*/) {
-            g_shiftHeld.store(pressed);
-            uf8::bindings::setModifierHeld(uf8::bindings::Modifier::Shift, pressed);
-        },
+        modHandler(uf8::bindings::Modifier::Shift, &g_shiftHeld),
         [](int) { return g_shiftHeld.load(); },
-        "Modifier: Shift / Fine", false
+        "Modifier: Shift / Fine", true
     });
     registerBuiltin("mod_cmd", DescBuilder{
-        [](bool /*firing*/, bool pressed, int /*param*/) {
-            uf8::bindings::setModifierHeld(uf8::bindings::Modifier::Cmd, pressed);
-        },
-        nullptr, "Modifier: Cmd", false
+        modHandler(uf8::bindings::Modifier::Cmd, nullptr),
+        nullptr, "Modifier: Cmd", true
     });
     registerBuiltin("mod_ctrl", DescBuilder{
-        [](bool /*firing*/, bool pressed, int /*param*/) {
-            uf8::bindings::setModifierHeld(uf8::bindings::Modifier::Ctrl, pressed);
-        },
-        nullptr, "Modifier: Ctrl", false
+        modHandler(uf8::bindings::Modifier::Ctrl, nullptr),
+        nullptr, "Modifier: Ctrl", true
     });
 
     registerBuiltin("encoder_nav", DescBuilder{

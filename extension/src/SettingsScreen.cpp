@@ -699,15 +699,35 @@ bool drawActionPicker(ImGui_Context* ctx, const char* prefix,
         }
         ImGui_PopItemWidth(ctx);
         if (builtinUsesParam(*f.action)) {
-            std::snprintf(idbuf, sizeof(idbuf), "Param##%s_bparam", prefix);
-            double pw = 90;
-            ImGui_PushItemWidth(ctx, pw);
-            int p = *f.param;
-            if (ImGui_InputInt(ctx, idbuf, &p, nullptr, nullptr, nullptr)) {
-                *f.param = p;
-                dirty = true;
+            // Modifier builtins use param as a Momentary/Toggle mode
+            // selector — show a friendlier combo instead of the raw int.
+            const bool isMod = (*f.action == "mod_shift"
+                             || *f.action == "mod_cmd"
+                             || *f.action == "mod_ctrl");
+            if (isMod) {
+                static char kModeItems[] =
+                    "Momentary (held = active)\0"
+                    "Toggle (press flips state)\0";
+                std::snprintf(idbuf, sizeof(idbuf), "Mode##%s_modemod", prefix);
+                int m = (*f.param == 1) ? 1 : 0;
+                double pw = 200;
+                ImGui_PushItemWidth(ctx, pw);
+                if (ImGui_Combo(ctx, idbuf, &m, kModeItems, nullptr)) {
+                    *f.param = m;
+                    dirty = true;
+                }
+                ImGui_PopItemWidth(ctx);
+            } else {
+                std::snprintf(idbuf, sizeof(idbuf), "Param##%s_bparam", prefix);
+                double pw = 90;
+                ImGui_PushItemWidth(ctx, pw);
+                int p = *f.param;
+                if (ImGui_InputInt(ctx, idbuf, &p, nullptr, nullptr, nullptr)) {
+                    *f.param = p;
+                    dirty = true;
+                }
+                ImGui_PopItemWidth(ctx);
             }
-            ImGui_PopItemWidth(ctx);
         }
         ImGui_Unindent(ctx, nullptr);
     }
