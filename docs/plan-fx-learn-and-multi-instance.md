@@ -27,7 +27,12 @@ struct UserSlotBinding {
 struct UserPluginMap {
     std::string match;          // Substring von TrackFX_GetFXName ("FabFilter Pro-Q 4")
     Domain      domain;         // ChannelStrip oder BusComp
-    char        displayShort[5];// "FFP4", "U-EQ" — 4 chars, vom User
+    char        displayShort[5];// "FFP4", "U-EQ" — 4 chars, vom User (optional, sonst FX-Name truncated)
+    bool        isDefault;      // Wenn true: gewinnt gegen built-in SSL als
+                                // domain-default beim Initial-Picker für
+                                // neue Tracks (siehe Teil B). Pro Domain
+                                // sollte nur ein UserPluginMap diesen
+                                // Flag tragen — UI enforced one-of.
     std::vector<UserSlotBinding> slots;
 };
 
@@ -59,7 +64,8 @@ Damit der Rest der Pipeline (V-Pot push, Render, Focus, Multi-instance) **null �
 4. UI zeigt: "Bind 'HF Gain' to '<plugin name>: param 14'?" → Confirm-Button.
 5. Eintrag landet im UserPluginMap, sofort persistiert.
 6. Repeat für weitere Slots.
-7. "Done" — UserPluginMap ist jetzt aktiv für jeden Track der dieses Plugin hostet.
+7. **Optional Checkbox: "Make default for CS"** (oder BC, je nach Domain). Setzt `isDefault = true` und löscht den Flag bei allen anderen UserPluginMaps derselben Domain — pro Domain darf nur einer Default sein. Beeinflusst nur den Initial-Picker für neue Tracks; bestehende per-Track-Stickiness bleibt unangetastet.
+8. "Done" — UserPluginMap ist jetzt aktiv für jeden Track der dieses Plugin hostet.
 
 **Alternative (schneller):** User klickt im Plugin auf einen Knopf, drückt dann auf der UF8 die V-Pot-Position wo's hin soll — die Soft-Key-Bank kennt für CS-Domain die V-Pot-Slot-Belegung. Klassischer "wackel zuerst Hardware, dann Software"-Learn. Ist wie SSL 360 das macht. Erfordert aber dass die UF8 zur Learn-Zeit schon einen Bank zeigt der mit "CS-virtual" populated ist — Henne-Ei. Erste Iteration: Software-only Learn-UI.
 
@@ -94,6 +100,16 @@ struct ActiveInstanceState {
 ```
 
 **Persistenz:** REAPER `GetSetMediaTrackInfo_String("P_EXT:rea_sixty_inst", ...)` — per-track ExtState, lebt im Projekt-File. Damit folgt's beim Project-Save automatisch.
+
+**Sticky-Verhalten:** der Active-Instance-Wert pro Track ist per Definition sticky — er wird beim Wechseln vom Track NICHT geändert. Wer Track 12 mit Instanz "b" verlässt und später zurückkommt, sieht wieder Instanz "b". Der Wert ändert sich nur durch explizite User-Aktion (`next_instance` / `prev_instance` / `instance_select` / Shift+Channel-Encoder).
+
+**Initial-Default für unbekannte Tracks:** wenn ein Track zum ersten Mal angeschaut wird (kein `P_EXT:rea_sixty_inst` Eintrag), wählt der Picker:
+
+1. Die erste Instanz die zu einem **`isDefault = true`** UserPluginMap matched (siehe Teil A) — falls eine vorhanden ist.
+2. Sonst die erste Instanz die zu einer **built-in SSL Map** (CS 2, 4K B/E/G, BC 2) matched.
+3. Sonst FX-Chain-Order [0] — fallback wenn weder noch.
+
+Damit gilt: solange der User keinen User-Plugin als Default markiert, bleibt SSL erste Wahl. Wer "Pro-Q ist meine CS" sagt, kriegt Pro-Q als ersten Treffer auch wenn SSL CS 2 daneben sitzt.
 
 ### API-Erweiterung (PluginMap.h)
 
