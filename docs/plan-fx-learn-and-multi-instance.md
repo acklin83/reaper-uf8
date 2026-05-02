@@ -112,11 +112,13 @@ PluginMatch lookupPluginOnTrack(void* track, Domain domain, int instanceIdx = 0)
 
 Channel-Strip-Type-Zone ist **hardware-fixiert auf 4 chars** ([Protocol.cpp:155](extension/src/Protocol.cpp:155), `buildChannelStripType` — SSL-Frame `FF 66 06 17 <strip> <4 chars>`). Plugin-Slot-Name-Zone hat 12 chars und Value-Line hat 19 chars, sind aber für V-Pot-Slot-Label und Param-Wert belegt.
 
-**Anzeige-Logik:**
+**Anzeige-Logik (Reihenfolge der Versuche):**
 
-1. **Count > 1, User hat `renamed_name` gesetzt** → 4-char-Zone zeigt den Rename truncated + uppercase. User-Verantwortung, lesbare Kurznamen zu vergeben ("VOC ", "PRE ", "SIDE", "PARA"). Holen via `TrackFX_GetNamedConfigParm(tr, fx, "renamed_name", buf, sz)`.
-2. **Count > 1, kein Rename** → `displayShort` wie immer ("CS 2"). Keine a/b/c-Verstümmelung. Welche Instanz aktiv ist erkennt der User im Plugin-Mixer-Window oder am Verhalten der V-Pots; navigiert wird mit `next_instance` / `prev_instance`.
-3. **Count == 1** → unverändert.
+1. **`renamed_name` gesetzt** → Rename truncated + uppercase. Holen via `TrackFX_GetNamedConfigParm(tr, fx, "renamed_name", buf, sz)`. User-Verantwortung, lesbare Kurznamen zu vergeben ("VOC ", "PRE ", "SIDE", "PARA").
+2. **Plugin-Identitäts-Name** — `TrackFX_GetFXName` getrimmt von "VST3: " / "VST: " / "VSTi: " / "JS: " Prefix, dann 4 chars uppercase. "FabFilter Pro-Q 4" → "FABF", "SSL Native Channel Strip 2" → "SSLN". Macht zwei Instanzen verschiedener Plugins sofort unterscheidbar.
+3. **`displayShort`** als letzte Fallback — kuratiert pro PluginMap ("CS 2", "4K B"). Greift wenn FX-Name leer / unleserlich ist.
+
+Reihenfolge gilt unabhängig von Instance-Count. Bei `count == 1` bleibt's effektiv beim selben Bild wie heute (Renames sind selten gesetzt, Plugin-Name truncated wirkt für Built-ins fast wie displayShort), aber Multi-Instance-Tracks profitieren sofort.
 
 **UC1 7-Segment**: bleibt Zahlen-only ("2"). Multi-Instance ist auf der UC1-Anzeige nicht visuell unterscheidbar — Plugin-Mixer-Window übernimmt diese Aufgabe.
 
