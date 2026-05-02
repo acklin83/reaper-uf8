@@ -1249,26 +1249,51 @@ void SettingsScreen::drawBindings(ImGui_Context* ctx)
     drawCsiImportSection(ctx, s_editLayer);
     ImGui_Spacing(ctx);
 
-    // ---- Top: layer + activate + auto-mixer + reset ----
-    static char kLayerItems[] = "Layer 1\0Layer 2\0Layer 3\0";
-    {
-        double w = 160;
-        ImGui_PushItemWidth(ctx, w);
-        ImGui_Combo(ctx, "Editing layer", &s_editLayer, kLayerItems,
-                    /*popup_max_height_in_items*/ nullptr);
-        ImGui_PopItemWidth(ctx);
-    }
-
+    // ---- Top: layer-pick row + activate ----
+    // Three big tab-like buttons replace the old combo so the user can
+    // jump between layers with a single click. The currently-edited
+    // layer is highlighted (blue fill); the hardware-active layer is
+    // marked with a green dot so the two states stay distinguishable.
     {
         const int active = getActiveLayer();
-        char line[64];
-        std::snprintf(line, sizeof(line), "Active on hardware: Layer %d",
-                      active + 1);
-        ImGui_Text(ctx, line);
+        const uint32_t kSelFill   = 0x4477CCFF;
+        const uint32_t kSelHover  = 0x5588DDFF;
+        const uint32_t kSelActive = 0x6699EEFF;
+        for (int li = 0; li < 3; ++li) {
+            char label[32];
+            // U+25CF BLACK CIRCLE marks the layer that's currently
+            // driving the hardware so it's visible at a glance.
+            std::snprintf(label, sizeof(label), "Layer %d%s##layer_tab_%d",
+                          li + 1,
+                          (li == active) ? "  \xE2\x97\x8F" : "",
+                          li);
+            const bool selected = (s_editLayer == li);
+            int pushed = 0;
+            if (selected) {
+                ImGui_PushStyleColor(ctx, ImGui_Col_Button,        kSelFill);
+                ImGui_PushStyleColor(ctx, ImGui_Col_ButtonHovered, kSelHover);
+                ImGui_PushStyleColor(ctx, ImGui_Col_ButtonActive,  kSelActive);
+                pushed = 3;
+            }
+            double bw = 110, bh = 28;
+            if (ImGui_Button(ctx, label, &bw, &bh)) {
+                s_editLayer = li;
+            }
+            if (pushed) {
+                ImGui_PopStyleColor(ctx, &pushed);
+            }
+            if (li < 2) sameLine(ctx);
+        }
         sameLine(ctx);
-        if (ImGui_Button(ctx, "Make this layer active",
-                         /*size_w*/ nullptr, /*size_h*/ nullptr)) {
-            setActiveLayer(s_editLayer);
+        ImGui_Text(ctx, "  ");
+        sameLine(ctx);
+        if (s_editLayer == active) {
+            ImGui_TextDisabled(ctx, "(this layer is active on hardware)");
+        } else {
+            if (ImGui_Button(ctx, "Make this layer active",
+                             /*size_w*/ nullptr, /*size_h*/ nullptr)) {
+                setActiveLayer(s_editLayer);
+            }
         }
     }
 
