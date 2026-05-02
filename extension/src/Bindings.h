@@ -166,6 +166,21 @@ struct Binding {
     bool        ledShowWhenEmpty = false;
 };
 
+// User-defined Soft-Key Bank. The 8 slots map 1:1 onto the top-soft-key
+// row above the strips (one per V-Pot column). Each slot is a full
+// Binding so it carries the same modifier matrix, long-press, and LED
+// config as a regular button binding. The bank's `name` is what the
+// editor lists and what pushZonesForVisibleSlots can show next to the
+// active-bank indicator. Slots default to empty (no action). 12 banks
+// total per Config — matches the user's "12 storage slots" ask.
+constexpr int kUserBankCount   = 12;
+constexpr int kUserBankSlots   = 8;
+
+struct UserBank {
+    std::string name;                       // user label, e.g. "Vocals", "Drums"
+    Binding     slots[kUserBankSlots];      // 0..7 = top-soft-key positions
+};
+
 struct Layer {
     std::string name;
     bool        autoWhenMixerVisible = false;
@@ -174,9 +189,10 @@ struct Layer {
 };
 
 struct Config {
-    int   version     = 1;
-    int   activeLayer = 0;
-    Layer layers[3];
+    int      version     = 1;
+    int      activeLayer = 0;
+    Layer    layers[3];
+    UserBank userBanks[kUserBankCount];
 };
 
 // Builtin registry. Phase A registers from main.cpp at REAPER_PLUGIN_ENTRY
@@ -270,6 +286,22 @@ void onMixerVisibilityChanged(bool visible);
 // Read a copy of a single binding (Phase C UI snapshots state per row
 // each frame). Returns a default-constructed Binding if no entry exists.
 Binding getBinding(int layer, ButtonId id);
+
+// User Soft-Key Bank accessors. bankIdx 0..kUserBankCount-1, slotIdx
+// 0..kUserBankSlots-1. Out-of-range indices return defaults / silently
+// ignore writes.
+UserBank getUserBank(int bankIdx);
+void     setUserBank(int bankIdx, const UserBank& bank);
+Binding  getUserBankSlot(int bankIdx, int slotIdx);
+void     setUserBankSlot(int bankIdx, int slotIdx, const Binding& bd);
+
+// Dispatch a press/release through a user-bank slot. Same long-press
+// + modifier-matrix logic as dispatch(ButtonId), but the slot is
+// addressed by (bankIdx, slotIdx) so the press timer keys stay
+// distinct from layer-button presses. Returns true if the slot
+// actually had an action to fire (lets the caller fall through to
+// legacy MCU passthrough for empty slots if it wants).
+bool     dispatchUserBankSlot(int bankIdx, int slotIdx, bool pressed);
 
 // Replace (or insert) a single binding and persist. Caller is the UI;
 // any in-flight USB-thread dispatch holding the lock blocks briefly.

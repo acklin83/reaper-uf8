@@ -573,6 +573,12 @@ std::atomic<bool> g_recvFaderThisTrack {false};
 // scribble strips / V-Pot bars to stale state).
 std::atomic<bool> g_routingDirty{false};
 
+// Active user-defined Soft-Key Bank. -1 = no user bank active (top-soft
+// keys behave as today, driven by softkey::viewFor plugin maps).
+// 0..kUserBankCount-1 = the corresponding bank's 8 slots drive the
+// top-soft-key labels + presses. Set via the show_user_bank builtin.
+std::atomic<int> g_activeUserBank{-1};
+
 // Helper: clear every other Send/Receive mode on the same physical
 // output (V-Pot or Fader) so the user can never end up with two
 // conflicting routing modes pointing at the same strip area.
@@ -1875,12 +1881,18 @@ void onUf8Input(const uint8_t* data, size_t len)
                     }
                     handledNatively = true;
                 } else if (id >= 0x18 && id <= 0x1F) {
-                    // Per-strip top soft-key. Picks the param under that
-                    // strip from the active bank and assigns it to all 8
-                    // V-Pots (setFocus across the bus). kNoSlot positions
-                    // stay silent — Settings UI will wire them later.
-                    if (pressed) {
-                        const int strip = id - 0x18;
+                    // Per-strip top soft-key. Two paths:
+                    //   1. User soft-key bank active → route through the
+                    //      bank's slot via the bindings dispatcher (full
+                    //      modifier + long-press support).
+                    //   2. Plugin-driven mode → setFocus to the bank's
+                    //      slot's linkIdx like before.
+                    const int strip = id - 0x18;
+                    const int activeUserBank = g_activeUserBank.load();
+                    if (activeUserBank >= 0) {
+                        uf8::bindings::dispatchUserBankSlot(
+                            activeUserBank, strip, pressed);
+                    } else if (pressed) {
                         const auto fp = uf8::getFocusedParam();
                         const auto domain = (fp.domain == uf8::Domain::BusComp)
                             ? uf8::Domain::BusComp : uf8::Domain::ChannelStrip;
@@ -2570,6 +2582,31 @@ void pushZonesForVisibleSlots()
             const int bankSk = std::clamp(g_softKeyBank.load(),
                 0, softkey::maxBankFor(domSk));
             const auto vSk = softkey::viewFor(domSk, bankSk);
+
+            // User-bank override: when a user soft-key bank is active,
+            // each top-soft-key shows the bank's slot label instead of
+            // the plugin-driven param label. The LED tracks bank-slot
+            // populated/empty rather than focused-param state.
+            const int activeUserBank = g_activeUserBank.load();
+            std::string userLabel;
+            bool userBankSlotPresent = false;
+            if (activeUserBank >= 0) {
+                const auto userSlot = uf8::bindings::getUserBankSlot(
+                    activeUserBank, s);
+                userLabel = userSlot.label;
+                const auto& sp = userSlot.shortPress[
+                    static_cast<int>(uf8::bindings::Modifier::Plain)];
+                userBankSlotPresent =
+                    sp.type != uf8::bindings::ActionType::Noop
+                    || !sp.action.empty();
+                if (userLabel.empty() && userBankSlotPresent) {
+                    // No user-supplied label — synthesise one from the
+                    // action name so the user at least sees SOMETHING.
+                    userLabel = sp.action;
+                    if (userLabel.size() > 8) userLabel.resize(8);
+                }
+            }
+
             // Pad to 12 chars centred (leading + trailing spaces) so
             //  - shorter / empty labels actively overwrite any longer
             //    residue left in the LCD zone from the previous bank;
@@ -2579,14 +2616,17 @@ void pushZonesForVisibleSlots()
             // An empty payload (`FF 66 02 04 <strip>`) would flip the
             // strip into "slot empty" mode and darken the colour bar —
             // not what we want; we just want the label cleared.
-            std::string label(vSk.labels[s]);
+            std::string label = (activeUserBank >= 0)
+                ? userLabel : std::string(vSk.labels[s]);
             if (label.size() < 12) {
                 const size_t pad = 12 - label.size();
                 const size_t lead = pad / 2;
                 label = std::string(lead, ' ') + label
                       + std::string(pad - lead, ' ');
             }
-            const int slotLink = vSk.linkIdx[s];
+            const int slotLink = (activeUserBank >= 0)
+                ? (userBankSlotPresent ? 0 : softkey::kNoSlot)
+                : vSk.linkIdx[s];
             // Synthetic toggle columns: read the per-strip state directly
             // (not the focused state) so each column's LED reflects the
             // toggle's actual on/off for THIS strip's track. Only ONE
@@ -2616,7 +2656,15 @@ void pushZonesForVisibleSlots()
             }
             uf8::TopSoftKeyState tssk;
             int8_t ledCacheKey;
-            if (isToggleCell) {
+            if (activeUserBank >= 0) {
+                // User bank: bright when this slot has an action,
+                // dim otherwise. Lets the user see which positions in
+                // the active bank are populated.
+                tssk = userBankSlotPresent
+                    ? uf8::TopSoftKeyState::On
+                    : uf8::TopSoftKeyState::Dim;
+                ledCacheKey = static_cast<int8_t>(userBankSlotPresent ? 8 : 7);
+            } else if (isToggleCell) {
                 tssk = toggleOn ? uf8::TopSoftKeyState::On
                                 : uf8::TopSoftKeyState::Dim;
                 ledCacheKey = static_cast<int8_t>(toggleOn ? 6 : 5);
@@ -5145,6 +5193,30 @@ void registerBindingHandlers()
         registerBuiltin("recv_this", d);
     }
 
+    // SHOW USER BANK — switches the top-soft-key row (8 buttons above
+    // the V-Pots) to a user-defined bank. param 0..kUserBankCount-1
+    // selects which bank. Toggle: pressing the same bank again
+    // deactivates (back to plugin softkey::viewFor labels). Pressing a
+    // different bank's button switches directly. The actual label /
+    // LED / press routing changes happen in pushZonesForVisibleSlots
+    // and the top-soft-key input handler — both check g_activeUserBank.
+    registerBuiltin("show_user_bank", DescBuilder{
+        [](bool firing, bool /*pressed*/, int param) {
+            if (!firing) return;
+            if (param < 0 || param >= uf8::bindings::kUserBankCount) return;
+            const int cur = g_activeUserBank.load();
+            g_activeUserBank.store(cur == param ? -1 : param);
+            // The top-soft-key labels live in the per-strip cache that
+            // bankChanged invalidates, so reuse the bank-shift signal
+            // to force a repaint on the next render tick.
+            g_bankDirty.store(true);
+        },
+        [](int param) {
+            return g_activeUserBank.load() == param;
+        },
+        "Show user soft-key bank (param 0..11)", true
+    });
+
     // HOME — one-press exit from every routing toggle. Restores V-Pots
     // and faders to their normal track-volume + pan view. Default for
     // the Channel button so the user always has a "go back" button no
@@ -5154,6 +5226,12 @@ void registerBindingHandlers()
             if (!firing) return;
             clearVpotRouting_();
             clearFaderRouting_();
+            // Drop any active user soft-key bank so the row returns to
+            // its plugin-driven labels. Treated as a bank-shift so the
+            // top-soft-key cache repaints next tick.
+            if (g_activeUserBank.exchange(-1) != -1) {
+                g_bankDirty.store(true);
+            }
         },
         // No state to read — HOME is a one-shot. stateOf left unset so
         // the LED render falls back to the binding's configured colours

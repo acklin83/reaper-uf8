@@ -486,6 +486,37 @@ void serializeMatrixRow_(const ActionSlot (&row)[kModifierCount],
     os << "}";
 }
 
+// Emit a Binding's body inline (no surrounding braces, no leading
+// "name": prefix) — caller owns the wrapping object. Used by both the
+// per-layer binding map and the user-bank slot serializers so the
+// schema stays in one place.
+void serializeBindingBody_(const Binding& bd, std::ostringstream& os)
+{
+    os << "\"behavior\": "; appendEscaped(os, behaviorName(bd.behavior));
+    os << ", \"label\": ";  appendEscaped(os, bd.label);
+    os << ", \"color\": ["
+       << int(bd.color[0]) << ", "
+       << int(bd.color[1]) << ", "
+       << int(bd.color[2]) << "]";
+    os << ", \"brightness\": ";
+    appendEscaped(os, brightnessName(bd.brightness));
+    os << ", \"inactive_color\": ["
+       << int(bd.inactiveColor[0]) << ", "
+       << int(bd.inactiveColor[1]) << ", "
+       << int(bd.inactiveColor[2]) << "]";
+    os << ", \"inactive_brightness\": ";
+    appendEscaped(os, brightnessName(bd.inactiveBrightness));
+    if (bd.ledShowWhenEmpty) {
+        os << ", \"led_show_when_empty\": true";
+    }
+    os << ", \"short\": ";
+    serializeMatrixRow_(bd.shortPress, os);
+    if (bd.hasLongPress) {
+        os << ", \"long\": ";
+        serializeMatrixRow_(bd.longPress, os);
+    }
+}
+
 void serializeLayerBody_(const Layer& L, std::ostringstream& os,
                          const char* fieldPad, const char* bindingPad)
 {
@@ -504,37 +535,51 @@ void serializeLayerBody_(const Layer& L, std::ostringstream& os,
         if (!name || !*name) continue;
         if (!first) os << ",";
         first = false;
-        const Binding& bd = kv.second;
         os << "\n" << bindingPad << "\"" << name << "\": {";
-        os << "\"behavior\": "; appendEscaped(os, behaviorName(bd.behavior));
-        os << ", \"label\": ";  appendEscaped(os, bd.label);
-        os << ", \"color\": ["
-           << int(bd.color[0]) << ", "
-           << int(bd.color[1]) << ", "
-           << int(bd.color[2]) << "]";
-        os << ", \"brightness\": ";
-        appendEscaped(os, brightnessName(bd.brightness));
-        os << ", \"inactive_color\": ["
-           << int(bd.inactiveColor[0]) << ", "
-           << int(bd.inactiveColor[1]) << ", "
-           << int(bd.inactiveColor[2]) << "]";
-        os << ", \"inactive_brightness\": ";
-        appendEscaped(os, brightnessName(bd.inactiveBrightness));
-        if (bd.ledShowWhenEmpty) {
-            os << ", \"led_show_when_empty\": true";
-        }
-
-        os << ", \"short\": ";
-        serializeMatrixRow_(bd.shortPress, os);
-
-        if (bd.hasLongPress) {
-            os << ", \"long\": ";
-            serializeMatrixRow_(bd.longPress, os);
-        }
+        serializeBindingBody_(kv.second, os);
         os << "}";
     }
     if (!first) os << "\n" << fieldPad;
     os << "}\n";
+}
+
+void serializeUserBanks_(const Config& c, std::ostringstream& os)
+{
+    // Skip emission entirely when every bank is at default — keeps
+    // pre-existing configs from gaining a noisy 200-line empty array.
+    bool anyData = false;
+    for (const auto& b : c.userBanks) {
+        if (!b.name.empty()) { anyData = true; break; }
+        for (const auto& s : b.slots) {
+            if (s.shortPress[0].type != ActionType::Noop ||
+                !s.shortPress[0].action.empty()) {
+                anyData = true; break;
+            }
+        }
+        if (anyData) break;
+    }
+    if (!anyData) return;
+
+    os << ",\n  \"user_banks\": [";
+    bool firstBank = true;
+    for (int i = 0; i < kUserBankCount; ++i) {
+        const auto& bank = c.userBanks[i];
+        if (!firstBank) os << ",";
+        firstBank = false;
+        os << "\n    {\"index\": " << i;
+        os << ", \"name\": "; appendEscaped(os, bank.name);
+        os << ", \"slots\": [";
+        bool firstSlot = true;
+        for (int s = 0; s < kUserBankSlots; ++s) {
+            if (!firstSlot) os << ",";
+            firstSlot = false;
+            os << "\n      {";
+            serializeBindingBody_(bank.slots[s], os);
+            os << "}";
+        }
+        os << "\n    ]}";
+    }
+    os << "\n  ]";
 }
 
 std::string serialize(const Config& c)
@@ -549,8 +594,9 @@ std::string serialize(const Config& c)
         serializeLayerBody_(c.layers[i], os, "      ", "        ");
         os << "    }" << (i < 2 ? "," : "") << "\n";
     }
-    os << "  ]\n";
-    os << "}\n";
+    os << "  ]";
+    serializeUserBanks_(c, os);
+    os << "\n}\n";
     return os.str();
 }
 
@@ -610,6 +656,83 @@ void parseMatrixRow_(wdl_json_element* obj, ActionSlot (&row)[kModifierCount])
         const int m = modifierFromKey_(key);
         if (m < 0) continue;
         parseSlotFields_(it, row[m]);
+    }
+}
+
+// Parse a Binding from its JSON object (new-schema only — no
+// type/action/param/midi/long_press fallback). Used by parseUserBanks_.
+// parseLayer_ has its own inline logic that also covers the old
+// pre-matrix schema, so it doesn't go through this helper.
+void parseBindingBody_(wdl_json_element* be, Binding& bd)
+{
+    if (!be || !be->is_object()) return;
+    if (auto* v = be->get_item_by_name("behavior"))
+        bd.behavior = behaviorFromName(v->get_string_value());
+    if (auto* v = be->get_item_by_name("label"))
+        if (auto* s = v->get_string_value()) bd.label = s;
+    if (auto* v = be->get_item_by_name("color"); v && v->is_array()) {
+        for (int k = 0; k < 3 && k < v->m_array->GetSize(); ++k) {
+            if (auto* s = v->enum_item(k)->get_string_value(true)) {
+                int x = std::atoi(s);
+                if (x < 0) x = 0; else if (x > 255) x = 255;
+                bd.color[k] = static_cast<uint8_t>(x);
+            }
+        }
+    }
+    if (auto* v = be->get_item_by_name("brightness"))
+        bd.brightness = brightnessFromName(v->get_string_value());
+    if (auto* v = be->get_item_by_name("inactive_color"); v && v->is_array()) {
+        for (int k = 0; k < 3 && k < v->m_array->GetSize(); ++k) {
+            if (auto* s = v->enum_item(k)->get_string_value(true)) {
+                int x = std::atoi(s);
+                if (x < 0) x = 0; else if (x > 255) x = 255;
+                bd.inactiveColor[k] = static_cast<uint8_t>(x);
+            }
+        }
+    } else {
+        bd.inactiveColor[0] = bd.color[0];
+        bd.inactiveColor[1] = bd.color[1];
+        bd.inactiveColor[2] = bd.color[2];
+    }
+    if (auto* v = be->get_item_by_name("inactive_brightness"))
+        bd.inactiveBrightness = brightnessFromName(v->get_string_value());
+    if (auto* v = be->get_item_by_name("led_show_when_empty"))
+        if (auto* s = v->get_string_value(true))
+            bd.ledShowWhenEmpty = (std::strcmp(s, "true") == 0
+                                || std::strcmp(s, "1") == 0);
+    if (auto* v = be->get_item_by_name("short"))
+        parseMatrixRow_(v, bd.shortPress);
+    if (auto* v = be->get_item_by_name("long"); v && v->is_object()) {
+        bd.hasLongPress = true;
+        parseMatrixRow_(v, bd.longPress);
+    }
+}
+
+void parseUserBanks_(wdl_json_element* root, Config& out)
+{
+    auto* arr = root->get_item_by_name("user_banks");
+    if (!arr || !arr->is_array() || !arr->m_array) return;
+    const int n = arr->m_array->GetSize();
+    for (int i = 0; i < n; ++i) {
+        wdl_json_element* bo = arr->enum_item(i);
+        if (!bo || !bo->is_object()) continue;
+        int idx = -1;
+        if (auto* v = bo->get_item_by_name("index"))
+            if (auto* s = v->get_string_value(true)) idx = std::atoi(s);
+        if (idx < 0 || idx >= kUserBankCount) continue;
+        UserBank& bank = out.userBanks[idx];
+        if (auto* v = bo->get_item_by_name("name"))
+            if (auto* s = v->get_string_value()) bank.name = s;
+        auto* slots = bo->get_item_by_name("slots");
+        if (!slots || !slots->is_array() || !slots->m_array) continue;
+        const int m = slots->m_array->GetSize();
+        for (int s = 0; s < m && s < kUserBankSlots; ++s) {
+            wdl_json_element* slotObj = slots->enum_item(s);
+            // Reset to default first so omitted JSON fields fall back
+            // to defaults (matches the parseLayer_ semantics).
+            bank.slots[s] = Binding{};
+            parseBindingBody_(slotObj, bank.slots[s]);
+        }
     }
 }
 
@@ -845,6 +968,7 @@ bool tryParse_(const std::string& json, Config& out)
             parseLayer_(arr->enum_item(i), out.layers[i]);
         }
     }
+    parseUserBanks_(root, out);
     return true;
 }
 
@@ -1197,6 +1321,108 @@ void clearBinding(int layer, ButtonId id)
     std::lock_guard<std::mutex> lk(g_cfgMutex);
     g_cfg.layers[layer].bindings.erase(id);
     persistLocked_();
+}
+
+UserBank getUserBank(int bankIdx)
+{
+    std::lock_guard<std::mutex> lk(g_cfgMutex);
+    if (bankIdx < 0 || bankIdx >= kUserBankCount) return {};
+    return g_cfg.userBanks[bankIdx];
+}
+
+void setUserBank(int bankIdx, const UserBank& bank)
+{
+    if (bankIdx < 0 || bankIdx >= kUserBankCount) return;
+    std::lock_guard<std::mutex> lk(g_cfgMutex);
+    g_cfg.userBanks[bankIdx] = bank;
+    persistLocked_();
+}
+
+Binding getUserBankSlot(int bankIdx, int slotIdx)
+{
+    std::lock_guard<std::mutex> lk(g_cfgMutex);
+    if (bankIdx < 0 || bankIdx >= kUserBankCount) return {};
+    if (slotIdx < 0 || slotIdx >= kUserBankSlots) return {};
+    return g_cfg.userBanks[bankIdx].slots[slotIdx];
+}
+
+void setUserBankSlot(int bankIdx, int slotIdx, const Binding& bd)
+{
+    if (bankIdx < 0 || bankIdx >= kUserBankCount) return;
+    if (slotIdx < 0 || slotIdx >= kUserBankSlots) return;
+    std::lock_guard<std::mutex> lk(g_cfgMutex);
+    g_cfg.userBanks[bankIdx].slots[slotIdx] = bd;
+    persistLocked_();
+}
+
+bool dispatchUserBankSlot(int bankIdx, int slotIdx, bool pressed)
+{
+    if (bankIdx < 0 || bankIdx >= kUserBankCount) return false;
+    if (slotIdx < 0 || slotIdx >= kUserBankSlots) return false;
+
+    Binding bd;
+    {
+        std::lock_guard<std::mutex> lk(g_cfgMutex);
+        bd = g_cfg.userBanks[bankIdx].slots[slotIdx];
+    }
+
+    // Reuse the same long-press / modifier-snapshot logic that
+    // dispatch(ButtonId) implements. Press-key namespace uses a
+    // synthetic "layer" of 100 + bankIdx so the keys can never
+    // collide with real (layer 0..2, id) keys.
+    const int  syntheticLayer = 100 + bankIdx;
+    const ButtonId pseudoId   = static_cast<ButtonId>(
+        0x4000 + slotIdx);   // outside the real ButtonId range
+    const uint32_t k = pressKey(syntheticLayer, pseudoId);
+
+    const bool longPressArmed =
+        bd.hasLongPress && bd.behavior == Behavior::Momentary;
+    const auto& shortP = bd.shortPress;
+    const auto& longP  = bd.longPress;
+
+    if (longPressArmed) {
+        if (pressed) {
+            g_pressStart[k] = { std::chrono::steady_clock::now(),
+                                currentModifierSnapshot() };
+        } else {
+            auto it = g_pressStart.find(k);
+            if (it != g_pressStart.end()) {
+                const auto held = std::chrono::steady_clock::now() - it->second.start;
+                const int  m    = static_cast<int>(it->second.mod);
+                g_pressStart.erase(it);
+                if (held >= kLongPressThreshold) {
+                    runAction_(longP[m], /*firing*/ true, /*pressed*/ false);
+                } else {
+                    runAction_(shortP[m], /*firing*/ true, /*pressed*/ false);
+                }
+            }
+        }
+        return true;
+    }
+
+    int slotMod = static_cast<int>(Modifier::Plain);
+    if (bd.behavior == Behavior::Momentary) {
+        if (pressed) {
+            g_pressStart[k] = { std::chrono::steady_clock::now(),
+                                currentModifierSnapshot() };
+            slotMod = static_cast<int>(g_pressStart[k].mod);
+        } else {
+            auto it = g_pressStart.find(k);
+            if (it != g_pressStart.end()) {
+                slotMod = static_cast<int>(it->second.mod);
+                g_pressStart.erase(it);
+            }
+        }
+    }
+    bool firing;
+    switch (bd.behavior) {
+        case Behavior::Momentary: firing = pressed; break;
+        case Behavior::Toggle:    firing = pressed; break;
+        case Behavior::Hold:      firing = true;    break;
+    }
+    runAction_(shortP[slotMod], firing, pressed);
+    return shortP[slotMod].type != ActionType::Noop
+        || !shortP[slotMod].action.empty();
 }
 
 void setLayerName(int layer, const std::string& name)

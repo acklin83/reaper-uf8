@@ -1423,20 +1423,146 @@ void SettingsScreen::drawBindings(ImGui_Context* ctx)
 }
 
 // ---- Soft-Key Banks -------------------------------------------------------
-// Per memory uf8-softkey-banks.md: CS = 6 banks (V-POT + 1..5),
-// BC = 2 banks (V-POT + 1). Authoritative bank tables live in main.cpp's
-// `softkey::` namespace. kNoSlot positions await raw VST3 / REAPER action
-// wiring.
+// User-defined Soft-Key Banks: 12 storage slots, each holding 8 binding
+// slots (mapped 1:1 onto the top-soft-key row above the strips). When
+// activated via the `show_user_bank` builtin, the bank's slots
+// override the plugin-driven labels + actions for the duration.
 //
-// Source: SSL UF8 User Guide p.180-181.
+// MVP editor: bank picker, name input, 8 slots × (label + action picker).
+// Modifier matrix / long-press / LED config per slot reuse the existing
+// per-binding editor wiring once the user clicks "Edit slot N".
 void SettingsScreen::drawSoftKeyBanks(ImGui_Context* ctx)
 {
-    ImGui_Text(ctx, "Soft-Key Banks (UF8 PM mode)");
-    ImGui_Text(ctx, "  TODO: ChannelStrip 6-bank grid (V-POT + Bank 1..5)");
-    ImGui_Text(ctx, "  TODO: BusComp 2-bank grid (V-POT + Bank 1)");
-    ImGui_Text(ctx, "  TODO: kNoSlot wiring — raw VST3 param picker / REAPER action picker");
-    ImGui_Text(ctx, "  TODO: per-position label + colour override");
-    ImGui_Text(ctx, "  TODO: bank-follow-focus toggle (default ON)");
+    using namespace uf8::bindings;
+
+    static int s_editBank = 0;
+    static int s_editSlot = -1;   // -1 = no slot expanded
+
+    ImGui_Text(ctx, "User Soft-Key Banks");
+    ImGui_TextDisabled(ctx,
+        "Bind a button to \"Show user soft-key bank\" (param 0..11) to "
+        "switch the top-soft-key row to one of these 12 banks.");
+    ImGui_Spacing(ctx);
+
+    // ---- Bank picker row ----
+    {
+        char items[64 * uf8::bindings::kUserBankCount + 1] = {0};
+        size_t pos = 0;
+        for (int i = 0; i < uf8::bindings::kUserBankCount; ++i) {
+            UserBank b = getUserBank(i);
+            char buf[64];
+            if (b.name.empty()) {
+                std::snprintf(buf, sizeof(buf), "Bank %d", i + 1);
+            } else {
+                std::snprintf(buf, sizeof(buf), "Bank %d: %s",
+                              i + 1, b.name.c_str());
+            }
+            const size_t n = std::strlen(buf);
+            if (pos + n + 2 < sizeof(items)) {
+                std::memcpy(items + pos, buf, n);
+                pos += n;
+                items[pos++] = '\0';
+            }
+        }
+        items[pos] = '\0';   // double-null terminate the combo list
+        double w = 280;
+        ImGui_PushItemWidth(ctx, w);
+        if (ImGui_Combo(ctx, "Edit bank##bank_pick", &s_editBank,
+                        items, nullptr)) {
+            s_editSlot = -1;
+        }
+        ImGui_PopItemWidth(ctx);
+    }
+
+    UserBank bank = getUserBank(s_editBank);
+    bool dirtyBank = false;
+
+    // ---- Bank name input ----
+    {
+        char nameBuf[128] = {0};
+        std::strncpy(nameBuf, bank.name.c_str(), sizeof(nameBuf) - 1);
+        double w = 280;
+        ImGui_PushItemWidth(ctx, w);
+        if (ImGui_InputTextWithHint(ctx, "Bank name##bank_name",
+                                    "e.g. Vocals, Drums, Mixdown",
+                                    nameBuf, sizeof(nameBuf),
+                                    /*flags*/ nullptr,
+                                    /*callback*/ nullptr)) {
+            bank.name = nameBuf;
+            dirtyBank = true;
+        }
+        ImGui_PopItemWidth(ctx);
+    }
+
+    ImGui_Spacing(ctx);
+    ImGui_Separator(ctx);
+    ImGui_Spacing(ctx);
+
+    // ---- 8 slot rows ----
+    for (int i = 0; i < uf8::bindings::kUserBankSlots; ++i) {
+        char idtag[32];
+        std::snprintf(idtag, sizeof(idtag), "ub%d_slot%d", s_editBank, i);
+        ImGui_PushID(ctx, idtag);
+        Binding& bd = bank.slots[i];
+        auto& sp = bd.shortPress[static_cast<int>(Modifier::Plain)];
+
+        char header[80];
+        const std::string& act = sp.action;
+        if (act.empty()) {
+            std::snprintf(header, sizeof(header), "Slot %d   (empty)", i + 1);
+        } else {
+            std::snprintf(header, sizeof(header), "Slot %d   %s%s",
+                          i + 1,
+                          bd.label.empty() ? act.c_str() : bd.label.c_str(),
+                          bd.label.empty() ? "" : "");
+        }
+        if (ImGui_CollapsingHeader(ctx, header, nullptr, nullptr)) {
+            ImGui_Indent(ctx, nullptr);
+
+            // Label
+            char labelBuf[64] = {0};
+            std::strncpy(labelBuf, bd.label.c_str(), sizeof(labelBuf) - 1);
+            double w = 200;
+            ImGui_PushItemWidth(ctx, w);
+            if (ImGui_InputTextWithHint(ctx, "Label##slotlabel",
+                                        "shown on the top-soft-key LCD",
+                                        labelBuf, sizeof(labelBuf),
+                                        nullptr, nullptr)) {
+                bd.label = labelBuf;
+                dirtyBank = true;
+            }
+            ImGui_PopItemWidth(ctx);
+
+            // Reuse the action picker for this slot's plain short slot.
+            // The picker writes directly into the referenced fields so
+            // the local `bank` copy gets the user's change before we
+            // commit via setUserBank below.
+            ActionFieldsRef ref{
+                &sp.type, &sp.action, &sp.param,
+                &sp.midiDevice, &sp.midiChannel, &sp.midiMsgType,
+                &sp.midiData1, &sp.midiData2,
+            };
+            char prefix[32];
+            std::snprintf(prefix, sizeof(prefix), "ub%d_s%d",
+                          s_editBank, i);
+            if (drawActionPicker(ctx, prefix, ref,
+                                 /*layer*/ -1, ButtonId::None,
+                                 /*isLongPress*/ false)) {
+                dirtyBank = true;
+            }
+
+            if (ImGui_Button(ctx, "Clear slot##clr",
+                             /*size_w*/ nullptr, /*size_h*/ nullptr)) {
+                bd = Binding{};
+                dirtyBank = true;
+            }
+
+            ImGui_Unindent(ctx, nullptr);
+        }
+        ImGui_PopID(ctx);
+    }
+
+    if (dirtyBank) setUserBank(s_editBank, bank);
 }
 
 // ---- Modes ----------------------------------------------------------------
