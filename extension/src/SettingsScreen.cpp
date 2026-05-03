@@ -2232,6 +2232,12 @@ std::string g_lastSaveError;             // last persistence error, sticky until
 std::string g_editingMatch;
 int         g_listeningLinkIdx = -1;
 char        g_paramFilter[64]  = {};
+// Plugin-selector key — "trackIdx:fxIdx" of the FX instance whose param
+// list the editor reads from. -1 trackIdx = master. Empty string = pick
+// first match (auto). Cleared whenever the editing map changes so the
+// selector doesn't outlive its scope.
+std::string g_fxSelectorKey;
+std::string g_fxSelectorScope;   // editing match for which the key is valid
 
 const char* domainLabel_(uf8::Domain d)
 {
@@ -2274,39 +2280,77 @@ const uf8::PluginMap* canonicalTopology_(uf8::Domain d)
     return fallback;
 }
 
-// Find the first FX (across all tracks) whose name contains the user
-// map's match substring. The editor needs SOME live FX instance to
-// enumerate parameters from; we don't care which track. Master track
-// is included by checking GetMasterTrack first. Returns ok=false when
-// nothing matches (the param list shows a hint then).
+// All FX instances (across all tracks + master) whose name contains the
+// user map's match substring. The plugin-selector dropdown lets the user
+// pick which one the editor reads its param list from; the schematic +
+// param list bind to whichever instance the user picks. Returns the
+// instances in the order they're discovered (master first, then tracks
+// 1..N), so the auto-pick (g_fxSelectorKey empty) maps to the same
+// instance findEditingFx_ used to return pre-selector.
 struct EditingFx { MediaTrack* tr = nullptr; int fxIdx = -1; bool ok = false; };
 
-EditingFx findEditingFx_(const std::string& match)
+struct EditingFxInstance {
+    MediaTrack* tr;
+    int         trIdx;     // -1 = master
+    int         fxIdx;
+    std::string label;     // human-readable for the combo
+    std::string key;       // "trIdx:fxIdx" for the selector
+};
+
+std::vector<EditingFxInstance> findEditingFxAll_(const std::string& match)
 {
-    if (match.empty()) return {};
+    std::vector<EditingFxInstance> out;
+    if (match.empty()) return out;
     char buf[512];
 
-    auto checkTrack = [&](MediaTrack* tr) -> EditingFx {
-        if (!tr) return {};
+    auto scan = [&](MediaTrack* tr, int trIdx) {
+        if (!tr) return;
         const int n = TrackFX_GetCount(tr);
         for (int i = 0; i < n; ++i) {
-            if (TrackFX_GetFXName(tr, i, buf, sizeof(buf)) &&
-                std::strstr(buf, match.c_str()) != nullptr) {
-                return { tr, i, true };
+            if (!TrackFX_GetFXName(tr, i, buf, sizeof(buf))) continue;
+            if (std::strstr(buf, match.c_str()) == nullptr) continue;
+            // Track name (best-effort; empty for unnamed tracks).
+            char trName[128] = {};
+            if (trIdx >= 0) {
+                GetTrackName(tr, trName, sizeof(trName));
             }
+            char lbl[700];
+            if (trIdx < 0) {
+                std::snprintf(lbl, sizeof(lbl),
+                    "Master / FX %d  '%s'", i + 1, buf);
+            } else if (trName[0]) {
+                std::snprintf(lbl, sizeof(lbl),
+                    "Track %d '%s' / FX %d  '%s'",
+                    trIdx + 1, trName, i + 1, buf);
+            } else {
+                std::snprintf(lbl, sizeof(lbl),
+                    "Track %d / FX %d  '%s'",
+                    trIdx + 1, i + 1, buf);
+            }
+            char keybuf[32];
+            std::snprintf(keybuf, sizeof(keybuf), "%d:%d", trIdx, i);
+            out.push_back({ tr, trIdx, i, std::string(lbl), std::string(keybuf) });
         }
-        return {};
     };
 
-    // Prefer the last-touched track — if the user just clicked on a
-    // track hosting the plugin, this picks the right instance.
-    if (auto hit = checkTrack(GetLastTouchedTrack()); hit.ok) return hit;
-    if (auto hit = checkTrack(GetMasterTrack(nullptr));   hit.ok) return hit;
+    scan(GetMasterTrack(nullptr), -1);
     const int trackCount = CountTracks(nullptr);
-    for (int t = 0; t < trackCount; ++t) {
-        if (auto hit = checkTrack(GetTrack(nullptr, t)); hit.ok) return hit;
+    for (int t = 0; t < trackCount; ++t) scan(GetTrack(nullptr, t), t);
+    return out;
+}
+
+// Resolve the user's selector choice (or auto-pick) to an EditingFx.
+EditingFx pickEditingFx_(const std::vector<EditingFxInstance>& list)
+{
+    if (list.empty()) return {};
+    if (!g_fxSelectorKey.empty()) {
+        for (const auto& e : list) {
+            if (e.key == g_fxSelectorKey) return { e.tr, e.fxIdx, true };
+        }
     }
-    return {};
+    // Auto-pick = first hit (master before tracks; preserves pre-selector
+    // behaviour when nothing's been selected explicitly).
+    return { list[0].tr, list[0].fxIdx, true };
 }
 
 // Find the existing vst3Param (if any) bound to `linkIdx` for the map
@@ -2372,6 +2416,26 @@ void unbindSlot_(int linkIdx)
         }
         break;
     }
+}
+
+// Move listening to the next still-unmapped slot in topology order, or
+// clear when nothing else needs binding. Used after a click-bind to
+// support quick mass mapping without an extra click per slot.
+void autoAdvanceListening_(const uf8::PluginMap& topo)
+{
+    if (g_listeningLinkIdx < 0) return;
+    bool past = false;
+    for (const auto& s : topo.slots) {
+        if (!past) {
+            if (s.linkIdx == g_listeningLinkIdx) past = true;
+            continue;
+        }
+        if (mappedVst3For_(s.linkIdx) < 0) {
+            g_listeningLinkIdx = s.linkIdx;
+            return;
+        }
+    }
+    g_listeningLinkIdx = -1;
 }
 
 // Toggle the inverted-flag on a mapped slot.
@@ -2566,15 +2630,20 @@ void drawSchematicPad_(ImGui_Context* ctx,
     const bool exists     = (slot != nullptr);
 
     // Colours — match the Bindings-editor schematic palette so the
-    // FX-Learn view feels like part of the same family.
+    // FX-Learn view feels like part of the same family. Listening state
+    // pulses the border alpha (sin wave, 1 Hz-ish) so the user sees at
+    // a glance which pad is awaiting a bind.
     uint32_t fill, border, txt;
     if (!exists) {
         fill   = 0x14181EFF;
         border = 0x2A3038FF;
         txt    = 0x55595FFF;
     } else if (isListen) {
+        const double t     = ImGui_GetTime(ctx);
+        const double pulse = 0.5 + 0.5 * std::sin(t * 6.0);  // 0..1
+        const uint32_t bA  = static_cast<uint32_t>(140 + 115 * pulse) & 0xFFu;
         fill   = 0x4A3A1AFF;
-        border = 0xFFE040FF;
+        border = (0xFFE040u << 8) | bA;
         txt    = 0xFFFFFFFF;
     } else if (isMapped) {
         fill   = 0x1F3A24FF;
@@ -2662,8 +2731,12 @@ void drawSchematicPad_(ImGui_Context* ctx,
             const int p = std::atoi(payload);
             if (p >= 0) {
                 bindSlot_(pad.linkIdx, p);
-                if (g_listeningLinkIdx == pad.linkIdx)
-                    g_listeningLinkIdx = -1;
+                // If the user was click-and-turn listening on this same
+                // pad, advance to the next unmapped slot — DnD finishes
+                // the bind, no need for a second click to move on.
+                if (g_listeningLinkIdx == pad.linkIdx) {
+                    autoAdvanceListening_(topo);
+                }
             }
         }
         ImGui_EndDragDropTarget(ctx);
@@ -2785,6 +2858,16 @@ void drawFxLearnEditor_(ImGui_Context* ctx)
         return;
     }
 
+    // ESC clears any in-progress listening — matches the plan-doc
+    // §"Interaktion" expectation. Only fires when nothing else is
+    // capturing keyboard (e.g. param-filter input box has focus).
+    if (g_listeningLinkIdx >= 0) {
+        bool repeat = false;
+        if (ImGui_IsKeyPressed(ctx, ImGui_Key_Escape, &repeat)) {
+            g_listeningLinkIdx = -1;
+        }
+    }
+
     // ---- Header / breadcrumb --------------------------------------------
     if (ImGui_Button(ctx, "<- All maps##fxl_back", nullptr, nullptr)) {
         g_editingMatch.clear();
@@ -2797,32 +2880,57 @@ void drawFxLearnEditor_(ImGui_Context* ctx)
                   editing->match.c_str(), domainLabel_(editing->domain));
     ImGui_Text(ctx, hdr);
 
-    // Find a live FX instance to enumerate params from.
-    const EditingFx fx = findEditingFx_(editing->match);
-    if (!fx.ok) {
+    // Reset the FX-selector key when the editing map changes — the old
+    // key (track:fx pair) means nothing for a different map.
+    if (g_fxSelectorScope != editing->match) {
+        g_fxSelectorKey.clear();
+        g_fxSelectorScope = editing->match;
+    }
+
+    // Enumerate every FX-instance whose name contains the match — fed to
+    // the plugin-selector combo and to pickEditingFx_.
+    const auto fxList = findEditingFxAll_(editing->match);
+    const EditingFx fx = pickEditingFx_(fxList);
+
+    if (fxList.empty()) {
         ImGui_Spacing(ctx);
         ImGui_TextColored(ctx, 0xFFC04CFF,
             "No FX matching that name found on any track. Insert one to "
             "see its parameter list.");
     } else {
-        // Track index for the user's reference. -1 = master.
-        int trIdx = -1;
-        const int trackCount = CountTracks(nullptr);
-        for (int t = 0; t < trackCount; ++t) {
-            if (GetTrack(nullptr, t) == fx.tr) { trIdx = t; break; }
+        // Plugin-selector combo. Preview shows the active instance's
+        // label; opening the combo lists all matches across master + tracks.
+        // Auto-pick row at the top falls back to first-match behaviour.
+        const char* preview = nullptr;
+        for (const auto& e : fxList) {
+            if (e.key == g_fxSelectorKey) { preview = e.label.c_str(); break; }
         }
-        char info[256];
-        char fxNameBuf[256] = {};
-        TrackFX_GetFXName(fx.tr, fx.fxIdx, fxNameBuf, sizeof(fxNameBuf));
-        if (trIdx >= 0)
-            std::snprintf(info, sizeof(info),
-                "  Reading params from: track %d, FX %d  '%s'",
-                trIdx + 1, fx.fxIdx + 1, fxNameBuf);
-        else
-            std::snprintf(info, sizeof(info),
-                "  Reading params from: master, FX %d  '%s'",
-                fx.fxIdx + 1, fxNameBuf);
-        ImGui_TextDisabled(ctx, info);
+        if (!preview) preview = fxList[0].label.c_str();
+
+        ImGui_Text(ctx, "  Instance:");
+        ImGui_SameLine(ctx, nullptr, nullptr);
+        int comboFlags = 0;
+        if (ImGui_BeginCombo(ctx, "##fxl_instance", preview, &comboFlags)) {
+            // "Auto" entry — clears the selector.
+            const bool autoActive = g_fxSelectorKey.empty();
+            bool sel0 = autoActive;
+            int  sf0  = 0;
+            if (ImGui_Selectable(ctx, "Auto (first match)",
+                                 &sel0, &sf0, nullptr, nullptr)) {
+                g_fxSelectorKey.clear();
+            }
+            for (const auto& e : fxList) {
+                bool sel = (e.key == g_fxSelectorKey);
+                int  sf  = 0;
+                char rowId[700];
+                std::snprintf(rowId, sizeof(rowId), "%s##fxl_inst_%s",
+                              e.label.c_str(), e.key.c_str());
+                if (ImGui_Selectable(ctx, rowId, &sel, &sf, nullptr, nullptr)) {
+                    g_fxSelectorKey = e.key;
+                }
+            }
+            ImGui_EndCombo(ctx);
+        }
     }
 
     if (!g_lastSaveError.empty()) {
@@ -2949,23 +3057,7 @@ void drawFxLearnEditor_(ImGui_Context* ctx)
                                      nullptr, nullptr)) {
                     if (g_listeningLinkIdx >= 0) {
                         bindSlot_(g_listeningLinkIdx, p);
-                        // Auto-advance: jump listening to the next still-
-                        // unmapped slot in topology order so quick mass
-                        // mapping doesn't need an extra click per slot.
-                        bool advanced = false;
-                        bool past = false;
-                        for (const auto& cs : topo->slots) {
-                            if (!past) {
-                                if (cs.linkIdx == g_listeningLinkIdx) past = true;
-                                continue;
-                            }
-                            if (mappedVst3For_(cs.linkIdx) < 0) {
-                                g_listeningLinkIdx = cs.linkIdx;
-                                advanced = true;
-                                break;
-                            }
-                        }
-                        if (!advanced) g_listeningLinkIdx = -1;
+                        autoAdvanceListening_(*topo);
                     }
                 }
 

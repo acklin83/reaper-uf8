@@ -454,6 +454,10 @@ REAIMGUIAPI_EXTERN ReaImGuiFunc<bool(ImGui_Context* ctx)> ImGui_IsWindowAppearin
 REAIMGUIAPI_EXTERN ReaImGuiFunc<bool(ImGui_Context* ctx)> ImGui_IsWindowCollapsed REAIMGUIAPI_INIT("ImGui_IsWindowCollapsed");
 REAIMGUIAPI_EXTERN ReaImGuiFunc<bool(ImGui_Context* ctx, int* flagsInOptional)> ImGui_IsWindowFocused REAIMGUIAPI_INIT("ImGui_IsWindowFocused");
 REAIMGUIAPI_EXTERN ReaImGuiFunc<bool(ImGui_Context* ctx, int* flagsInOptional)> ImGui_IsWindowHovered REAIMGUIAPI_INIT("ImGui_IsWindowHovered");
+// Patched 2026-05-03: added Key constants used by FX-Learn editor (ESC
+// to cancel listening). Vendored sigs file lists only KeyMod flags;
+// the v0.10 dylib exposes the full ImGui_Key_* enum set.
+REAIMGUIAPI_EXTERN ReaImGuiEnum ImGui_Key_Escape REAIMGUIAPI_INIT("ImGui_Key_Escape");
 REAIMGUIAPI_EXTERN ReaImGuiEnum ImGui_KeyModFlags_Alt REAIMGUIAPI_INIT("ImGui_KeyModFlags_Alt");
 REAIMGUIAPI_EXTERN ReaImGuiEnum ImGui_KeyModFlags_Ctrl REAIMGUIAPI_INIT("ImGui_KeyModFlags_Ctrl");
 REAIMGUIAPI_EXTERN ReaImGuiEnum ImGui_KeyModFlags_None REAIMGUIAPI_INIT("ImGui_KeyModFlags_None");
