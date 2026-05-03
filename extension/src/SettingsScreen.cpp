@@ -729,10 +729,11 @@ void drawUc1Vector(ImGui_Context* ctx)
     };
 
     constexpr uint32_t kRedCap    = 0xC03038FF;  // HF Gain
-    constexpr uint32_t kGreenCap  = 0x408840FF;  // HMF Gain
-    constexpr uint32_t kBlueCap   = 0x4070C0FF;  // LMF Gain
-    constexpr uint32_t kGreyCap   = 0x6A707CFF;  // LF Gain + filters + dynamics
-    constexpr uint32_t kFreqCap   = 0x3A4150FF;  // Freq + Q knobs (darker grey)
+    constexpr uint32_t kGreenCap  = 0x408840FF;  // HMF Gain + Q
+    constexpr uint32_t kBlueCap   = 0x4070C0FF;  // LMF Gain + Q
+    constexpr uint32_t kGreyCap   = 0x6A707CFF;  // filters + dynamics
+    constexpr uint32_t kBlackCap  = 0x101418FF;  // LF Gain + Freq
+    constexpr uint32_t kFreqCap   = 0x3A4150FF;  // Freq knobs (darker grey)
     constexpr uint32_t kAccentBC  = 0x2A4870FF;  // Bus Comp section accent
     constexpr uint32_t kAccentCC  = 0x903030FF;  // Central Control accent
 
@@ -745,6 +746,17 @@ void drawUc1Vector(ImGui_Context* ctx)
               0x252A33FF, 0x4A5060FF, 2.5);
         drawTextCentered_(c, x + kSmallToggleW / 2.0f,
                               y + kSmallToggleH / 2.0f,
+                              0xC0C4CCFF, label);
+    };
+
+    // Mid-sized toggle — same footprint as the Channel section's
+    // POLARITY/S-C LISTEN/SOLO CLR buttons (66×22). Used for the four
+    // dynamics-section toggles (FAST ATK COMP / PEAK / EXPAND /
+    // FAST ATK GATE).
+    constexpr float kDynBtnW = 66, kDynBtnH = 22;
+    auto dynBtn = [&](float x, float y, const char* label) {
+        rect_(c, x, y, kDynBtnW, kDynBtnH, 0x252A33FF, 0x4A5060FF, 3.0);
+        drawTextCentered_(c, x + kDynBtnW / 2.0f, y + kDynBtnH / 2.0f,
                               0xC0C4CCFF, label);
     };
 
@@ -765,35 +777,40 @@ void drawUc1Vector(ImGui_Context* ctx)
     line_(c, kColLx + 70, 122, kColLx + kColLw - 8, 122, 0x383C44FF, 1.0);
 
     // HF band — Gain in col 1, Freq in col 2 diagonal, HF Bell toggle
-    // beside the Freq knob.
+    // beside the Freq knob. Knob spacing 28 px (was 24) for a calmer
+    // visual rhythm matching the LMF band below.
     drawText_(c, kColLx + 14, 152, 0xB8BCC4FF, "HF");
     knob(kColLx + 60,  154, 20, kRedCap, "GAIN");
-    knob(kColLx + 170, 178, 20, kRedCap, "FREQ");
-    smallToggle(kColLx + 192, 144, "BELL");
+    knob(kColLx + 170, 182, 20, kRedCap, "FREQ");
+    smallToggle(kColLx + 192, 146, "BELL");
 
-    // HMF band — Gain + Q in col 1, Freq in col 2.
+    // HMF band — Gain + Q in col 1, Freq in col 2. Q matches the
+    // band's silk-screen colour (green). Knob spacing GAIN→FREQ 28,
+    // FREQ→Q 38 (slightly more than before so the diagonals breathe).
     drawText_(c, kColLx + 14, 230, 0xB8BCC4FF, "HMF");
     knob(kColLx + 60,  232, 20, kGreenCap, "GAIN");
-    knob(kColLx + 170, 256, 20, kGreenCap, "FREQ");
-    knob(kColLx + 60,  290, 20, kFreqCap,  "Q");
+    knob(kColLx + 170, 260, 20, kGreenCap, "FREQ");
+    knob(kColLx + 60,  300, 20, kGreenCap, "Q");
 
-    // EQ Type + EQ In: stacked in column 2 between HMF and LMF
-    smallToggle(kColLx + 192, 286, "TYPE");
-    smallToggle(kColLx + 192, 304, "IN");
+    // EQ Type + EQ In: stacked in column 2 deep in the gap between
+    // HMF and LMF — they live entirely in the band-separator strip
+    // now, no longer overlapping with the HMF Q knob.
+    smallToggle(kColLx + 192, 348, "TYPE");
+    smallToggle(kColLx + 192, 368, "IN");
 
-    // LMF band — Gain + Q in col 1, Freq in col 2.
-    drawText_(c, kColLx + 14, 340, 0xB8BCC4FF, "LMF");
-    knob(kColLx + 60,  342, 20, kBlueCap, "GAIN");
-    knob(kColLx + 170, 366, 20, kBlueCap, "FREQ");
-    knob(kColLx + 60,  400, 20, kFreqCap, "Q");
+    // LMF band — Gain + Q in col 1, Freq in col 2. Q in band-blue.
+    drawText_(c, kColLx + 14, 396, 0xB8BCC4FF, "LMF");
+    knob(kColLx + 60,  398, 20, kBlueCap, "GAIN");
+    knob(kColLx + 170, 426, 20, kBlueCap, "FREQ");
+    knob(kColLx + 60,  466, 20, kBlueCap, "Q");
 
-    // LF band — Gain in col 1 (no Q), Freq in col 2 diagonal. LF Bell
-    // toggle on the right (column 2), matching HF Bell — both Bell
-    // toggles sit on the right side of the column for visual rhythm.
-    drawText_(c, kColLx + 14, 450, 0xB8BCC4FF, "LF");
-    knob(kColLx + 60,  452, 20, kGreyCap, "GAIN");
-    knob(kColLx + 170, 476, 20, kGreyCap, "FREQ");
-    smallToggle(kColLx + 192, 442, "BELL");
+    // LF band — both controls in black per silk-screen. Layout
+    // mirrors LMF's Q+FREQ diagonal (Freq upper-right, Gain lower-
+    // left) so the LF Gain sits below the LF Freq.
+    drawText_(c, kColLx + 14, 524, 0xB8BCC4FF, "LF");
+    knob(kColLx + 170, 526, 20, kBlackCap, "FREQ");
+    knob(kColLx + 60,  566, 20, kBlackCap, "GAIN");
+    smallToggle(kColLx + 192, 516, "BELL");
 
     // ---- Centre column: Bus Comp (top) + Central Control (bottom) ------
     constexpr float kColCx = kColLx + kColLw + 8, kColCw = 256;
@@ -874,8 +891,8 @@ void drawUc1Vector(ImGui_Context* ctx)
     // VERTICALLY CENTRED in the column, with Channel section pinned to
     // the bottom (per Frank's note).
     sectionLabel(kColRx + 14, 32, "COMPRESSOR");
-    smallToggle(kColRx + kColRw - 70, 32, "FAST ATK");
-    smallToggle(kColRx + kColRw - 70, 50, "PEAK");
+    dynBtn(kColRx + kColRw - 76, 24, "FAST ATK");
+    dynBtn(kColRx + kColRw - 76, 50, "PEAK");
     {
         const float c1x = kColRx + 60, c2x = kColRx + 156;
         knob(c1x, 96,  20, kGreyCap, "RATIO");
@@ -896,26 +913,33 @@ void drawUc1Vector(ImGui_Context* ctx)
         }
     }
 
-    // Gate / Expander section.
+    // Gate / Expander section. Staggered layout matching the Comp
+    // section above — Threshold sits below Range diagonally, Hold
+    // sits below Release diagonally. Same visual rhythm as the EQ
+    // bands' Gain/Freq pairs in the left column.
     sectionLabel(kColRx + 14, 270, "GATE / EXPANDER");
     {
         const float c1x = kColRx + 60, c2x = kColRx + 156;
-        knob(c1x, 314, 20, kGreyCap, "RANGE");
-        knob(c2x, 314, 20, kGreyCap, "THRESHOLD");
+        knob(c1x, 308, 20, kGreyCap, "RANGE");
+        knob(c2x, 332, 20, kGreyCap, "THRESHOLD");
         knob(c1x, 374, 20, kGreyCap, "RELEASE");
-        knob(c2x, 374, 20, kGreyCap, "HOLD");
+        knob(c2x, 398, 20, kGreyCap, "HOLD");
     }
-    smallToggle(kColRx + 14, 422, "EXPAND");
-    smallToggle(kColRx + 14, 446, "FAST ATK");
+    dynBtn(kColRx + 14, 430, "EXPAND");
+    dynBtn(kColRx + 14, 456, "FAST ATK");
 
     // Channel section — pinned to the bottom of the column. Three
-    // columns; buttons sized so all labels (incl. "S/C LISTEN") fit
-    // without truncation.
+    // columns; small toggles keep their full width so "S/C LISTEN"
+    // fits, while IN / SOLO / CUT / FINE are half-size per Frank's
+    // note (those four buttons are physically smaller on the UC1).
     sectionLabel(kColRx + 14, 488, "CHANNEL");
     {
-        constexpr float bw = 66;          // button width — fits "S/C LISTEN"
+        constexpr float bw = 66;          // small-toggle width — fits "S/C LISTEN"
         constexpr float bh = 22;          // small toggle height
-        constexpr float lh = 56;          // large button height
+        // Half-size dimensions for IN / SOLO / CUT / FINE.
+        constexpr float lbw = 33;         // half of bw
+        constexpr float lh  = 28;         // half of original 56
+        constexpr float inH = 37;         // half of original 74
         const float c1x = kColRx + 8;
         const float c2x = kColRx + 82;
         const float c3x = kColRx + 156;
@@ -926,18 +950,25 @@ void drawUc1Vector(ImGui_Context* ctx)
         drawTextCentered_(c, c1x + bw / 2.0f, 547, 0xC0C4CCFF, "S/C LISTEN");
         rect_(c, c1x, 562, bw, bh, 0x252A33FF, 0x4A5060FF, 3.0);
         drawTextCentered_(c, c1x + bw / 2.0f, 573, 0xC0C4CCFF, "SOLO CLR");
-        // Large bottom row — SOLO / CUT / FINE all in one Y-line.
-        const float largeY = 658;
-        rect_(c, c1x, largeY, bw, lh, 0xE0E0E0FF, 0x808088FF, 4.0);
-        drawTextCentered_(c, c1x + bw / 2.0f, largeY + lh / 2.0f, 0x303338FF, "SOLO");
-        rect_(c, c2x, largeY, bw, lh, 0xE0E0E0FF, 0x808088FF, 4.0);
-        drawTextCentered_(c, c2x + bw / 2.0f, largeY + lh / 2.0f, 0x303338FF, "CUT");
-        // Column 3 — Channel-IN spans the small-toggle rows; FINE in
-        // the large bottom row.
-        rect_(c, c3x, 510, bw, 74, 0xE0E0E0FF, 0x808088FF, 4.0);
-        drawTextCentered_(c, c3x + bw / 2.0f, 547, 0x303338FF, "IN");
-        rect_(c, c3x, largeY, bw, lh, 0xE0E0E0FF, 0x808088FF, 4.0);
-        drawTextCentered_(c, c3x + bw / 2.0f, largeY + lh / 2.0f, 0x303338FF, "FINE");
+        // Large bottom row — SOLO / CUT / FINE share one Y-line, but
+        // each button is half-size and centred in its column slot.
+        const float largeY = 672;         // shifted down to keep visual baseline
+        const float soloX = c1x + (bw - lbw) / 2.0f;
+        const float cutX  = c2x + (bw - lbw) / 2.0f;
+        const float fineX = c3x + (bw - lbw) / 2.0f;
+        rect_(c, soloX, largeY, lbw, lh, 0xE0E0E0FF, 0x808088FF, 3.0);
+        drawTextCentered_(c, soloX + lbw / 2.0f, largeY + lh / 2.0f, 0x303338FF, "SOLO");
+        rect_(c, cutX, largeY, lbw, lh, 0xE0E0E0FF, 0x808088FF, 3.0);
+        drawTextCentered_(c, cutX + lbw / 2.0f, largeY + lh / 2.0f, 0x303338FF, "CUT");
+        // Column 3 — Channel-IN spans the small-toggle rows (centred
+        // vertically over the three of them); FINE in the large
+        // bottom row, half-size.
+        const float inX = c3x + (bw - lbw) / 2.0f;
+        const float inY = 510 + (3 * bh - inH) / 2.0f;
+        rect_(c, inX, inY, lbw, inH, 0xE0E0E0FF, 0x808088FF, 3.0);
+        drawTextCentered_(c, inX + lbw / 2.0f, inY + inH / 2.0f, 0x303338FF, "IN");
+        rect_(c, fineX, largeY, lbw, lh, 0xE0E0E0FF, 0x808088FF, 3.0);
+        drawTextCentered_(c, fineX + lbw / 2.0f, largeY + lh / 2.0f, 0x303338FF, "FINE");
     }
 
     // Brand line
