@@ -52,6 +52,26 @@ struct UserPluginCatalog {
 
 Damit der Rest der Pipeline (V-Pot push, Render, Focus, Multi-instance) **null Änderungen** braucht: User-Maps werden zu `PluginMap`-Instanzen synthetisiert (gleiche Struktur, slots aus den UserSlotBindings). Domain-Aware-Lookup, FocusedParam, alles funktioniert.
 
+### Built-in-Maps sind geschützt
+
+Beim Anlegen einer neuen UserPluginMap (oder beim Edit des `match`-Substrings einer existierenden) wird **vor dem Save** geprüft, ob der gewählte FX-Name auf eine Built-in-Map matched. Wenn ja:
+
+- Save wird **blockiert**, Toast-Dialog: *"This plugin is already covered by a built-in map (CS 2 / 4K B / 4K E / 4K G / BC 2). Built-in maps can't be overridden."*
+- Im **+ New / Plugin-Picker** filtern wir Built-in-Matches direkt aus dem Dropdown raus, damit der Konflikt gar nicht erst entstehen kann.
+- Beim **Import** (JSON aus Datei) Plugins die mit Built-in matchen werden mit Status "Skipped — built-in covers this" im Conflict-Resolution-Dialog angezeigt, der User kann nichts daran ändern.
+
+So bleibt die Built-in-Authority sauber und der User kriegt keine "warum wirkt mein Mapping nicht"-Verwirrung weil sein Lookup vom Two-Stage-Pfad weggesnatched wird.
+
+### VST2 / JS / AU-Plugin-Support
+
+UserPluginMap funktioniert für **alle Plugin-Typen** die REAPER hostet — VST3, VST2, JS, AU. Die Lookup-API (`TrackFX_GetFXName`, `TrackFX_GetParamNormalized`, `TrackFX_GetNumParams`, `TrackFX_GetParamName`) ist plugin-format-agnostisch.
+
+Einschränkung nur bei **GR-Auto-Detection**: der `kIsReadOnly`-Flag-Mechanismus ist VST3-spezifisch. Für VST2/JS/AU:
+
+- "Assignable Meter Data"-Sektion in der Param-Liste ist **leer** — keine Auto-Detection.
+- User kann trotzdem manuell einen Param als GR markieren: Drag eines normalen Params auf die GR-Meter-Section funktioniert genauso. UserPluginMap.metering.gainReduction wird einfach gesetzt, kein Read-Only-Check.
+- Das Risiko: User mappt einen normalen schreibbaren Param dorthin — dann würde unser Render-Tick-Read den letzten User-Wert sehen statt eines Live-Levels. UI-Hinweis beim manuellen Drag auf einen non-Read-Only-Param: *"This parameter is writable — meter readings may be stale."* Confirm-Dialog erlaubt's trotzdem (für Plugins die GR ohne Read-Only-Flag exposen).
+
 ### Fader und Pan im Plugin-Modifier-Mode
 
 Plugin-Modifier (`ssl_strip_mode_toggle` / `g_pluginFaderMode`) routet Fader auf den Plugin-Output-Fader und V-Pot auf den Plugin-Pan. Bei Built-in-Maps sind das die Slots mit **linkIdx=1** ("FaderLevel") und **linkIdx=3** ("Pan") — ganz normale Einträge in der `slots`-Liste ([PluginMap.cpp:274-276](extension/src/PluginMap.cpp:274)). Der Modifier-Code macht effektiv `findSlotByLinkIdx(map, 1)` / `findSlotByLinkIdx(map, 3)`.
