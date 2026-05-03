@@ -784,12 +784,13 @@ void drawUc1Vector(ImGui_Context* ctx)
     knob(kColLx + 170, 366, 20, kBlueCap, "FREQ");
     knob(kColLx + 60,  400, 20, kFreqCap, "Q");
 
-    // LF band — Gain in col 1 (no Q), Freq in col 2 diagonal, LF Bell
-    // toggle beside the Gain knob.
+    // LF band — Gain in col 1 (no Q), Freq in col 2 diagonal. LF Bell
+    // toggle on the right (column 2), matching HF Bell — both Bell
+    // toggles sit on the right side of the column for visual rhythm.
     drawText_(c, kColLx + 14, 450, 0xB8BCC4FF, "LF");
     knob(kColLx + 60,  452, 20, kGreyCap, "GAIN");
-    smallToggle(kColLx +  92, 442, "BELL");
     knob(kColLx + 170, 476, 20, kGreyCap, "FREQ");
+    smallToggle(kColLx + 192, 442, "BELL");
 
     // ---- Centre column: Bus Comp (top) + Central Control (bottom) ------
     constexpr float kColCx = kColLx + kColLw + 8, kColCw = 256;
@@ -845,9 +846,14 @@ void drawUc1Vector(ImGui_Context* ctx)
     // Magnifier round button (under 360°)
     circle_(c, kColCx + kColCw - 28, 510, 11, 0x1A1E24FF, 0x383C44FF);
 
-    // Channel encoder (large, left) + Sec encoder (mid, "Bus Comp"-tagged)
-    knob(kColCx + 50,  570, 26, kGreyCap, "CHANNEL");
-    knob(kColCx + 156, 570, 22, kGreyCap, "BUS COMP");
+    // CS encoder + BC encoder — symmetrically centred under the LCD,
+    // labels match the focus-domain naming used everywhere else in
+    // the codebase (Domain::ChannelStrip / Domain::BusComp).
+    {
+        const float midX = kColCx + kColCw / 2.0f;
+        knob(midX - 38, 570, 24, kGreyCap, "CS Encoder");
+        knob(midX + 38, 570, 24, kGreyCap, "BC Encoder");
+    }
 
     // Four menu buttons in a row (BACK / CONFIRM / ROUTING / PRESETS) —
     // fixed-function, unlabelled per Frank's note (too small to label).
@@ -872,16 +878,21 @@ void drawUc1Vector(ImGui_Context* ctx)
         knob(c2x, 108, 20, kGreyCap, "THRESHOLD");
         knob(c1x, 140, 20, kGreyCap, "RELEASE");
     }
-    // Dyn IN (toggle) + GR meter LED stack to its right
-    rect_(c, kColRx + 14, 178, 28, 28, 0xE0E0E0FF, 0x808088FF, 3.0);
-    drawTextCentered_(c, kColRx + 28, 214, 0x9CA0AAFF, "IN");
+    // Dyn IN (toggle, smaller) — sits on the left edge of the column.
+    rect_(c, kColRx + 14, 180, 22, 22, 0xE0E0E0FF, 0x808088FF, 3.0);
+    drawTextCentered_(c, kColRx + 25, 210, 0x9CA0AAFF, "IN");
+
+    // GR meter — vertical LED stack on the RIGHT side of the column,
+    // tucked under the Threshold knob. Matches the UC1 hardware layout
+    // where GR sits opposite the IN toggle. Labels (20/14/9/6/3) sit
+    // to the LEFT of the LEDs as on the silk-screen.
     {
-        const float gx = kColRx + 60, gy = 178;
+        const float gx = kColRx + kColRw - 26, gy = 180;
         const char* steps[] = { "20", "14", "9", "6", "3" };
         for (int i = 0; i < 5; ++i) {
             const float ly = gy + i * 8;
             circle_(c, gx, ly, 2.5, 0x404448FF, 0);
-            drawText_(c, gx + 8, ly - 5, 0x808088FF, steps[i]);
+            drawText_(c, gx - 18, ly - 5, 0x808088FF, steps[i]);
         }
     }
 
@@ -905,13 +916,13 @@ void drawUc1Vector(ImGui_Context* ctx)
     //   col 3: large Channel IN at top, large FINE at the bottom.
     sectionLabel(kColRx + 14, 430, "CHANNEL");
     {
-        const float c1x = kColRx + 14;
-        const float c2x = kColRx + 86;
-        const float c3x = kColRx + 158;
-        constexpr float bw = 60;          // small button width
-        constexpr float lh = 60;          // large button height
-        constexpr float lw = 60;          // large button width
-        // Column 1 — three small + SOLO large
+        constexpr float bw = 50;          // small button width
+        constexpr float lw = 50;          // large button width — keep buttons compact
+        constexpr float lh = 44;          // large button height
+        const float c1x = kColRx + 18;
+        const float c2x = kColRx + 80;
+        const float c3x = kColRx + 142;
+        // Column 1 — three small toggles + SOLO large
         rect_(c, c1x, 452, bw, 18, 0x252A33FF, 0x4A5060FF, 3.0);
         drawTextCentered_(c, c1x + bw / 2.0f, 461, 0xC0C4CCFF, "Ø");
         rect_(c, c1x, 474, bw, 18, 0x252A33FF, 0x4A5060FF, 3.0);
@@ -919,15 +930,17 @@ void drawUc1Vector(ImGui_Context* ctx)
         rect_(c, c1x, 496, bw, 18, 0x252A33FF, 0x4A5060FF, 3.0);
         drawTextCentered_(c, c1x + bw / 2.0f, 505, 0xC0C4CCFF, "SOLO CLR");
         // Bottom row — three large
-        rect_(c, c1x, 522, lw, lh, 0xE0E0E0FF, 0x808088FF, 4.0);
-        drawTextCentered_(c, c1x + lw / 2.0f, 552, 0x303338FF, "SOLO");
-        rect_(c, c2x, 522, lw, lh, 0xE0E0E0FF, 0x808088FF, 4.0);
-        drawTextCentered_(c, c2x + lw / 2.0f, 552, 0x303338FF, "CUT");
-        // Column 3 — Channel IN at top spanning the small-button row
-        rect_(c, c3x, 452, lw, 64, 0xE0E0E0FF, 0x808088FF, 4.0);
-        drawTextCentered_(c, c3x + lw / 2.0f, 484, 0x303338FF, "IN");
-        rect_(c, c3x, 522, lw, lh, 0xE0E0E0FF, 0x808088FF, 4.0);
-        drawTextCentered_(c, c3x + lw / 2.0f, 552, 0x303338FF, "FINE");
+        const float largeY = 522;
+        rect_(c, c1x, largeY, lw, lh, 0xE0E0E0FF, 0x808088FF, 4.0);
+        drawTextCentered_(c, c1x + lw / 2.0f, largeY + lh / 2.0f, 0x303338FF, "SOLO");
+        rect_(c, c2x, largeY, lw, lh, 0xE0E0E0FF, 0x808088FF, 4.0);
+        drawTextCentered_(c, c2x + lw / 2.0f, largeY + lh / 2.0f, 0x303338FF, "CUT");
+        // Column 3 — Channel IN at top (matching small-row height span),
+        // FINE at the bottom row.
+        rect_(c, c3x, 452, lw, 60, 0xE0E0E0FF, 0x808088FF, 4.0);
+        drawTextCentered_(c, c3x + lw / 2.0f, 482, 0x303338FF, "IN");
+        rect_(c, c3x, largeY, lw, lh, 0xE0E0E0FF, 0x808088FF, 4.0);
+        drawTextCentered_(c, c3x + lw / 2.0f, largeY + lh / 2.0f, 0x303338FF, "FINE");
     }
 
     // Brand line
