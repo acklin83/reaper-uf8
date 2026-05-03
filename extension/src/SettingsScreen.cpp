@@ -818,15 +818,12 @@ void drawUc1Vector(ImGui_Context* ctx)
     // Channel encoder + Sec encoder
     knob(kColCx + 50,           520, 26, kBlackCap, "CHANNEL");
     knob(kColCx + kColCw - 50,  520, 26, kBlackCap, "360 / BC");
-    // Six menu buttons (BACK / CONFIRM / ROUTING / PRESETS / 360 / MAGNIFIER)
-    {
-        const char* lbls[6] = {
-            "BACK", "CONFIRM", "ROUTING", "PRESETS", "360°", "ZOOM"
-        };
-        for (int i = 0; i < 6; ++i) {
-            const float bx = kColCx + 14 + (i * 39);
-            btn(bx, 600, 36, 22, lbls[i]);
-        }
+    // Six menu buttons (BACK / CONFIRM / ROUTING / PRESETS / 360° /
+    // MAGNIFIER). Fixed-function on UC1 — not bind-targets — and too
+    // small to label clearly, so they render as plain unlabelled tiles.
+    for (int i = 0; i < 6; ++i) {
+        const float bx = kColCx + 14 + (i * 39);
+        rect_(c, bx, 600, 36, 22, 0x1A1E24FF, 0x383C44FF, 3.0);
     }
 
     // ---- Right column: Dynamics + Solo/Cut/Fine ------------------------
