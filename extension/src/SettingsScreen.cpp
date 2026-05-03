@@ -2225,6 +2225,54 @@ std::string g_newError;                  // transient inline error text
 std::string g_pendingDeleteMatch;        // populated when the confirm popup is open
 std::string g_lastSaveError;             // last persistence error, sticky until next save
 
+// Cached list of installed FX populated lazily on first "+ New" open.
+// REAPER's EnumInstalledFX walks the entire plugin catalog (can be
+// 5000+ entries with FabFilter / Waves bundles), so we cache it for
+// the session and only refresh on explicit "Reload" click.
+struct InstalledFx {
+    std::string name;   // human-readable, e.g. "VST3: SSL Native Channel Strip 2 (SSL)"
+    std::string ident;  // identifier, e.g. "ssl_nativechannelstrip2.vst3"
+};
+std::vector<InstalledFx> g_installedFx;
+char g_pickerFilter[64] = {};
+int  g_pickerSelectedIdx = -1;   // index into g_installedFx (filtered or full)
+
+void loadInstalledFx_()
+{
+    g_installedFx.clear();
+    int idx = 0;
+    const char* name = nullptr;
+    const char* ident = nullptr;
+    while (EnumInstalledFX(idx, &name, &ident)) {
+        InstalledFx e;
+        if (name)  e.name  = name;
+        if (ident) e.ident = ident;
+        if (!e.name.empty()) g_installedFx.push_back(std::move(e));
+        ++idx;
+        // Defensive cap so a bug in EnumInstalledFX can't lock us up.
+        if (idx > 20000) break;
+    }
+}
+
+// Heuristic: build a 4-char displayShort from a full FX name. Strips
+// the "VSTn: " prefix, removes trailing vendor "(...)" parens, then
+// takes the first 4 chars (with caps preserved if possible).
+std::string deriveShortLabel_(const std::string& fxName)
+{
+    std::string s = fxName;
+    // Strip "VST3: " / "VST: " / "AU: " etc.
+    auto colon = s.find(": ");
+    if (colon != std::string::npos && colon < 8) s = s.substr(colon + 2);
+    // Strip trailing " (vendor)".
+    auto paren = s.rfind(" (");
+    if (paren != std::string::npos) s = s.substr(0, paren);
+    // Trim.
+    while (!s.empty() && s.front() == ' ') s.erase(s.begin());
+    while (!s.empty() && s.back()  == ' ') s.pop_back();
+    if (s.size() > 4) s.resize(4);
+    return s;
+}
+
 // Editor-View state. `g_editingMatch` is the current map's `match`
 // substring; empty = master-view. `g_listeningLinkIdx == -1` means no
 // slot is awaiting a param bind. Param-list filter is sticky between
@@ -3117,6 +3165,9 @@ void SettingsScreen::drawFxLearn(ImGui_Context* ctx)
         std::memset(g_newDisplay, 0, sizeof(g_newDisplay));
         g_newDomain = 1;
         g_newError.clear();
+        std::memset(g_pickerFilter, 0, sizeof(g_pickerFilter));
+        g_pickerSelectedIdx = -1;
+        if (g_installedFx.empty()) loadInstalledFx_();
         ImGui_OpenPopup(ctx, "fxl_new_popup", nullptr);
     }
     ImGui_SameLine(ctx, nullptr, nullptr);
@@ -3230,7 +3281,75 @@ void SettingsScreen::drawFxLearn(ImGui_Context* ctx)
         ImGui_Text(ctx, "New User Plugin Map");
         ImGui_Spacing(ctx);
 
-        ImGui_Text(ctx, "FX-name match (substring of TrackFX_GetFXName):");
+        // -- Plugin browser --------------------------------------------------
+        ImGui_Text(ctx, "Pick a plug-in:");
+        ImGui_SameLine(ctx, nullptr, nullptr);
+        char counter[64];
+        std::snprintf(counter, sizeof(counter), "(%zu installed)",
+                      g_installedFx.size());
+        ImGui_TextDisabled(ctx, counter);
+        ImGui_SameLine(ctx, nullptr, nullptr);
+        if (ImGui_Button(ctx, "Reload##fxl_picker_reload", nullptr, nullptr)) {
+            loadInstalledFx_();
+            g_pickerSelectedIdx = -1;
+        }
+
+        ImGui_InputTextWithHint(ctx, "##fxl_picker_filter",
+            "type to filter — e.g. 'fabfilter pro-q'",
+            g_pickerFilter, static_cast<int>(sizeof(g_pickerFilter)),
+            nullptr, nullptr);
+
+        // Filterable list. Case-insensitive substring match.
+        std::string flt = g_pickerFilter;
+        for (auto& c : flt) c = static_cast<char>(std::tolower(c));
+
+        // Lowercased haystacks computed lazily once per render — fine for
+        // a few thousand entries; if it ever shows up in profiles we can
+        // pre-compute on load.
+        double childW = 0, childH = 240.0;
+        int    childFlags = 0, winFlags = 0;
+        if (ImGui_BeginChild(ctx, "fxl_picker_list", &childW, &childH,
+                             &childFlags, &winFlags)) {
+            for (size_t i = 0; i < g_installedFx.size(); ++i) {
+                if (!flt.empty()) {
+                    std::string lc = g_installedFx[i].name;
+                    for (auto& c : lc) c = static_cast<char>(std::tolower(c));
+                    if (lc.find(flt) == std::string::npos) continue;
+                }
+                bool selected = (int(i) == g_pickerSelectedIdx);
+                int  selFlags = 0;
+                char rowId[640];
+                std::snprintf(rowId, sizeof(rowId), "%s##fxl_pick_%zu",
+                              g_installedFx[i].name.c_str(), i);
+                if (ImGui_Selectable(ctx, rowId, &selected, &selFlags,
+                                     nullptr, nullptr)) {
+                    g_pickerSelectedIdx = int(i);
+                    // Auto-fill match (FX name minus "VSTn: " prefix &
+                    // trailing " (vendor)") + 4-char display label.
+                    std::string m = g_installedFx[i].name;
+                    auto colon = m.find(": ");
+                    if (colon != std::string::npos && colon < 8)
+                        m = m.substr(colon + 2);
+                    auto paren = m.rfind(" (");
+                    if (paren != std::string::npos) m = m.substr(0, paren);
+                    while (!m.empty() && m.front() == ' ') m.erase(m.begin());
+                    while (!m.empty() && m.back()  == ' ') m.pop_back();
+                    std::strncpy(g_newMatch, m.c_str(),
+                                 sizeof(g_newMatch) - 1);
+                    g_newMatch[sizeof(g_newMatch) - 1] = '\0';
+                    std::string s = deriveShortLabel_(g_installedFx[i].name);
+                    std::strncpy(g_newDisplay, s.c_str(), 4);
+                    g_newDisplay[4] = '\0';
+                }
+            }
+            ImGui_EndChild(ctx);
+        }
+
+        ImGui_Spacing(ctx);
+        ImGui_Separator(ctx);
+        ImGui_Spacing(ctx);
+
+        ImGui_Text(ctx, "Match (substring of FX name — auto-filled, editable):");
         ImGui_InputTextWithHint(ctx, "##fxl_new_match",
             "e.g. 'FabFilter Pro-Q 4'",
             g_newMatch, static_cast<int>(sizeof(g_newMatch)),
