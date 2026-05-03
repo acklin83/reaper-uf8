@@ -985,9 +985,13 @@ void drawUc1Vector(ImGui_Context* ctx)
         constexpr float lbw = 33;         // half of bw
         constexpr float lh  = 28;         // half of original 56
         constexpr float inH = 37;         // half of original 74
-        const float c1x = kColRx + 8;
-        const float c2x = kColRx + 82;
-        const float c3x = kColRx + 156;
+        // Column 1 left edge (kColRx+14) flush with the dynBtn left
+        // edge above (EXPAND / FAST ATK), so Polarity / S/C LISTEN /
+        // SOLO CLR sit in the same vertical line as the dynamics
+        // toggles. Columns 2/3 shift the same +6 to keep equal gaps.
+        const float c1x = kColRx + 14;
+        const float c2x = kColRx + 88;
+        const float c3x = kColRx + 162;
         // Column 1 — three small toggles + SOLO large at the bottom.
         rect_(c, c1x, 510, bw, bh, 0x252A33FF, 0x4A5060FF, 3.0);
         drawTextCentered_(c, c1x + bw / 2.0f, 521, 0xC0C4CCFF, "Ø");
