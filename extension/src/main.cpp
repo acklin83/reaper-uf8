@@ -1860,10 +1860,20 @@ void onUf8Input(const uint8_t* data, size_t len)
                 if (g_dev) {
                     g_dev->send(uf8::buildFaderPosition(strip, lsb | 0x80, msb));
                 }
-                const uint8_t prevMsb = g_lastMsbOut[strip].load();
-                const uint8_t prevLsb = g_lastLsbOut[strip].load();
-                const int lsbDelta = std::abs(int(lsb) - int(prevLsb));
-                if (msb != prevMsb || lsbDelta >= 4) {
+                // Deadband filter on the pb14 value, NOT on lsb alone.
+                // Splitting into msb/lsb produced upward "blips" while the
+                // user pulled the fader down: every MSB boundary crossed
+                // during slow motion + ±1-3 LSB hardware jitter would land
+                // a single noise sample in the next msb bucket, satisfying
+                // `msb != prevMsb` regardless of direction → REAPER saw a
+                // tiny step backwards. Computing the delta in pb14-space
+                // means an upward jitter near a boundary still has to clear
+                // the threshold to register. Threshold stays at 4 LSB
+                // (≈ 0.003 dB at top, ≈ 0.04 dB at mid range).
+                const uint16_t prevPb = static_cast<uint16_t>(
+                    (uint16_t(g_lastMsbOut[strip].load()) << 7) |
+                     uint16_t(g_lastLsbOut[strip].load()));
+                if (std::abs(int(pb14) - int(prevPb)) >= 4) {
                     g_lastMsbOut[strip].store(msb);
                     g_lastLsbOut[strip].store(lsb);
                     queueInput({PendingInput::VolumeAbs, strip, pbToLinearVolume(pb14)});
