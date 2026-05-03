@@ -665,6 +665,186 @@ void drawUf8Vector(ImGui_Context* ctx, ButtonId& sel)
     drawTextCentered_(c, 500, 470, 0x9CA0AAFF, "Rea-Sixty");
 }
 
+// Render the full UC1 schematic. Layout follows the SSL UC1 User Guide
+// page 14 (Front Panel overview): three vertical zones — Filters/EQ
+// left, Bus-Compressor + Central Control Panel centre, Dynamics + Solo
+// /Cut/Fine right. Knob colour codes mirror the silk-screen: red caps
+// on Gain controls (HF/HMF/LMF/LF + Input/Output trims), grey on freq /
+// Q / dynamics. Decorative-only in this iteration — no hit-targets;
+// FX-Learn integration adds them when the slot-mapping flow lands.
+void drawUc1Vector(ImGui_Context* ctx)
+{
+    constexpr float W = 760, H = 680;
+
+    double oxd = 0, oyd = 0;
+    ImGui_GetCursorScreenPos(ctx, &oxd, &oyd);
+    ImGui_InvisibleButton(ctx, "uc1_canvas", W, H, /*flags*/ nullptr);
+
+    VCanvas c {
+        ctx, ImGui_GetWindowDrawList(ctx),
+        static_cast<float>(oxd), static_cast<float>(oyd)
+    };
+
+    // Helpers --------------------------------------------------------------
+    auto knob = [&](float cx, float cy, float r, uint32_t cap,
+                    const char* label = nullptr)
+    {
+        // Outer ring + inner cap, indicator at 12 o'clock.
+        circle_(c, cx, cy, r,        0x14181EFF, 0x4A5060FF);
+        circle_(c, cx, cy, r * 0.78f, cap,        0x80808055);
+        line_(c,  cx, cy - r * 0.85f, cx, cy - r * 0.45f, 0xE8E8E8FF, 1.6);
+        if (label) {
+            drawTextCentered_(c, cx, cy + r + 9, 0xB8BCC4FF, label);
+        }
+    };
+    auto btn = [&](float x, float y, float w, float h, const char* label,
+                   uint32_t accent = 0x252A33FF)
+    {
+        rect_(c, x, y, w, h, accent, 0x4A5060FF, 3.0);
+        drawTextCentered_(c, x + w / 2.0f, y + h / 2.0f, 0xD0D4DAFF, label);
+    };
+    auto sectionLabel = [&](float x, float y, const char* text) {
+        drawText_(c, x, y, 0x9CA0AAFF, text);
+    };
+
+    constexpr uint32_t kRedCap   = 0xC03038FF;   // Gain knobs
+    constexpr uint32_t kGreyCap  = 0x3A4150FF;   // Freq / Q / dynamics
+    constexpr uint32_t kBlackCap = 0x1A1E24FF;   // Filters / Pan
+    constexpr uint32_t kAccentBC = 0x2A4870FF;   // Bus Comp section accent
+
+    // Chassis -------------------------------------------------------------
+    rect_(c, 4, 4, W - 8, H - 8, 0x14181EFF, 0x2A3038FF, /*rounding*/ 8.0);
+
+    // ---- Left column: Filters + EQ -------------------------------------
+    constexpr float kColLx = 12, kColLw = 230;
+    rect_(c, kColLx, 12, kColLw, H - 24, 0x1A1E24FF, 0x2A3038FF, 6.0);
+
+    // Top row: HF Bell + Eq Type (next to filter knobs)
+    btn(kColLx + 18,  24, 78, 18, "HF BELL");
+    btn(kColLx + 134, 24, 78, 18, "EQ TYPE");
+
+    // Filters
+    sectionLabel(kColLx + 12, 50, "FILTERS");
+    knob(kColLx + 60,  86, 22, kBlackCap, "HPF");
+    knob(kColLx + 170, 86, 22, kBlackCap, "LPF");
+    btn (kColLx + 18,  118, 50, 16, "IN");      // HPF in
+    btn (kColLx + 162, 118, 50, 16, "IN");      // LPF in
+
+    // EQ — four bands, each row: Gain + Freq (+ Q for HMF/LMF)
+    sectionLabel(kColLx + 12, 148, "EQ");
+    auto eqBand = [&](float yTop, const char* tag, bool hasQ) {
+        drawText_(c, kColLx + 12, yTop + 22, 0xB8BCC4FF, tag);
+        knob(kColLx + 60,  yTop + 24, 20, kRedCap,  "GAIN");
+        knob(kColLx + 124, yTop + 24, 20, kGreyCap, "FREQ");
+        if (hasQ) {
+            knob(kColLx + 188, yTop + 24, 20, kGreyCap, "Q");
+        }
+    };
+    eqBand(168, "HF",  false);
+    eqBand(238, "HMF", true);
+    eqBand(308, "LMF", true);
+    eqBand(378, "LF",  false);
+    btn (kColLx + 162, 402, 50, 16, "BELL");    // LF Bell
+    btn (kColLx + 18,  448, 78, 18, "EQ IN");
+    btn (kColLx + 134, 448, 78, 18, "EQ TO SC");
+
+    // ---- Centre column: Bus Comp (top) + Central Control Panel (bottom)
+    constexpr float kColCx = kColLx + kColLw + 8, kColCw = 256;
+    // Bus Comp panel
+    rect_(c, kColCx, 12, kColCw, 372, 0x1A1E24FF, kAccentBC, 6.0);
+    sectionLabel(kColCx + 12, 22, "BUS COMPRESSOR");
+    // Input + Output trims at the top corners
+    knob(kColCx + 32,         62, 20, kRedCap, "INPUT");
+    knob(kColCx + kColCw - 32,62, 20, kRedCap, "OUTPUT");
+    // Analog GR meter — wide rectangle with a mock dial
+    rect_(c, kColCx + 60, 44, kColCw - 120, 70, 0x080C12FF, 0x444A55FF, 3.0);
+    // Meter arc placeholder
+    {
+        const float mcx = kColCx + kColCw / 2.0f, mcy = 88;
+        for (int i = -6; i <= 6; ++i) {
+            const float a = -1.0f + i * 0.16f;     // radians-ish
+            const float x1 = mcx + std::cos(a) * 36, y1 = mcy + std::sin(a) * 36;
+            const float x2 = mcx + std::cos(a) * 42, y2 = mcy + std::sin(a) * 42;
+            line_(c, x1, y1, x2, y2, 0x808088FF, 1.0);
+        }
+        // Needle
+        line_(c, mcx, mcy, mcx + std::cos(-0.4f) * 38,
+                          mcy + std::sin(-0.4f) * 38, 0xE8C040FF, 2.0);
+    }
+    // BC knob row
+    knob(kColCx + 36,  158, 22, kGreyCap, "THR");
+    knob(kColCx + 92,  158, 22, kGreyCap, "RATIO");
+    knob(kColCx + 148, 158, 22, kGreyCap, "ATK");
+    knob(kColCx + 204, 158, 22, kGreyCap, "REL");
+    knob(kColCx + 64,  220, 22, kGreyCap, "MAKE-UP");
+    knob(kColCx + 192, 220, 22, kGreyCap, "MIX");
+    btn (kColCx + 90,  280, 76, 22, "BUSCOMP IN", kAccentBC);
+    drawTextCentered_(c, kColCx + kColCw / 2.0f, 318, 0x808088FF,
+                      "Bus Comp 2 / 360 Link BC");
+
+    // Central Control Panel
+    rect_(c, kColCx, 392, kColCw, H - 404, 0x1A1E24FF, 0x903030FF, 6.0);
+    // 7-segment display (top-left)
+    rect_(c, kColCx + 14, 408, 60, 32, 0x1A0408FF, 0x401818FF, 3.0);
+    drawTextCentered_(c, kColCx + 44, 424, 0xFF3030FF, "00");
+    // LCD (centre)
+    rect_(c, kColCx + 80, 402, kColCw - 96, 86, 0x05080CFF, 0x444A55FF, 3.0);
+    drawTextCentered_(c, kColCx + kColCw / 2.0f + 0,  420, 0xE0E0E0FF, "Track Name");
+    drawTextCentered_(c, kColCx + kColCw / 2.0f + 0,  440, 0x9CA0AAFF, "Stereo Bus");
+    drawTextCentered_(c, kColCx + kColCw / 2.0f + 0,  462, 0x4488DDFF, "360°");
+    // Channel encoder + Sec encoder
+    knob(kColCx + 50,           520, 26, kBlackCap, "CHANNEL");
+    knob(kColCx + kColCw - 50,  520, 26, kBlackCap, "360 / BC");
+    // Six menu buttons (BACK / CONFIRM / ROUTING / PRESETS / 360 / MAGNIFIER)
+    {
+        const char* lbls[6] = {
+            "BACK", "CONFIRM", "ROUTING", "PRESETS", "360°", "ZOOM"
+        };
+        for (int i = 0; i < 6; ++i) {
+            const float bx = kColCx + 14 + (i * 39);
+            btn(bx, 600, 36, 22, lbls[i]);
+        }
+    }
+
+    // ---- Right column: Dynamics + Solo/Cut/Fine ------------------------
+    constexpr float kColRx = kColCx + kColCw + 8, kColRw = 230;
+    rect_(c, kColRx, 12, kColRw, H - 24, 0x1A1E24FF, 0x2A3038FF, 6.0);
+
+    // Output Trim top
+    knob(kColRx + kColRw / 2.0f, 38, 22, kRedCap, "OUTPUT");
+
+    // Comp section
+    sectionLabel(kColRx + 12, 76, "COMP");
+    knob(kColRx + 50,  108, 20, kGreyCap, "THR");
+    knob(kColRx + 116, 108, 20, kGreyCap, "RATIO");
+    knob(kColRx + 182, 108, 20, kGreyCap, "REL");
+    btn (kColRx + 18,  152, 60, 18, "FAST ATK");
+    btn (kColRx + 86,  152, 60, 18, "PEAK");
+    btn (kColRx + 154, 152, 60, 18, "DYN IN");
+
+    // Gate section
+    sectionLabel(kColRx + 12, 188, "GATE / EXPANDER");
+    knob(kColRx + 50,  220, 20, kGreyCap, "THR");
+    knob(kColRx + 116, 220, 20, kGreyCap, "RANGE");
+    knob(kColRx + 182, 220, 20, kGreyCap, "HOLD");
+    knob(kColRx + 116, 282, 20, kGreyCap, "REL");
+    btn (kColRx + 18,  316, 92, 18, "EXPAND");
+    btn (kColRx + 122, 316, 92, 18, "FAST ATK");
+
+    // Channel section
+    sectionLabel(kColRx + 12, 360, "CHANNEL");
+    btn(kColRx + 18,  384, 92,  18, "POLARITY");
+    btn(kColRx + 122, 384, 92,  18, "S/C LISTEN");
+    btn(kColRx + 18,  410, 92,  18, "SOLO CLEAR");
+    btn(kColRx + 122, 410, 92,  18, "SOLO");
+    btn(kColRx + 18,  436, 92,  18, "CUT");
+    btn(kColRx + 122, 436, 92,  18, "CHANNEL IN");
+    btn(kColRx + 70,  466, 92,  20, "FINE");
+
+    // Brand line
+    drawTextCentered_(c, W / 2.0f, H - 16, 0x9CA0AAFF, "Rea-Sixty / UC1");
+}
+
 // Push a Rea-Sixty-themed colour set so the editor's combos / buttons /
 // inputs match the schematic palette (dark blue-grey, soft accents)
 // instead of the default ImGui orange/red. Returns count to pop.
@@ -1835,6 +2015,23 @@ void SettingsScreen::drawSoftKeyBanks(ImGui_Context* ctx)
     }
 
     ImGui_EndTabBar(ctx);
+}
+
+// ---- FX Learn -------------------------------------------------------------
+// Phase 2.5d-A: visual mapping UI for third-party plugins. First slice
+// renders the UC1 schematic so the layout / palette / labels are visible
+// while the data-model + drag-and-drop wiring lands. Plan:
+//   docs/plan-fx-learn-and-multi-instance.md
+void SettingsScreen::drawFxLearn(ImGui_Context* ctx)
+{
+    ImGui_Text(ctx, "FX Learn — User Plugin Maps");
+    ImGui_Text(ctx, "");
+    ImGui_Text(ctx, "Map third-party plugins as virtual Channel-Strip / Bus-Comp.");
+    ImGui_Text(ctx, "TODO: + New / Import / Master-View / Editor (per docs/plan-fx-learn-and-multi-instance.md).");
+    ImGui_Text(ctx, "");
+    ImGui_Separator(ctx);
+    ImGui_Text(ctx, "UC1 Schematic (decorative preview):");
+    drawUc1Vector(ctx);
 }
 
 // ---- Modes ----------------------------------------------------------------
