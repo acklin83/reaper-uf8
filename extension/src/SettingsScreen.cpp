@@ -2457,73 +2457,6 @@ void toggleInverted_(int linkIdx)
     }
 }
 
-// GR-metering helpers — these target UserMetering on the editing map
-// rather than the slot list. The GR-meter pad in the schematic is the
-// drop target that drives them (Plan §"Drag GR-Param auf GR-Meter-
-// Sektion").
-int mappedGrVst3_()
-{
-    for (const auto& m : uf8::user_plugins::get().maps) {
-        if (m.match != g_editingMatch) continue;
-        return m.metering.grVst3Param;
-    }
-    return -1;
-}
-
-double mappedGrOffsetDb_()
-{
-    for (const auto& m : uf8::user_plugins::get().maps) {
-        if (m.match != g_editingMatch) continue;
-        return m.metering.grOffsetDb;
-    }
-    return 0.0;
-}
-
-void bindGrMetering_(int vst3Param)
-{
-    if (g_editingMatch.empty() || vst3Param < 0) return;
-    auto cat = uf8::user_plugins::get();
-    for (auto& m : cat.maps) {
-        if (m.match != g_editingMatch) continue;
-        if (m.metering.grVst3Param == vst3Param) return;
-        m.metering.grVst3Param = vst3Param;
-        uf8::user_plugins::upsert(m);
-        persistAndReport_();
-        return;
-    }
-}
-
-void unbindGrMetering_()
-{
-    if (g_editingMatch.empty()) return;
-    auto cat = uf8::user_plugins::get();
-    for (auto& m : cat.maps) {
-        if (m.match != g_editingMatch) continue;
-        if (m.metering.grVst3Param < 0 && m.metering.grOffsetDb == 0.0) return;
-        m.metering.grVst3Param = -1;
-        m.metering.grOffsetDb  = 0.0;
-        uf8::user_plugins::upsert(m);
-        persistAndReport_();
-        return;
-    }
-}
-
-void setGrOffsetDb_(double offsetDb)
-{
-    if (g_editingMatch.empty()) return;
-    if (offsetDb < -12.0) offsetDb = -12.0;
-    if (offsetDb >  12.0) offsetDb =  12.0;
-    auto cat = uf8::user_plugins::get();
-    for (auto& m : cat.maps) {
-        if (m.match != g_editingMatch) continue;
-        if (m.metering.grOffsetDb == offsetDb) return;
-        m.metering.grOffsetDb = offsetDb;
-        uf8::user_plugins::upsert(m);
-        persistAndReport_();
-        return;
-    }
-}
-
 // ---- Schematic layout -----------------------------------------------------
 // One pad per slot in a domain's canonical topology. Coordinates are local
 // to the schematic origin (0,0 = top-left of the canvas inside the left
@@ -2654,21 +2587,6 @@ constexpr SchematicPad kBcPads[] = {
 
     { 46,   4, 154, "GRP"  },
 };
-
-// Dedicated drop-target for binding UserMetering.grVst3Param. Coordinates
-// are local to the schematic origin like SchematicPad. Set on a per-
-// domain basis below.
-struct GrMeterRect { float x, y, w, h; };
-
-// CS: lay it across the right-hand portion of the C/G rows (x>=388 to
-// the right edge of the canvas). Sits beside the comp+gate pad block,
-// fits inside the DYNAMICS section header.
-constexpr GrMeterRect kCsGrMeter = { 388.0f, 296.0f, 192.0f, 50.0f };
-
-// BC: full-width strip sandwiched between COMPRESSOR + SIDECHAIN rows.
-// (No section title for the meter — the "GR METER" label is rendered
-// inside the rect itself.)
-constexpr GrMeterRect kBcGrMeter = {   4.0f,  50.0f, 452.0f, 26.0f };
 
 DomainSchematic schematicFor_(uf8::Domain d)
 {
@@ -2863,142 +2781,6 @@ void drawSchematicPad_(ImGui_Context* ctx,
     }
 }
 
-// Render the GR-meter drop target. Visually distinct from a normal
-// schematic pad — wider face with a live-preview bar inside. Drag-drop
-// accepts FXL_PARAM and binds the dropped param to UserMetering.
-// Right-click exposes the ±12 dB calibration offset slider.
-void drawGrMeterPad_(ImGui_Context* ctx,
-                     ImGui_DrawList* dl,
-                     float ox, float oy,
-                     const GrMeterRect& r,
-                     const EditingFx& fx)
-{
-    const int    grParam  = mappedGrVst3_();
-    const double offsetDb = mappedGrOffsetDb_();
-    const bool   isMapped = (grParam >= 0);
-
-    uint32_t fill, border, txt;
-    if (isMapped) {
-        fill   = 0x102320FF;
-        border = 0x40A0E0FF;   // blue, matches the Mixer GR-meter palette
-        txt    = 0xE0E0E0FF;
-    } else {
-        fill   = 0x1A1F26FF;
-        border = 0x405A6CFF;
-        txt    = 0xA0A8B0FF;
-    }
-
-    double rounding = 3.0;
-    ImGui_DrawList_AddRectFilled(dl, ox, oy, ox + r.w, oy + r.h,
-                                 fill, &rounding, nullptr);
-    ImGui_DrawList_AddRect(dl, ox, oy, ox + r.w, oy + r.h,
-                           border, &rounding, nullptr, nullptr);
-
-    ImGui_DrawList_AddText(dl, ox + 6, oy + 4, txt, "GR METER");
-
-    if (isMapped && fx.ok) {
-        const double n = TrackFX_GetParamNormalized(
-            fx.tr, fx.fxIdx, grParam);
-
-        // Live preview bar grows right→left so a longer fill = more
-        // gain reduction. Plugins disagree on the underlying convention
-        // (0..1 = no..full reduction vs full..no), so the user verifies
-        // visually and corrects via the offset slider in the popup.
-        const float bx0  = ox + 8;
-        const float bx1  = ox + r.w - 8;
-        const float by0  = oy + r.h - 12;
-        const float by1  = oy + r.h - 4;
-        double brnd = 1.0;
-        ImGui_DrawList_AddRectFilled(dl, bx0, by0, bx1, by1,
-                                     0x05080AFF, &brnd, nullptr);
-        const double clamped = (std::max)(0.0, (std::min)(1.0, n));
-        const float  fillX   = bx1 - float(double(bx1 - bx0) * clamped);
-        ImGui_DrawList_AddRectFilled(dl, fillX, by0, bx1, by1,
-                                     0x40A0E0FF, &brnd, nullptr);
-
-        char fmtBuf[64] = {};
-        TrackFX_GetFormattedParamValue(fx.tr, fx.fxIdx, grParam,
-                                       fmtBuf, sizeof(fmtBuf));
-        char readout[128];
-        std::snprintf(readout, sizeof(readout),
-            "p%d  %s  off %+0.1f dB",
-            grParam, fmtBuf[0] ? fmtBuf : "--", offsetDb);
-        ImGui_DrawList_AddText(dl, ox + 6, oy + 18, txt, readout);
-    } else {
-        ImGui_DrawList_AddText(dl, ox + 6, oy + 18, txt,
-            "drag a Read-Only param here");
-    }
-
-    // Hit area + interactions.
-    ImGui_SetCursorScreenPos(ctx, ox, oy);
-    int ibFlags = 0;
-    ImGui_InvisibleButton(ctx, "##fxl_gr_meter", r.w, r.h, &ibFlags);
-
-    if (ImGui_IsItemHovered(ctx, nullptr)) {
-        char tip[320];
-        if (isMapped) {
-            char pname[128] = {};
-            if (fx.ok) {
-                TrackFX_GetParamName(fx.tr, fx.fxIdx, grParam,
-                                     pname, sizeof(pname));
-            }
-            std::snprintf(tip, sizeof(tip),
-                "GR-Meter binding\n"
-                "  -> param %d  '%s'\n"
-                "  offset %+0.2f dB\n"
-                "Right-click for offset slider / clear.",
-                grParam, pname, offsetDb);
-        } else {
-            std::snprintf(tip, sizeof(tip),
-                "GR-Meter drop target\n"
-                "Drag a parameter here (typically a Read-Only\n"
-                "gain-reduction output) to bind metering.\n"
-                "Calibration offset ±12 dB via right-click.");
-        }
-        ImGui_SetTooltip(ctx, tip);
-    }
-
-    if (ImGui_BeginDragDropTarget(ctx)) {
-        char payload[16] = {};
-        int  dropFlags   = 0;
-        if (ImGui_AcceptDragDropPayload(ctx, "FXL_PARAM",
-                                        payload, int(sizeof(payload)),
-                                        &dropFlags)) {
-            const int p = std::atoi(payload);
-            if (p >= 0) bindGrMetering_(p);
-        }
-        ImGui_EndDragDropTarget(ctx);
-    }
-
-    if (ImGui_BeginPopupContextItem(ctx, "fxl_gr_ctx", nullptr)) {
-        if (isMapped) {
-            char title[160];
-            std::snprintf(title, sizeof(title),
-                "GR-Meter -> param %d", grParam);
-            ImGui_TextDisabled(ctx, title);
-            ImGui_Separator(ctx);
-
-            double off = offsetDb;
-            ImGui_SetNextItemWidth(ctx, 200.0);
-            int sflags = 0;
-            if (ImGui_SliderDouble(ctx, "Offset (dB)##fxl_gr_off",
-                                   &off, -12.0, 12.0, "%+0.2f", &sflags)) {
-                setGrOffsetDb_(off);
-            }
-            ImGui_Separator(ctx);
-            if (ImGui_MenuItem(ctx, "Clear binding", nullptr,
-                               nullptr, nullptr)) {
-                unbindGrMetering_();
-            }
-        } else {
-            ImGui_TextDisabled(ctx, "GR-Meter (unbound)");
-            ImGui_TextDisabled(ctx,
-                "Drop a parameter on the meter to bind.");
-        }
-        ImGui_EndPopup(ctx);
-    }
-}
-
 // Render the full schematic into the current window. Caller owns the
 // surrounding child-window + scroll. Origin = current cursor screen pos.
 void drawFxLearnSchematic_(ImGui_Context* ctx,
@@ -3051,17 +2833,6 @@ void drawFxLearnSchematic_(ImGui_Context* ctx,
     for (int i = 0; i < ds.padCount; ++i) {
         const auto& pad = ds.pads[i];
         drawSchematicPad_(ctx, dl, ox + pad.x, oy + pad.y, pad, topo, fx);
-    }
-
-    // GR-meter drop target. Lives outside the SchematicPad table because
-    // it doesn't bind to a slot's linkIdx — it targets UserMetering on
-    // the editing map. CS + BC have dedicated rects; other domains (none
-    // today) skip it.
-    GrMeterRect grRect = { 0, 0, 0, 0 };
-    if (domain == uf8::Domain::ChannelStrip)      grRect = kCsGrMeter;
-    else if (domain == uf8::Domain::BusComp)      grRect = kBcGrMeter;
-    if (grRect.w > 0.0f) {
-        drawGrMeterPad_(ctx, dl, ox + grRect.x, oy + grRect.y, grRect, fx);
     }
 
     // Reserve content rect so the parent BeginChild scrolls to fit.
