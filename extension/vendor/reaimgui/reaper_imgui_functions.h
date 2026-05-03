@@ -7,6 +7,7 @@
 #ifndef REAPER_IMGUI_FUNCTIONS_H
 #define REAPER_IMGUI_FUNCTIONS_H
 
+#include <type_traits>
 #include <utility>
 #include <reaper_plugin_functions.h>
 
@@ -32,6 +33,20 @@ public:
   {
     if(!m_proc)
       m_proc = reinterpret_cast<decltype(m_proc)>(plugin_getapi(m_name));
+    // Patched 2026-05-03: original implementation called m_proc(...)
+    // unconditionally — if plugin_getapi returns NULL (because the
+    // function isn't registered in the loaded ReaImGui dylib version),
+    // m_proc stays null and we'd crash with PC=0. Guard against it and
+    // return a default-constructed R instead. Callers SHOULD treat
+    // missing functions as no-ops; the few places that can't (e.g.
+    // Begin returning false defaults to "skip body") already check
+    // sensible booleans.
+    if(!m_proc) {
+      if constexpr (!std::is_void_v<R>)
+        return R{};
+      else
+        return;
+    }
     return m_proc(std::forward<Args>(args)...);
   }
 private:

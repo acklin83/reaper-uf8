@@ -153,23 +153,43 @@ void MixerWindow::onRunTick()
     // *p_open=true couldn't override and the window silently failed
     // to reopen. Combined with the per-session id suffix this gives
     // a guaranteed-fresh window every open.
-    int winFlags = ImGui_WindowFlags_NoSavedSettings;
+    // NoCollapse: prevent the window from going into the title-bar-only
+    // state that breaks rendering. Repro: clicking the FX Learn rail entry
+    // some way triggered a one-frame collapse, after which Begin returned
+    // false forever and the Settings window appeared "dead" until REAPER
+    // restart. There's no UX reason to allow collapsing — the user toggles
+    // the whole window via a REAPER action, not via the title-bar arrow.
+    int winFlags = ImGui_WindowFlags_NoSavedSettings
+                 | ImGui_WindowFlags_NoCollapse;
     char winId[64];
     std::snprintf(winId, sizeof(winId),
                   "Rea-Sixty##session_%d", impl_->sessionGen);
     bool open = impl_->visible;
     if (impl_->visible) {
-        // Modern ImGui idiom: call End() ONLY when Begin() returned
-        // true. RAPID uses the same pattern. Begin's body still
-        // renders only if visible was true on entry; we don't need
-        // the extra `&& impl_->visible` guard because we already
-        // skip Begin entirely in the !visible branch.
-        if (ImGui_Begin(impl_->ctx, winId, &open, &winFlags)) {
+        // Dear ImGui >=1.89 rule: End() MUST always be called for every
+        // Begin(), regardless of return value. Begin returns false when
+        // the window is collapsed or fully clipped — body is skipped, but
+        // End still required so the window stack stays balanced. Skipping
+        // End on a false-return frame imbalances the stack, and every
+        // subsequent Begin returns false → window bricked until REAPER
+        // restart. Repro: clicking the FX Learn rail entry caused Begin
+        // to return false on the next frame; without an unconditional
+        // End() the Settings window died permanently.
+        // Force-uncollapse every frame. Combined with NoCollapse this is
+        // bulletproof against any state weirdness that flips the window
+        // into a title-bar-only state on a frame transition.
+        int condAlways = ImGui_Cond_Always;
+        ImGui_SetNextWindowCollapsed(impl_->ctx, false, &condAlways);
+        const bool bodyVisible =
+            ImGui_Begin(impl_->ctx, winId, &open, &winFlags);
+        if (bodyVisible) {
             // -- Left rail: section list ---------------------------------
             double railW = kRailWidthPx;
-            if (ImGui_BeginChild(impl_->ctx, "rail", &railW,
+            const bool railVisible =
+                ImGui_BeginChild(impl_->ctx, "rail", &railW,
                                  /*size_h*/ nullptr, /*border*/ nullptr,
-                                 /*flags*/ nullptr)) {
+                                 /*flags*/ nullptr);
+            if (railVisible) {
                 for (const RailEntry& e : kRail) {
                     if (e.separatorBefore) ImGui_Separator(impl_->ctx);
                     bool isSelected = (impl_->selected == e.section);
@@ -187,9 +207,11 @@ void MixerWindow::onRunTick()
                            /*spacing*/ nullptr);
 
             // -- Right content pane --------------------------------------
-            if (ImGui_BeginChild(impl_->ctx, "content", /*size_w*/ nullptr,
+            const bool contentVisible =
+                ImGui_BeginChild(impl_->ctx, "content", /*size_w*/ nullptr,
                                  /*size_h*/ nullptr, /*border*/ nullptr,
-                                 /*flags*/ nullptr)) {
+                                 /*flags*/ nullptr);
+            if (contentVisible) {
                 for (const RailEntry& e : kRail) {
                     if (e.section == impl_->selected) {
                         e.draw(impl_->ctx);
@@ -198,9 +220,8 @@ void MixerWindow::onRunTick()
                 }
             }
             ImGui_EndChild(impl_->ctx);
-
-            ImGui_End(impl_->ctx);
         }
+        ImGui_End(impl_->ctx);
         // Mirror ImGui's title-bar X click back to our flag so the
         // next 360 toggle correctly moves false→true.
         impl_->visible = open;
