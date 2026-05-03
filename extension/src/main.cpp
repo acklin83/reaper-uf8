@@ -1848,11 +1848,22 @@ void onUf8Input(const uint8_t* data, size_t len)
             // (coalesced by strip) — the timer will apply it to the track.
             // We only queue while the user is actively touching the fader,
             // so REAPER's motor echo doesn't feed back.
-            const uint8_t strip = data[i + 3];
+            const uint8_t strip   = data[i + 3];
+            const uint8_t rawA    = data[i + 4];
+            const uint8_t rawHigh = data[i + 4] & 0x80;     // diag: was bit 7 set?
             if (strip < 8 && g_touchReported[strip].load()) {
-                const uint8_t lsb = data[i + 4] & 0x7F;
+                const uint8_t lsb = rawA & 0x7F;
                 const uint8_t msb = data[i + 5] & 0x7F;
                 const uint16_t pb14 = static_cast<uint16_t>(lsb | (msb << 7));
+                // Diag: log whether bit 7 of LSB was set on the inbound
+                // frame. If the firmware echoes back our `lsb|0x80` touch
+                // echoes as position events, those echoes carry the bit
+                // back and we can filter them. Logged as a separate
+                // synthetic "kind" so it doesn't disturb the main POS
+                // line until we know what's happening.
+                if (rawHigh) {
+                    faderInputLog_("ECHO", strip, pb14, 0, int(rawA), "HIBIT");
+                }
                 // Always record the raw position so the touch-release
                 // commit can snap REAPER to where the fader physically
                 // ended up, even if every frame this touch was sub-deadband.
