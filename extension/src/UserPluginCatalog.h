@@ -99,5 +99,11 @@ const PluginMap* lookupByName(std::string_view fxName);
 // warn the user before they save a name that built-ins claim.
 bool collidesWithBuiltin(std::string_view match);
 
+// Monotonic counter incremented on every mutating call (setAll, upsert,
+// removeByMatch). Downstream caches (e.g. UC1's synthesized PluginBindings
+// for user maps) compare against a stored snapshot to detect changes
+// without having to walk the catalog content for diffs.
+int generation();
+
 } // namespace user_plugins
 } // namespace uf8

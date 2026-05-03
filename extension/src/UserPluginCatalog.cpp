@@ -12,6 +12,7 @@
 #include "UserPluginCatalog.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -36,6 +37,7 @@ namespace {
 
 std::mutex          g_mutex;
 UserPluginCatalog   g_catalog;
+std::atomic<int>    g_generation{0};   // bumped on every mutation
 
 // View cache: synthesised PluginMap structs returned from lookupByName.
 // Rebuilt on every mutation so spans stay valid until the next change.
@@ -419,6 +421,7 @@ void load()
         }
     }
     rebuildViewCache_();
+    g_generation.fetch_add(1, std::memory_order_relaxed);
 }
 
 // Built-in collision check. Walks the static built-in registry (no
@@ -469,6 +472,7 @@ void setAll(UserPluginCatalog c)
     std::lock_guard<std::mutex> lk(g_mutex);
     g_catalog = std::move(c);
     rebuildViewCache_();
+    g_generation.fetch_add(1, std::memory_order_relaxed);
 }
 
 void upsert(UserPluginMap m)
@@ -487,6 +491,7 @@ void upsert(UserPluginMap m)
     if (it != g_catalog.maps.end()) *it = std::move(m);
     else                            g_catalog.maps.push_back(std::move(m));
     rebuildViewCache_();
+    g_generation.fetch_add(1, std::memory_order_relaxed);
 }
 
 bool removeByMatch(std::string_view match)
@@ -497,7 +502,13 @@ bool removeByMatch(std::string_view match)
     if (it == g_catalog.maps.end()) return false;
     g_catalog.maps.erase(it);
     rebuildViewCache_();
+    g_generation.fetch_add(1, std::memory_order_relaxed);
     return true;
+}
+
+int generation()
+{
+    return g_generation.load(std::memory_order_relaxed);
 }
 
 const PluginMap* lookupByName(std::string_view fxName)

@@ -3,9 +3,15 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <vector>
 
 #include "reaper_plugin_functions.h"
+
+#include "FocusedParam.h"        // uf8::Domain
+#include "UserPluginCatalog.h"   // uf8::user_plugins
 
 namespace uc1 {
 
@@ -348,6 +354,171 @@ const PluginBindings* kBusCompCandidates[] = {
     &linkBcReg(), &bcReg(),
 };
 
+// ---- User-map → UC1 binding bridge --------------------------------------
+//
+// When the FX-Learn editor produces a UserPluginMap (per-linkIdx
+// vst3Param + inverted), UC1 needs the same data in its per-knob-id
+// PluginBindings layout so the BC encoder / dispatch path treat the
+// user's plugin like any built-in. We synthesize one PluginBindings per
+// user map, cached by match string, invalidated via user_plugins's
+// generation counter.
+
+constexpr uint8_t kNoUc1 = 0xFF;
+
+// Maps an SSL 360 Link CS slot index to the UC1 control(s) that drive it.
+// linkIdx not in this table → not reachable from UC1 (fader / pan /
+// width / output / extras / QA1..6 / SAT.* / GRP). Knob and button can
+// both be filled when an SSL slot is exposed by both (none today).
+struct LinkToUc1 {
+    int     linkIdx;
+    uint8_t knobId;
+    uint8_t buttonId;
+};
+
+constexpr LinkToUc1 kCsLinkToUc1[] = {
+    {  4, knob::kCSInputTrim,    kNoUc1               },
+    {  5, kNoUc1,                button::kPolarity    },
+    {  6, knob::kCSLowPass,      kNoUc1               },
+    {  7, knob::kCSHighPass,     kNoUc1               },
+    {  8, kNoUc1,                button::kHfBell      },
+    {  9, knob::kCSHfGain,       kNoUc1               },
+    { 10, knob::kCSHfFreq,       kNoUc1               },
+    { 11, knob::kCSHmfGain,      kNoUc1               },
+    { 12, knob::kCSHmfFreq,      kNoUc1               },
+    { 13, knob::kCSHmfQ,         kNoUc1               },
+    { 14, kNoUc1,                button::kEqType      },
+    { 15, kNoUc1,                button::kEqIn        },
+    { 16, knob::kCSLmfGain,      kNoUc1               },
+    { 17, knob::kCSLmfFreq,      kNoUc1               },
+    { 18, knob::kCSLmfQ,         kNoUc1               },
+    { 19, knob::kCSLfFreq,       kNoUc1               },
+    { 20, knob::kCSLfGain,       kNoUc1               },
+    { 21, kNoUc1,                button::kLfBell      },
+    { 22, kNoUc1,                button::kDynIn       },
+    { 24, kNoUc1,                button::kFastAttComp },
+    { 25, kNoUc1,                button::kPeak        },
+    { 26, knob::kCSCompRatio,    kNoUc1               },
+    { 27, knob::kCSCompThreshold,kNoUc1               },
+    { 28, knob::kCSCompRelease,  kNoUc1               },
+    { 29, knob::kCSGateRange,    kNoUc1               },
+    { 30, knob::kCSGateThreshold,kNoUc1               },
+    { 31, knob::kCSGateRelease,  kNoUc1               },
+    { 32, knob::kCSGateHold,     kNoUc1               },
+    { 33, kNoUc1,                button::kExpand      },
+    { 34, kNoUc1,                button::kFastAttGate },
+    { 36, kNoUc1,                button::kScListen    },
+};
+
+// Maps an SSL 360 Link BC slot index to the UC1 control. BC has only the
+// top V-Pots + the IN button.
+constexpr LinkToUc1 kBcLinkToUc1[] = {
+    {  0, kNoUc1,                button::kBusCompIn   }, // bypass / IN
+    {  1, knob::kBCThreshold,    kNoUc1               },
+    {  2, knob::kBCMakeup,       kNoUc1               },
+    {  3, knob::kBCAttack,       kNoUc1               },
+    {  4, knob::kBCRelease,      kNoUc1               },
+    {  5, knob::kBCRatio,        kNoUc1               },
+    {  6, knob::kBCScHpf,        kNoUc1               },
+    {  7, knob::kBCMix,          kNoUc1               },
+};
+
+// Fill a PluginBindings from a UserPluginMap. Caller owns the storage of
+// `out` — match/shortName must already point to stable strings (we don't
+// touch them here).
+void synthesizeUserBinding_(const uf8::UserPluginMap& um, PluginBindings& out)
+{
+    for (auto& v : out.knobParam)   v = kParamNone;
+    for (auto& v : out.buttonParam) v = kParamNone;
+    for (auto& v : out.inverted)    v = false;
+    out.bypassParam = kParamNone;
+
+    const LinkToUc1* table     = nullptr;
+    int              tableSize = 0;
+    if (um.domain == uf8::Domain::BusComp) {
+        table     = kBcLinkToUc1;
+        tableSize = sizeof(kBcLinkToUc1) / sizeof(kBcLinkToUc1[0]);
+    } else if (um.domain == uf8::Domain::ChannelStrip) {
+        table     = kCsLinkToUc1;
+        tableSize = sizeof(kCsLinkToUc1) / sizeof(kCsLinkToUc1[0]);
+    } else {
+        return;
+    }
+
+    for (const auto& slot : um.slots) {
+        if (slot.vst3Param < 0) continue;
+        // SSL Link slot 0 = plug-in bypass on both CS and BC. Persist
+        // the bound vst3Param into bypassParam so the IN button toggles
+        // the plug-in's own bypass param rather than REAPER's
+        // TrackFX_Enabled (matches what built-in BC 2 does).
+        if (slot.linkIdx == 0) {
+            out.bypassParam = slot.vst3Param;
+        }
+        for (int i = 0; i < tableSize; ++i) {
+            if (table[i].linkIdx != slot.linkIdx) continue;
+            if (table[i].knobId != kNoUc1) {
+                out.knobParam[table[i].knobId] = slot.vst3Param;
+                out.inverted[table[i].knobId]  = slot.inverted;
+            }
+            if (table[i].buttonId != kNoUc1) {
+                out.buttonParam[table[i].buttonId] = slot.vst3Param;
+            }
+            break;
+        }
+    }
+}
+
+// Per-user-map cache entry. `match` and `shortName` strings own their
+// storage so PluginBindings::match / shortName can point into them.
+struct UserBindingEntry {
+    std::string    matchOwned;
+    std::string    shortNameOwned;
+    PluginBindings bindings{};
+    uf8::Domain    domain = uf8::Domain::None;
+};
+
+std::mutex                                       g_userCacheMutex;
+std::vector<std::unique_ptr<UserBindingEntry>>   g_userCache;
+int                                              g_userCacheGeneration = -1;
+
+// Rebuild the user-binding cache from current user_plugins state. Caller
+// must hold g_userCacheMutex.
+void rebuildUserCache_locked_()
+{
+    g_userCache.clear();
+    const auto& cat = uf8::user_plugins::get();
+    for (const auto& um : cat.maps) {
+        if (um.domain != uf8::Domain::BusComp &&
+            um.domain != uf8::Domain::ChannelStrip)
+        {
+            continue;
+        }
+        if (um.match.empty()) continue;
+        auto e = std::make_unique<UserBindingEntry>();
+        e->matchOwned     = um.match;
+        e->shortNameOwned = um.displayShort.empty()
+            ? std::string("USR")
+            : um.displayShort;
+        e->domain         = um.domain;
+        e->bindings.match     = e->matchOwned.c_str();
+        e->bindings.shortName = e->shortNameOwned.c_str();
+        synthesizeUserBinding_(um, e->bindings);
+        g_userCache.push_back(std::move(e));
+    }
+    g_userCacheGeneration =
+        uf8::user_plugins::generation();
+}
+
+// Refresh cache if user_plugins changed since last build. Returns with
+// g_userCacheMutex held; caller is responsible for unlocking before any
+// further user_plugins:: read to avoid lock-order issues.
+void refreshUserCache_()
+{
+    if (uf8::user_plugins::generation() == g_userCacheGeneration) return;
+    std::lock_guard<std::mutex> lk(g_userCacheMutex);
+    if (uf8::user_plugins::generation() == g_userCacheGeneration) return;
+    rebuildUserCache_locked_();
+}
+
 // True when this binding's plug-in is a Bus Compressor variant. The
 // older code identified BC by `shortName == "BC 2"`, which broke as
 // soon as the SSL 360 Link wrapper came in with its own shortName.
@@ -355,6 +526,11 @@ bool isBusCompBinding(const PluginBindings* b)
 {
     if (!b) return false;
     for (const auto* c : kBusCompCandidates) if (c == b) return true;
+    // User-synthesized BC bindings: walk the cache and check ownership.
+    std::lock_guard<std::mutex> lk(g_userCacheMutex);
+    for (const auto& e : g_userCache) {
+        if (&e->bindings == b) return e->domain == uf8::Domain::BusComp;
+    }
     return false;
 }
 
@@ -362,11 +538,24 @@ bool isBusCompBinding(const PluginBindings* b)
 
 const PluginBindings* lookupBindingsByName(std::string_view fxName)
 {
+    // Built-ins win first (mirrors uf8::lookupPluginMapByName ordering)
+    // — UserPluginCatalog::save guarantees no user map can shadow a
+    // built-in match string anyway.
     for (const auto* b : kBusCompCandidates) {
         if (fxName.find(b->match) != std::string_view::npos) return b;
     }
     for (const auto* b : kChannelStripCandidates) {
         if (fxName.find(b->match) != std::string_view::npos) return b;
+    }
+
+    // User catalog fallback — synthesize a UC1 PluginBindings on first
+    // touch, cache it, return the stable pointer.
+    refreshUserCache_();
+    std::lock_guard<std::mutex> lk(g_userCacheMutex);
+    for (const auto& e : g_userCache) {
+        if (fxName.find(e->matchOwned) != std::string_view::npos) {
+            return &e->bindings;
+        }
     }
     return nullptr;
 }
