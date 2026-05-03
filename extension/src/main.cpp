@@ -1319,8 +1319,16 @@ static FaderCalTangents computeFaderCalTangents_(bool forward)
     return r;
 }
 
+// Diagnostic toggle — when off, interpFaderCal is a pass-through. Used
+// to A/B whether the calibration math is contributing to the perceived
+// fader-not-smooth symptom. Toggled via the REASIXTY_TOGGLE_FADER_CAL
+// custom action. Default: enabled.
+std::atomic<bool> g_faderCalEnabled{true};
+
 double interpFaderCal(double x, bool current_to_target)
 {
+    if (!g_faderCalEnabled.load()) return x;
+
     static const FaderCalTangents fwdT = computeFaderCalTangents_(true);
     static const FaderCalTangents invT = computeFaderCalTangents_(false);
     const auto& tang = current_to_target ? fwdT : invT;
@@ -4301,6 +4309,21 @@ custom_action_register_t g_actionFrameTrace{
 };
 int g_cmdFrameTrace = 0;
 
+void toggleFaderCal()
+{
+    const bool now = !g_faderCalEnabled.load();
+    g_faderCalEnabled.store(now);
+    ShowConsoleMsg(now
+        ? "Rea-Sixty: fader calibration ON (PCHIP correction active)\n"
+        : "Rea-Sixty: fader calibration OFF (raw slider-law passthrough)\n");
+}
+
+custom_action_register_t g_actionToggleFaderCal{
+    0, "REASIXTY_TOGGLE_FADER_CAL",
+    "Rea-Sixty: Toggle fader calibration (diagnostic)", nullptr,
+};
+int g_cmdToggleFaderCal = 0;
+
 // Diagnostic — replay the EXACT byte sequence captured from SSL360
 // at uc1_40 t=8.700 (first indicator frame in the sweep). Bypasses
 // our build* functions entirely. If this still doesn't paint the
@@ -4564,6 +4587,7 @@ bool hookCommand2(KbdSectionInfo* /*sec*/, int command,
     if (command == g_cmdProbeLed)       { probeNextLedCell();       return true; }
     if (command == g_cmdProbeLegacyLed) { probeNextLegacyLedCell(); return true; }
     if (command == g_cmdFrameTrace)     { toggleFrameTrace();       return true; }
+    if (command == g_cmdToggleFaderCal) { toggleFaderCal();         return true; }
     if (command == g_cmdUc1TestIndicator) { uc1FireTestIndicator();  return true; }
     if (command == g_cmdProbeGateGr)    { probeGateGrSources();     return true; }
     if (command == g_cmdDumpParams)     { dumpCsPluginParams();     return true; }
@@ -5649,6 +5673,7 @@ extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(
     g_cmdProbeLed       = plugin_register("custom_action", &g_actionProbeLed);
     g_cmdProbeLegacyLed = plugin_register("custom_action", &g_actionProbeLegacyLed);
     g_cmdFrameTrace     = plugin_register("custom_action", &g_actionFrameTrace);
+    g_cmdToggleFaderCal = plugin_register("custom_action", &g_actionToggleFaderCal);
     g_cmdUc1TestIndicator = plugin_register("custom_action", &g_actionUc1TestIndicator);
     g_cmdProbeGateGr    = plugin_register("custom_action", &g_actionProbeGateGr);
     g_cmdDumpParams     = plugin_register("custom_action", &g_actionDumpParams);
