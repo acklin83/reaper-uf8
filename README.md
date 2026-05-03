@@ -16,7 +16,7 @@ Working extension, near feature-complete on macOS. Phase 1 (UF8 standalone repla
 - **DAW-layer track colors** on the UF8 scribble strips, polled from `GetTrackColor()` and pushed on bank shifts.
 - **Full vendor-USB host responsibility**: init-sequence replay on open, scribble text + value zones, color bars, button/V-Pot/fader/fader-touch routing, LED feedback (solo / mute / select / arm / transport), meter bands, layer management, heartbeat.
 - **UC1 parameter mirror** — physical knobs follow the focused track's SSL Bus Compressor / Channel Strip in real time, with values mirrored back to the UC1 displays.
-- **UC1 GR display driven by audio** via a bundled JSFX sidechain probe (`extension/jsfx/rea_sixty_gr_probe.jsfx`), auto-inserted next to detected SSL compressors.
+- **UC1 GR display driven by the SSL plugin itself** via `TrackFX_GetNamedConfigParm("GainReduction_dB", …)` — the PreSonus VST3 GR extension that REAPER exposes for the SSL Bus Compressor / Channel Strip Comp + Gate. No JSFX probe, no sidechain tap.
 - **Bindings system** — per-strip, transport, global, soft-keys per layer; modifier combos; 12 user-defined Soft-Key Banks (8 buttons each) plus the 6 SSL stock banks; Learn mode.
 - **Generic FX learn** for any VST/JS/AU plugin parameter, GUID-keyed so FX-slot reorders don't break mappings.
 - **Themed on-screen Plugin Mixer + Settings window** (vendored Dear ImGui inside a dockable SWELL window) that picks up the user's REAPER theme.
@@ -37,7 +37,6 @@ extension/            The C++ REAPER extension
   src/                Protocol, Palette, UF8Device, UC1Device, ColorSync, Bindings,
                       MixerWindow, MixerLayout, ThemeBridge, SettingsScreen,
                       PluginMap, FocusedParam, HidDevice, …
-  jsfx/               rea_sixty_gr_probe.jsfx — sidechain GR follower for the UC1 GR meter
   tools/              Standalone CLI probes (libusb-only, no REAPER): color test, palette
                       probe, HID probe
   tests/              Pure-logic unit tests (frame bytes, checksum, palette, CSI import)
