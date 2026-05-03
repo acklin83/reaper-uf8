@@ -695,7 +695,7 @@ void drawUf8Vector(ImGui_Context* ctx, ButtonId& sel)
 // no hit-targets in this iteration.
 void drawUc1Vector(ImGui_Context* ctx)
 {
-    constexpr float W = 760, H = 660;
+    constexpr float W = 860, H = 660;
 
     double oxd = 0, oyd = 0;
     ImGui_GetCursorScreenPos(ctx, &oxd, &oyd);
@@ -816,47 +816,38 @@ void drawUc1Vector(ImGui_Context* ctx)
     smallToggle(kColLx + 192, 591, "BELL");
 
     // ---- Centre column: Bus Comp (top) + Central Control (bottom) ------
-    constexpr float kColCx = kColLx + kColLw + 8, kColCw = 256;
+    // Wider than the side columns so the BC knob block can hold an
+    // Input-Gain knob to the left of S/C HPF and an Output-Gain knob
+    // to the right of MIX, both at the same y as the bottom BC row.
+    constexpr float kColCx = kColLx + kColLw + 8, kColCw = 360;
     rect_(c, kColCx, 12, kColCw, 420, 0x1A1E24FF, kAccentBC, 6.0);
-    sectionLabel(kColCx + 14, 22, "BUS COMPRESSOR");
+    drawTextCentered_(c, kColCx + kColCw / 2.0f, 22,
+                      0x9CA0AAFF, "BUS COMPRESSOR");
 
     // SSL Bus Comp GR meter — LCD-black face, blue scale, 0 left →
-    // 20 right (gain-reduction in dB, NOT input level). Red zone at
-    // the high-GR end. Ballistic needle with hidden pivot below the
-    // face, same Sifam mechanic as the original analog meter.
+    // 20 right (gain-reduction in dB, NOT input level). No red zone:
+    // GR meters don't carry the analog-VU "hot" convention. Pivot
+    // sits 3 px above the face bottom so the pivot dot stays inside
+    // the face and the needle never protrudes.
     {
-        const float mx = kColCx + 30, my = 44;
-        const float mw = kColCw - 60, mh = 80;
+        const float mw = 196.0f, mh = 80.0f;
+        const float mx = kColCx + (kColCw - mw) / 2.0f, my = 44.0f;
         // Outer bezel + LCD-black face inset (palette matches the
         // 7-seg / LCD blocks in the Central Control panel).
         rect_(c, mx, my, mw, mh, 0x141416FF, 0x282A2EFF, 4.0);
         rect_(c, mx + 4, my + 4, mw - 8, mh - 8,
               0x080C12FF, 0x444A55FF, 2.0);
         const float mcx = mx + mw / 2.0f;
-        const float mcy = my + mh + 6;            // pivot below face
-        const float ra  = 70;                     // outer scale radius
+        const float mcy = my + mh - 3;             // pivot inside face
+        const float ra  = 70;                      // outer scale radius
         // Sweep -130° to -50° (90° arc)
         const float a0 = -3.14159265f * 130.0f / 180.0f;
         const float a1 = -3.14159265f *  50.0f / 180.0f;
         auto dBtoA = [&](float dB) {
-            const float t = dB / 20.0f;            // 0..20
+            const float t = dB / 20.0f;             // 0..20
             return a0 + t * (a1 - a0);
         };
-        constexpr uint32_t kVuBlue = 0x4499DDFF;   // matches LCD text
-        constexpr uint32_t kVuRed  = 0xC02020FF;
-        // Red zone arc from 15 dB → 20 dB (excessive GR end)
-        {
-            constexpr int kSegs = 10;
-            const float aZ0 = dBtoA(15.0f), aZ1 = dBtoA(20.0f);
-            for (int i = 0; i < kSegs; ++i) {
-                const float ta = aZ0 + (aZ1 - aZ0) * i / kSegs;
-                const float tb = aZ0 + (aZ1 - aZ0) * (i + 1) / kSegs;
-                line_(c,
-                    mcx + std::cos(ta) * (ra - 1), mcy + std::sin(ta) * (ra - 1),
-                    mcx + std::cos(tb) * (ra - 1), mcy + std::sin(tb) * (ra - 1),
-                    kVuRed, 2.5);
-            }
-        }
+        constexpr uint32_t kVuBlue = 0x4499DDFF;    // matches LCD text
         // Tick marks: majors at 0/5/10/15/20, minors at 1/2/3/7
         struct Tick { float dB; const char* label; };
         const Tick ticks[] = {
@@ -870,8 +861,7 @@ void drawUc1Vector(ImGui_Context* ctx)
                         y1 = mcy + std::sin(a) * ra;
             const float x2 = mcx + std::cos(a) * (ra - tlen),
                         y2 = mcy + std::sin(a) * (ra - tlen);
-            const uint32_t col = (t.dB >= 15.0f) ? kVuRed : kVuBlue;
-            line_(c, x1, y1, x2, y2, col, 1.6);
+            line_(c, x1, y1, x2, y2, kVuBlue, 1.6);
             if (t.label[0]) {
                 const float lx = mcx + std::cos(a) * (ra - 16);
                 const float ly = mcy + std::sin(a) * (ra - 16);
@@ -889,11 +879,16 @@ void drawUc1Vector(ImGui_Context* ctx)
         drawTextCentered_(c, mcx, my + mh - 12, kVuBlue, "GR");
     }
 
-    // BC knob 4×2 grid: column 1 (Threshold / Attack / Ratio / SC HPF)
-    //                   column 2 (Make-Up / Release / IN / Mix)
-    // Spacing 62 between rows for breathing room.
+    // BC knob 4×2 grid centred in the wider column, plus Input-Gain
+    // and Output-Gain flanking the bottom row at the same y as
+    // S/C HPF / MIX (per Frank's UC1 layout note).
+    //   col 1 (THR / ATTACK / RATIO / S/C HPF)
+    //   col 2 (MAKE-UP / RELEASE / IN-toggle / MIX)
+    //   bottom-row only: INPUT-GAIN flanks col 1 on the left,
+    //                    OUTPUT-GAIN flanks col 2 on the right.
     {
-        const float c1x = kColCx + 70, c2x = kColCx + 190;
+        const float c1x = kColCx + 120, c2x = kColCx + 240;
+        const float cInL = kColCx + 60,  cInR = kColCx + 300;
         const float ry[4] = { 172, 234, 296, 358 };
         knob(c1x, ry[0], 20, kAccentBC, "THR");
         knob(c2x, ry[0], 20, kAccentBC, "MAKE-UP");
@@ -905,22 +900,28 @@ void drawUc1Vector(ImGui_Context* ctx)
         // doesn't bump the box edge.
         rect_(c, c2x - 14, ry[2] - 14, 28, 28, 0xE0E0E0FF, 0x808088FF, 3.0);
         drawTextCentered_(c, c2x, ry[2] + 26, 0x9CA0AAFF, "IN");
-        knob(c1x, ry[3], 20, kAccentBC, "S/C HPF");
-        knob(c2x, ry[3], 20, kAccentBC, "MIX");
+        knob(c1x,  ry[3], 20, kAccentBC, "S/C HPF");
+        knob(c2x,  ry[3], 20, kAccentBC, "MIX");
+        knob(cInL, ry[3], 20, kAccentBC, "INPUT");
+        knob(cInR, ry[3], 20, kAccentBC, "OUTPUT");
     }
-    drawTextCentered_(c, kColCx + kColCw / 2.0f, 404, 0x808088FF,
-                      "Bus Comp 2 / 360 Link BC");
 
     // Central Control Panel
     rect_(c, kColCx, 440, kColCw, H - 452, 0x1A1E24FF, kAccentCC, 6.0);
     // 7-segment display (top-left)
     rect_(c, kColCx + 14, 454, 56, 30, 0x1A0408FF, 0x401818FF, 3.0);
     drawTextCentered_(c, kColCx + 42, 468, 0xFF3030FF, "001");
-    // LCD (centre, with mock content)
-    rect_(c, kColCx + 78, 452, kColCw - 138, 76, 0x05080CFF, 0x444A55FF, 3.0);
-    drawTextCentered_(c, kColCx + 138, 466, 0x808088FF, "MAIN");
-    drawTextCentered_(c, kColCx + 138, 486, 0xE0E0E0FF, "Track Name");
-    drawTextCentered_(c, kColCx + 138, 506, 0x4488DDFF, "Stereo Bus");
+    // LCD (centre, with mock content). Width grows with the wider
+    // BC column; recompute the label-x at the LCD's new horizontal
+    // centre instead of the old +138 hardcode.
+    {
+        const float lcdX = kColCx + 78, lcdW = kColCw - 138;
+        const float lcdCx = lcdX + lcdW / 2.0f;
+        rect_(c, lcdX, 452, lcdW, 76, 0x05080CFF, 0x444A55FF, 3.0);
+        drawTextCentered_(c, lcdCx, 466, 0x808088FF, "MAIN");
+        drawTextCentered_(c, lcdCx, 486, 0xE0E0E0FF, "Track Name");
+        drawTextCentered_(c, lcdCx, 506, 0x4488DDFF, "Stereo Bus");
+    }
 
     // CS encoder + BC encoder — symmetrically centred under the LCD.
     {
