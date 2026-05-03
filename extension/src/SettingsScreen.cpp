@@ -2223,6 +2223,10 @@ char        g_newDisplay[8]      = {};   // 4 chars + NUL, padded for slack
 int         g_newDomain          = 1;    // 1=CS, 2=BC. 0=None reserved.
 std::string g_newError;                  // transient inline error text
 std::string g_pendingDeleteMatch;        // populated when the confirm popup is open
+bool        g_pendingDeleteOpen  = false;// set when row's Del was clicked,
+                                         // consumed by the OpenPopup at the
+                                         // outer scope so popup id-stack
+                                         // matches the BeginPopupModal site.
 std::string g_lastSaveError;             // last persistence error, sticky until next save
 
 // Cached list of installed FX populated lazily on first "+ New" open.
@@ -3318,14 +3322,25 @@ void SettingsScreen::drawFxLearn(ImGui_Context* ctx)
                     std::snprintf(delId, sizeof(delId),
                                   "Del##fxl_del_%zu", i);
                     if (ImGui_Button(ctx, delId, nullptr, nullptr)) {
+                        // Defer the OpenPopup to the outer scope so the
+                        // popup ID-stack matches BeginPopupModal below;
+                        // calling OpenPopup inside the table cell uses a
+                        // deeper ID prefix, BeginPopupModal can't find it.
                         g_pendingDeleteMatch = m.match;
-                        ImGui_OpenPopup(ctx, "fxl_del_popup", nullptr);
+                        g_pendingDeleteOpen  = true;
                     }
                 }
             }
 
             ImGui_EndTable(ctx);
         }
+    }
+
+    // Hoist the deferred OpenPopup for Delete out of the table-cell scope
+    // (see g_pendingDeleteOpen comment).
+    if (g_pendingDeleteOpen) {
+        ImGui_OpenPopup(ctx, "fxl_del_popup", nullptr);
+        g_pendingDeleteOpen = false;
     }
 
     // ---- "+ New" popup ----------------------------------------------------
