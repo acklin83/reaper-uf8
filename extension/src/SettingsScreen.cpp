@@ -665,16 +665,34 @@ void drawUf8Vector(ImGui_Context* ctx, ButtonId& sel)
     drawTextCentered_(c, 500, 470, 0x9CA0AAFF, "Rea-Sixty");
 }
 
-// Render the full UC1 schematic. Layout follows the SSL UC1 User Guide
-// page 14 (Front Panel overview): three vertical zones — Filters/EQ
-// left, Bus-Compressor + Central Control Panel centre, Dynamics + Solo
-// /Cut/Fine right. Knob colour codes mirror the silk-screen: red caps
-// on Gain controls (HF/HMF/LMF/LF + Input/Output trims), grey on freq /
-// Q / dynamics. Decorative-only in this iteration — no hit-targets;
-// FX-Learn integration adds them when the slot-mapping flow lands.
+// Render the full UC1 schematic. Layout follows the SSL UC1 hardware
+// (User Guide page 14 + reference photo): three vertical zones —
+// Filters/EQ left, Bus-Compressor + Central Control Panel centre,
+// Dynamics + Channel right.
+//
+// EQ + BC + Dynamics each use a 2-column knob layout:
+//   EQ:   Gain & Q in column 1, Freq in column 2.
+//         EQ Type / EQ In are two small toggles stacked in column 2
+//         between bands. HF Bell + LF Bell sit diagonal next to their
+//         band's Gain knob.
+//   BC:   Threshold / Attack / Ratio / S/C HPF in column 1;
+//         Make-Up / Release / IN-toggle / Mix in column 2.
+//         Analog VU meter spans both columns at the top.
+//   Comp: Ratio + Release column 1, Threshold column 2 (mid-row).
+//         Fast-Attack + Peak toggles tucked in the top-right corner.
+//         Dyn-IN toggle + GR meter row below the knob block.
+//   Gate: Range + Release column 1, Threshold + Hold column 2.
+//         Expand + Fast-Attack-Gate stacked beneath.
+//   Channel section bottom: Polarity / S/C Listen / Solo Clear in a
+//         small column on the left, then SOLO / CUT / FINE as the
+//         large bottom row, with Channel-IN large above FINE.
+//
+// Colour codes follow the silk-screen: red Gain caps on HF, green on
+// HMF, blue on LMF, grey on LF + filters + dynamics. Decorative-only;
+// no hit-targets in this iteration.
 void drawUc1Vector(ImGui_Context* ctx)
 {
-    constexpr float W = 760, H = 680;
+    constexpr float W = 760, H = 720;
 
     double oxd = 0, oyd = 0;
     ImGui_GetCursorScreenPos(ctx, &oxd, &oyd);
@@ -707,24 +725,18 @@ void drawUc1Vector(ImGui_Context* ctx)
         drawText_(c, x, y, 0x9CA0AAFF, text);
     };
 
-    constexpr uint32_t kRedCap   = 0xC03038FF;   // Gain knobs
-    constexpr uint32_t kGreyCap  = 0x3A4150FF;   // Freq / Q / dynamics
-    constexpr uint32_t kBlackCap = 0x1A1E24FF;   // Filters / Pan
-    constexpr uint32_t kAccentBC = 0x2A4870FF;   // Bus Comp section accent
+    constexpr uint32_t kRedCap    = 0xC03038FF;  // HF Gain
+    constexpr uint32_t kGreenCap  = 0x408840FF;  // HMF Gain
+    constexpr uint32_t kBlueCap   = 0x4070C0FF;  // LMF Gain
+    constexpr uint32_t kGreyCap   = 0x6A707CFF;  // LF Gain + filters + dynamics
+    constexpr uint32_t kFreqCap   = 0x3A4150FF;  // Freq + Q knobs (darker grey)
+    constexpr uint32_t kAccentBC  = 0x2A4870FF;  // Bus Comp section accent
+    constexpr uint32_t kAccentCC  = 0x903030FF;  // Central Control accent
 
     // Chassis -------------------------------------------------------------
     rect_(c, 4, 4, W - 8, H - 8, 0x14181EFF, 0x2A3038FF, /*rounding*/ 8.0);
 
-    // ---- Left column: Filters + EQ -------------------------------------
-    // UC1 layout (per User Guide page 14): the four EQ bands sit in a
-    // 3-column knob grid (Gain / Freq / Q). The little toggle buttons
-    // (HF Bell, EQ Type, LF Bell, HPF In, LPF In) are NOT in their own
-    // rows — they're tucked DIAGONALLY between knob clusters. Mirror
-    // that on the schematic so it reads like the real hardware.
-    constexpr float kColLx = 12, kColLw = 230;
-    rect_(c, kColLx, 12, kColLw, H - 24, 0x1A1E24FF, 0x2A3038FF, 6.0);
-
-    constexpr float kSmallToggleW = 30, kSmallToggleH = 14;
+    constexpr float kSmallToggleW = 28, kSmallToggleH = 14;
     auto smallToggle = [&](float x, float y, const char* label) {
         rect_(c, x, y, kSmallToggleW, kSmallToggleH,
               0x252A33FF, 0x4A5060FF, 2.5);
@@ -733,137 +745,193 @@ void drawUc1Vector(ImGui_Context* ctx)
                               0xC0C4CCFF, label);
     };
 
-    // Filters row — HPF + LPF knobs at the top with IN-toggles diagonal
-    // below-and-between (not aligned columnwise with the knobs).
-    sectionLabel(kColLx + 14, 16, "FILTERS");
-    knob(kColLx + 60,  60, 22, kBlackCap, "HPF");
-    knob(kColLx + 170, 60, 22, kBlackCap, "LPF");
-    smallToggle(kColLx + 96,  98, "IN");        // HPF In, diagonal-right of HPF knob
-    smallToggle(kColLx + 138, 98, "IN");        // LPF In, diagonal-left  of LPF knob
+    // ---- Left column: Filters + EQ -------------------------------------
+    // 2-column layout: Gain & Q live in column 1 (cx=60), Freq in
+    // column 2 (cx=170). Lo-Pass and Hi-Pass (no IN buttons!) sit at
+    // the top, diagonal to each other. EQ Type + EQ In are two small
+    // toggles stacked in column 2 between HMF and LMF; HF/LF Bell
+    // toggles sit diagonally next to their band's Gain knob.
+    constexpr float kColLx = 12, kColLw = 230;
+    rect_(c, kColLx, 12, kColLw, H - 24, 0x1A1E24FF, 0x2A3038FF, 6.0);
 
-    // EQ — four bands, each row: Gain + Freq (+ Q for HMF/LMF).
-    // HF Bell + EQ Type + LF Bell + EQ-To-SC sit DIAGONALLY in the gaps
-    // between bands so their LEDs read at a glance which band they
-    // affect (HF Bell upper-left of HF band, etc.).
-    sectionLabel(kColLx + 14, 134, "EQ");
+    // Filters: Lo-Pass column 1 (top-left), Hi-Pass column 2 diagonal
+    // below it. NO IN buttons — they don't exist on UC1.
+    knob(kColLx + 60,  44, 20, kGreyCap, "LO-PASS");
+    knob(kColLx + 170, 70, 20, kGreyCap, "HI-PASS");
+    sectionLabel(kColLx + 14, 110, "FILTERS");
+    line_(c, kColLx + 70, 122, kColLx + kColLw - 8, 122, 0x383C44FF, 1.0);
 
-    auto eqBand = [&](float yTop, const char* tag, bool hasQ) {
-        drawText_(c, kColLx + 14, yTop + 22, 0xB8BCC4FF, tag);
-        knob(kColLx + 60,  yTop + 24, 20, kRedCap,  "GAIN");
-        knob(kColLx + 124, yTop + 24, 20, kGreyCap, "FREQ");
-        if (hasQ) {
-            knob(kColLx + 188, yTop + 24, 20, kGreyCap, "Q");
-        }
-    };
-    eqBand(150, "HF",  false);
-    eqBand(220, "HMF", true);
-    eqBand(290, "LMF", true);
-    eqBand(360, "LF",  false);
+    // HF band — Gain in col 1, Freq in col 2 diagonal, HF Bell toggle
+    // beside the Freq knob.
+    drawText_(c, kColLx + 14, 152, 0xB8BCC4FF, "HF");
+    knob(kColLx + 60,  154, 20, kRedCap, "GAIN");
+    knob(kColLx + 170, 178, 20, kRedCap, "FREQ");
+    smallToggle(kColLx + 192, 144, "BELL");
 
-    // Diagonal toggles — sit in the inter-band gutters, offset from any
-    // knob centre so they read as separate hardware. UC1 places them on
-    // alternating sides for visual rhythm.
-    smallToggle(kColLx + 188, 154, "BELL");  // HF Bell, between Filters and HF, on the right
-    smallToggle(kColLx + 188, 224, "TYPE");  // EQ Type, between HF and HMF
-    smallToggle(kColLx + 188, 364, "BELL");  // LF Bell, between LMF and LF
+    // HMF band — Gain + Q in col 1, Freq in col 2.
+    drawText_(c, kColLx + 14, 230, 0xB8BCC4FF, "HMF");
+    knob(kColLx + 60,  232, 20, kGreenCap, "GAIN");
+    knob(kColLx + 170, 256, 20, kGreenCap, "FREQ");
+    knob(kColLx + 60,  290, 20, kFreqCap,  "Q");
 
-    // Bottom strip — EQ in / EQ to S/C
-    btn (kColLx + 18,  430, 88, 18, "EQ IN");
-    btn (kColLx + 124, 430, 88, 18, "EQ TO SC");
+    // EQ Type + EQ In: stacked in column 2 between HMF and LMF
+    smallToggle(kColLx + 192, 286, "TYPE");
+    smallToggle(kColLx + 192, 304, "IN");
 
-    // ---- Centre column: Bus Comp (top) + Central Control Panel (bottom)
+    // LMF band — Gain + Q in col 1, Freq in col 2.
+    drawText_(c, kColLx + 14, 340, 0xB8BCC4FF, "LMF");
+    knob(kColLx + 60,  342, 20, kBlueCap, "GAIN");
+    knob(kColLx + 170, 366, 20, kBlueCap, "FREQ");
+    knob(kColLx + 60,  400, 20, kFreqCap, "Q");
+
+    // LF band — Gain in col 1 (no Q), Freq in col 2 diagonal, LF Bell
+    // toggle beside the Gain knob.
+    drawText_(c, kColLx + 14, 450, 0xB8BCC4FF, "LF");
+    knob(kColLx + 60,  452, 20, kGreyCap, "GAIN");
+    smallToggle(kColLx +  92, 442, "BELL");
+    knob(kColLx + 170, 476, 20, kGreyCap, "FREQ");
+
+    // ---- Centre column: Bus Comp (top) + Central Control (bottom) ------
     constexpr float kColCx = kColLx + kColLw + 8, kColCw = 256;
-    // Bus Comp panel
-    rect_(c, kColCx, 12, kColCw, 372, 0x1A1E24FF, kAccentBC, 6.0);
-    sectionLabel(kColCx + 12, 22, "BUS COMPRESSOR");
-    // Input + Output trims at the top corners
-    knob(kColCx + 32,         62, 20, kRedCap, "INPUT");
-    knob(kColCx + kColCw - 32,62, 20, kRedCap, "OUTPUT");
-    // Analog GR meter — wide rectangle with a mock dial
-    rect_(c, kColCx + 60, 44, kColCw - 120, 70, 0x080C12FF, 0x444A55FF, 3.0);
-    // Meter arc placeholder
+    rect_(c, kColCx, 12, kColCw, 412, 0x1A1E24FF, kAccentBC, 6.0);
+    sectionLabel(kColCx + 14, 22, "BUS COMPRESSOR");
+
+    // Analog VU meter — wide rectangle spanning both knob columns.
+    rect_(c, kColCx + 30, 44, kColCw - 60, 80, 0x080C12FF, 0x444A55FF, 3.0);
     {
-        const float mcx = kColCx + kColCw / 2.0f, mcy = 88;
+        const float mcx = kColCx + kColCw / 2.0f, mcy = 96;
         for (int i = -6; i <= 6; ++i) {
-            const float a = -1.0f + i * 0.16f;     // radians-ish
+            const float a = -1.0f + i * 0.16f;
             const float x1 = mcx + std::cos(a) * 36, y1 = mcy + std::sin(a) * 36;
             const float x2 = mcx + std::cos(a) * 42, y2 = mcy + std::sin(a) * 42;
             line_(c, x1, y1, x2, y2, 0x808088FF, 1.0);
         }
-        // Needle
         line_(c, mcx, mcy, mcx + std::cos(-0.4f) * 38,
                           mcy + std::sin(-0.4f) * 38, 0xE8C040FF, 2.0);
+        drawTextCentered_(c, mcx, mcy + 18, 0x808088FF, "dB");
     }
-    // BC knob row
-    knob(kColCx + 36,  158, 22, kGreyCap, "THR");
-    knob(kColCx + 92,  158, 22, kGreyCap, "RATIO");
-    knob(kColCx + 148, 158, 22, kGreyCap, "ATK");
-    knob(kColCx + 204, 158, 22, kGreyCap, "REL");
-    knob(kColCx + 64,  220, 22, kGreyCap, "MAKE-UP");
-    knob(kColCx + 192, 220, 22, kGreyCap, "MIX");
-    btn (kColCx + 90,  280, 76, 22, "BUSCOMP IN", kAccentBC);
-    drawTextCentered_(c, kColCx + kColCw / 2.0f, 318, 0x808088FF,
+
+    // BC knob 4×2 grid: column 1 (Threshold / Attack / Ratio / SC HPF)
+    //                   column 2 (Make-Up / Release / IN / Mix)
+    {
+        const float c1x = kColCx + 70, c2x = kColCx + 190;
+        const float ry[4] = { 168, 220, 272, 324 };
+        knob(c1x, ry[0], 20, kAccentBC, "THR");
+        knob(c2x, ry[0], 20, kAccentBC, "MAKE-UP");
+        knob(c1x, ry[1], 20, kAccentBC, "ATTACK");
+        knob(c2x, ry[1], 20, kAccentBC, "RELEASE");
+        knob(c1x, ry[2], 20, kAccentBC, "RATIO");
+        // BC IN — toggle button instead of a knob (per UC1 hardware)
+        rect_(c, c2x - 14, ry[2] - 14, 28, 28, 0xE0E0E0FF, 0x808088FF, 3.0);
+        drawTextCentered_(c, c2x, ry[2] + 18, 0x9CA0AAFF, "IN");
+        knob(c1x, ry[3], 20, kAccentBC, "S/C HPF");
+        knob(c2x, ry[3], 20, kAccentBC, "MIX");
+    }
+    drawTextCentered_(c, kColCx + kColCw / 2.0f, 372, 0x808088FF,
                       "Bus Comp 2 / 360 Link BC");
 
     // Central Control Panel
-    rect_(c, kColCx, 392, kColCw, H - 404, 0x1A1E24FF, 0x903030FF, 6.0);
+    rect_(c, kColCx, 432, kColCw, H - 444, 0x1A1E24FF, kAccentCC, 6.0);
     // 7-segment display (top-left)
-    rect_(c, kColCx + 14, 408, 60, 32, 0x1A0408FF, 0x401818FF, 3.0);
-    drawTextCentered_(c, kColCx + 44, 424, 0xFF3030FF, "00");
-    // LCD (centre)
-    rect_(c, kColCx + 80, 402, kColCw - 96, 86, 0x05080CFF, 0x444A55FF, 3.0);
-    drawTextCentered_(c, kColCx + kColCw / 2.0f + 0,  420, 0xE0E0E0FF, "Track Name");
-    drawTextCentered_(c, kColCx + kColCw / 2.0f + 0,  440, 0x9CA0AAFF, "Stereo Bus");
-    drawTextCentered_(c, kColCx + kColCw / 2.0f + 0,  462, 0x4488DDFF, "360°");
-    // Channel encoder + Sec encoder
-    knob(kColCx + 50,           520, 26, kBlackCap, "CHANNEL");
-    knob(kColCx + kColCw - 50,  520, 26, kBlackCap, "360 / BC");
-    // Six menu buttons (BACK / CONFIRM / ROUTING / PRESETS / 360° /
-    // MAGNIFIER). Fixed-function on UC1 — not bind-targets — and too
-    // small to label clearly, so they render as plain unlabelled tiles.
-    for (int i = 0; i < 6; ++i) {
-        const float bx = kColCx + 14 + (i * 39);
-        rect_(c, bx, 600, 36, 22, 0x1A1E24FF, 0x383C44FF, 3.0);
+    rect_(c, kColCx + 14, 446, 56, 30, 0x1A0408FF, 0x401818FF, 3.0);
+    drawTextCentered_(c, kColCx + 42, 460, 0xFF3030FF, "001");
+    // LCD (centre, with mock content)
+    rect_(c, kColCx + 78, 444, kColCw - 138, 76, 0x05080CFF, 0x444A55FF, 3.0);
+    drawTextCentered_(c, kColCx + 138, 458, 0x808088FF, "MAIN");
+    drawTextCentered_(c, kColCx + 138, 478, 0xE0E0E0FF, "Track Name");
+    drawTextCentered_(c, kColCx + 138, 498, 0x4488DDFF, "Stereo Bus");
+    // 360° round button (top-right, not bind-able — fixed function)
+    circle_(c, kColCx + kColCw - 28, 460, 11, 0x1A1E24FF, 0x383C44FF);
+    // Magnifier round button (under 360°)
+    circle_(c, kColCx + kColCw - 28, 510, 11, 0x1A1E24FF, 0x383C44FF);
+
+    // Channel encoder (large, left) + Sec encoder (mid, "Bus Comp"-tagged)
+    knob(kColCx + 50,  570, 26, kGreyCap, "CHANNEL");
+    knob(kColCx + 156, 570, 22, kGreyCap, "BUS COMP");
+
+    // Four menu buttons in a row (BACK / CONFIRM / ROUTING / PRESETS) —
+    // fixed-function, unlabelled per Frank's note (too small to label).
+    for (int i = 0; i < 4; ++i) {
+        const float bx = kColCx + 24 + (i * 50);
+        rect_(c, bx, 660, 40, 20, 0x1A1E24FF, 0x383C44FF, 3.0);
     }
 
-    // ---- Right column: Dynamics + Solo/Cut/Fine ------------------------
+    // ---- Right column: Dynamics + Channel ------------------------------
     constexpr float kColRx = kColCx + kColCw + 8, kColRw = 230;
     rect_(c, kColRx, 12, kColRw, H - 24, 0x1A1E24FF, 0x2A3038FF, 6.0);
 
-    // Output Trim — top of the column (red Output silk-screen on UC1).
-    sectionLabel(kColRx + 14, 16, "OUTPUT");
-    knob(kColRx + kColRw / 2.0f, 56, 22, kRedCap, "TRIM");
+    // Compressor section. Fast Attack + Peak in the top-right corner;
+    // 2-column knob layout below: Ratio + Release in col 1, Threshold
+    // in col 2 (mid-row).
+    sectionLabel(kColRx + 14, 16, "COMPRESSOR");
+    smallToggle(kColRx + kColRw - 70, 16, "FAST ATK");
+    smallToggle(kColRx + kColRw - 70, 34, "PEAK");
+    {
+        const float c1x = kColRx + 60, c2x = kColRx + 156;
+        knob(c1x, 76,  20, kGreyCap, "RATIO");
+        knob(c2x, 108, 20, kGreyCap, "THRESHOLD");
+        knob(c1x, 140, 20, kGreyCap, "RELEASE");
+    }
+    // Dyn IN (toggle) + GR meter LED stack to its right
+    rect_(c, kColRx + 14, 178, 28, 28, 0xE0E0E0FF, 0x808088FF, 3.0);
+    drawTextCentered_(c, kColRx + 28, 214, 0x9CA0AAFF, "IN");
+    {
+        const float gx = kColRx + 60, gy = 178;
+        const char* steps[] = { "20", "14", "9", "6", "3" };
+        for (int i = 0; i < 5; ++i) {
+            const float ly = gy + i * 8;
+            circle_(c, gx, ly, 2.5, 0x404448FF, 0);
+            drawText_(c, gx + 8, ly - 5, 0x808088FF, steps[i]);
+        }
+    }
 
-    // Comp section
-    sectionLabel(kColRx + 14, 100, "COMP");
-    knob(kColRx + 50,  130, 20, kGreyCap, "THR");
-    knob(kColRx + 116, 130, 20, kGreyCap, "RATIO");
-    knob(kColRx + 182, 130, 20, kGreyCap, "REL");
-    btn (kColRx + 14,  174, 64, 18, "FAST ATK");
-    btn (kColRx + 84,  174, 60, 18, "PEAK");
-    btn (kColRx + 150, 174, 64, 18, "DYN IN");
+    // Gate / Expander section. 2-column layout: Range + Release col 1,
+    // Threshold + Hold col 2. Expand + Fast-Atk-Gate stacked beneath.
+    sectionLabel(kColRx + 14, 240, "GATE / EXPANDER");
+    {
+        const float c1x = kColRx + 60, c2x = kColRx + 156;
+        knob(c1x, 280, 20, kGreyCap, "RANGE");
+        knob(c2x, 280, 20, kGreyCap, "THRESHOLD");
+        knob(c1x, 332, 20, kGreyCap, "RELEASE");
+        knob(c2x, 332, 20, kGreyCap, "HOLD");
+    }
+    smallToggle(kColRx + 14, 374, "EXPAND");
+    smallToggle(kColRx + 14, 392, "FAST ATK");
 
-    // Gate section
-    sectionLabel(kColRx + 14, 208, "GATE / EXPANDER");
-    knob(kColRx + 50,  240, 20, kGreyCap, "THR");
-    knob(kColRx + 116, 240, 20, kGreyCap, "RANGE");
-    knob(kColRx + 182, 240, 20, kGreyCap, "HOLD");
-    knob(kColRx + 116, 302, 20, kGreyCap, "REL");
-    btn (kColRx + 14,  338, 92, 18, "EXPAND");
-    btn (kColRx + 122, 338, 92, 18, "FAST ATK");
-
-    // Channel section
-    sectionLabel(kColRx + 14, 376, "CHANNEL");
-    btn(kColRx + 14,  398, 92,  18, "POLARITY");
-    btn(kColRx + 122, 398, 92,  18, "S/C LISTEN");
-    btn(kColRx + 14,  424, 92,  18, "SOLO CLEAR");
-    btn(kColRx + 122, 424, 92,  18, "SOLO");
-    btn(kColRx + 14,  450, 92,  18, "CUT");
-    btn(kColRx + 122, 450, 92,  18, "CHANNEL IN");
-    btn(kColRx + 68,  482, 92,  20, "FINE");
+    // Channel section bottom. Three columns:
+    //   col 1 (small buttons stacked): Polarity / S/C Listen / Solo Clear,
+    //          then large SOLO button at the bottom.
+    //   col 2: large CUT button, aligned with SOLO.
+    //   col 3: large Channel IN at top, large FINE at the bottom.
+    sectionLabel(kColRx + 14, 430, "CHANNEL");
+    {
+        const float c1x = kColRx + 14;
+        const float c2x = kColRx + 86;
+        const float c3x = kColRx + 158;
+        constexpr float bw = 60;          // small button width
+        constexpr float lh = 60;          // large button height
+        constexpr float lw = 60;          // large button width
+        // Column 1 — three small + SOLO large
+        rect_(c, c1x, 452, bw, 18, 0x252A33FF, 0x4A5060FF, 3.0);
+        drawTextCentered_(c, c1x + bw / 2.0f, 461, 0xC0C4CCFF, "Ø");
+        rect_(c, c1x, 474, bw, 18, 0x252A33FF, 0x4A5060FF, 3.0);
+        drawTextCentered_(c, c1x + bw / 2.0f, 483, 0xC0C4CCFF, "S/C LISTEN");
+        rect_(c, c1x, 496, bw, 18, 0x252A33FF, 0x4A5060FF, 3.0);
+        drawTextCentered_(c, c1x + bw / 2.0f, 505, 0xC0C4CCFF, "SOLO CLR");
+        // Bottom row — three large
+        rect_(c, c1x, 522, lw, lh, 0xE0E0E0FF, 0x808088FF, 4.0);
+        drawTextCentered_(c, c1x + lw / 2.0f, 552, 0x303338FF, "SOLO");
+        rect_(c, c2x, 522, lw, lh, 0xE0E0E0FF, 0x808088FF, 4.0);
+        drawTextCentered_(c, c2x + lw / 2.0f, 552, 0x303338FF, "CUT");
+        // Column 3 — Channel IN at top spanning the small-button row
+        rect_(c, c3x, 452, lw, 64, 0xE0E0E0FF, 0x808088FF, 4.0);
+        drawTextCentered_(c, c3x + lw / 2.0f, 484, 0x303338FF, "IN");
+        rect_(c, c3x, 522, lw, lh, 0xE0E0E0FF, 0x808088FF, 4.0);
+        drawTextCentered_(c, c3x + lw / 2.0f, 552, 0x303338FF, "FINE");
+    }
 
     // Brand line
-    drawTextCentered_(c, W / 2.0f, H - 16, 0x9CA0AAFF, "Rea-Sixty / UC1");
+    drawTextCentered_(c, W / 2.0f, H - 14, 0x9CA0AAFF, "Rea-Sixty / UC1");
 }
 
 // Push a Rea-Sixty-themed colour set so the editor's combos / buttons /
