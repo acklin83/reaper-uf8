@@ -695,7 +695,7 @@ void drawUf8Vector(ImGui_Context* ctx, ButtonId& sel)
 // no hit-targets in this iteration.
 void drawUc1Vector(ImGui_Context* ctx)
 {
-    constexpr float W = 760, H = 740;
+    constexpr float W = 760, H = 660;
 
     double oxd = 0, oyd = 0;
     ImGui_GetCursorScreenPos(ctx, &oxd, &oyd);
@@ -793,43 +793,95 @@ void drawUc1Vector(ImGui_Context* ctx)
     knob(kColLx + 60,  300, 20, kGreenCap, "Q");
 
     // EQ Type + EQ In: stacked in column 2 deep in the gap between
-    // HMF and LMF — they live entirely in the band-separator strip
-    // now, no longer overlapping with the HMF Q knob.
-    smallToggle(kColLx + 192, 348, "TYPE");
-    smallToggle(kColLx + 192, 368, "IN");
+    // HMF and LMF, with 16-20 px breathing above TYPE and below IN.
+    smallToggle(kColLx + 192, 356, "TYPE");
+    smallToggle(kColLx + 192, 376, "IN");
 
     // LMF band — Gain + Q in col 1, Freq in col 2. Q in band-blue.
-    drawText_(c, kColLx + 14, 396, 0xB8BCC4FF, "LMF");
-    knob(kColLx + 60,  398, 20, kBlueCap, "GAIN");
-    knob(kColLx + 170, 426, 20, kBlueCap, "FREQ");
-    knob(kColLx + 60,  466, 20, kBlueCap, "Q");
+    // Whole block shifted +32 vs HMF baseline so TYPE/IN get their
+    // breathing room.
+    drawText_(c, kColLx + 14, 428, 0xB8BCC4FF, "LMF");
+    knob(kColLx + 60,  430, 20, kBlueCap, "GAIN");
+    knob(kColLx + 170, 458, 20, kBlueCap, "FREQ");
+    knob(kColLx + 60,  498, 20, kBlueCap, "Q");
 
     // LF band — both controls in black per silk-screen. Layout
     // mirrors LMF's Q+FREQ diagonal (Freq upper-right, Gain lower-
-    // left) so the LF Gain sits below the LF Freq.
-    drawText_(c, kColLx + 14, 524, 0xB8BCC4FF, "LF");
-    knob(kColLx + 170, 526, 20, kBlackCap, "FREQ");
-    knob(kColLx + 60,  566, 20, kBlackCap, "GAIN");
-    smallToggle(kColLx + 192, 516, "BELL");
+    // left), and LF Bell mirrors the HF Bell — HF Bell sits at the
+    // level of HF Gain (above HF Freq); LF Bell sits at the level
+    // of LF Gain (below LF Freq).
+    drawText_(c, kColLx + 14, 556, 0xB8BCC4FF, "LF");
+    knob(kColLx + 170, 558, 20, kBlackCap, "FREQ");
+    knob(kColLx + 60,  598, 20, kBlackCap, "GAIN");
+    smallToggle(kColLx + 192, 591, "BELL");
 
     // ---- Centre column: Bus Comp (top) + Central Control (bottom) ------
     constexpr float kColCx = kColLx + kColLw + 8, kColCw = 256;
     rect_(c, kColCx, 12, kColCw, 420, 0x1A1E24FF, kAccentBC, 6.0);
     sectionLabel(kColCx + 14, 22, "BUS COMPRESSOR");
 
-    // Analog VU meter — wide rectangle spanning both knob columns.
-    rect_(c, kColCx + 30, 44, kColCw - 60, 80, 0x080C12FF, 0x444A55FF, 3.0);
+    // SSL-style analog VU — cream face, black scale, red zone past
+    // 0 dB, ballistic needle. Pivot just below the visible face so
+    // the mechanism stays hidden, like a real Sifam meter.
     {
-        const float mcx = kColCx + kColCw / 2.0f, mcy = 96;
-        for (int i = -6; i <= 6; ++i) {
-            const float a = -1.0f + i * 0.16f;
-            const float x1 = mcx + std::cos(a) * 36, y1 = mcy + std::sin(a) * 36;
-            const float x2 = mcx + std::cos(a) * 42, y2 = mcy + std::sin(a) * 42;
-            line_(c, x1, y1, x2, y2, 0x808088FF, 1.0);
+        const float mx = kColCx + 30, my = 44;
+        const float mw = kColCw - 60, mh = 80;
+        // Black bezel + cream face inset
+        rect_(c, mx, my, mw, mh, 0x141416FF, 0x282A2EFF, 4.0);
+        rect_(c, mx + 4, my + 4, mw - 8, mh - 8, 0xE8DCB4FF, 0x806840FF, 2.0);
+        const float mcx = mx + mw / 2.0f;
+        const float mcy = my + mh + 6;            // pivot below face
+        const float ra  = 70;                     // outer scale radius
+        // Sweep -130° to -50° (90° arc)
+        const float a0 = -3.14159265f * 130.0f / 180.0f;
+        const float a1 = -3.14159265f *  50.0f / 180.0f;
+        auto dBtoA = [&](float dB) {
+            const float t = (dB + 20.0f) / 23.0f;  // -20..+3
+            return a0 + t * (a1 - a0);
+        };
+        // Red zone arc from 0 dB to +3 dB — short multi-segment curve
+        {
+            constexpr int kSegs = 10;
+            const float aZ0 = dBtoA(0.0f), aZ1 = dBtoA(3.0f);
+            for (int i = 0; i < kSegs; ++i) {
+                const float ta = aZ0 + (aZ1 - aZ0) * i / kSegs;
+                const float tb = aZ0 + (aZ1 - aZ0) * (i + 1) / kSegs;
+                line_(c,
+                    mcx + std::cos(ta) * (ra - 1), mcy + std::sin(ta) * (ra - 1),
+                    mcx + std::cos(tb) * (ra - 1), mcy + std::sin(tb) * (ra - 1),
+                    0xC02020FF, 2.5);
+            }
         }
-        line_(c, mcx, mcy, mcx + std::cos(-0.4f) * 38,
-                          mcy + std::sin(-0.4f) * 38, 0xE8C040FF, 2.0);
-        drawTextCentered_(c, mcx, mcy + 18, 0x808088FF, "dB");
+        // Tick marks: majors with labels at -20/-10/0/+3, minors elsewhere
+        struct Tick { float dB; const char* label; };
+        const Tick ticks[] = {
+            {-20, "20"}, {-10, "10"}, {-7, ""}, {-5, ""}, {-3, ""},
+            {-2, ""}, {-1, ""}, {0, "0"}, {1, ""}, {2, ""}, {3, "3"}
+        };
+        for (const Tick& t : ticks) {
+            const float a = dBtoA(t.dB);
+            const float tlen = (t.label[0] || t.dB == 0.0f) ? 8.0f : 5.0f;
+            const float x1 = mcx + std::cos(a) * ra,
+                        y1 = mcy + std::sin(a) * ra;
+            const float x2 = mcx + std::cos(a) * (ra - tlen),
+                        y2 = mcy + std::sin(a) * (ra - tlen);
+            const uint32_t col = (t.dB > 0.0f) ? 0xC02020FF : 0x202020FF;
+            line_(c, x1, y1, x2, y2, col, 1.6);
+            if (t.label[0]) {
+                const float lx = mcx + std::cos(a) * (ra - 16);
+                const float ly = mcy + std::sin(a) * (ra - 16);
+                drawTextCentered_(c, lx, ly, 0x202020FF, t.label);
+            }
+        }
+        // Needle — mock reading at -3 dB
+        const float aN = dBtoA(-3.0f);
+        line_(c, mcx, mcy,
+                 mcx + std::cos(aN) * (ra - 4),
+                 mcy + std::sin(aN) * (ra - 4),
+                 0x141416FF, 2.0);
+        circle_(c, mcx, mcy, 3, 0x141416FF, 0);
+        // VU label inside the face, just below the arc
+        drawTextCentered_(c, mcx, my + mh - 12, 0x404040FF, "VU");
     }
 
     // BC knob 4×2 grid: column 1 (Threshold / Attack / Ratio / SC HPF)
@@ -843,9 +895,11 @@ void drawUc1Vector(ImGui_Context* ctx)
         knob(c1x, ry[1], 20, kAccentBC, "ATTACK");
         knob(c2x, ry[1], 20, kAccentBC, "RELEASE");
         knob(c1x, ry[2], 20, kAccentBC, "RATIO");
-        // BC IN — toggle button instead of a knob (per UC1 hardware)
+        // BC IN — toggle button instead of a knob (per UC1 hardware).
+        // Label sits 8 px below the button bottom so the text top
+        // doesn't bump the box edge.
         rect_(c, c2x - 14, ry[2] - 14, 28, 28, 0xE0E0E0FF, 0x808088FF, 3.0);
-        drawTextCentered_(c, c2x, ry[2] + 18, 0x9CA0AAFF, "IN");
+        drawTextCentered_(c, c2x, ry[2] + 26, 0x9CA0AAFF, "IN");
         knob(c1x, ry[3], 20, kAccentBC, "S/C HPF");
         knob(c2x, ry[3], 20, kAccentBC, "MIX");
     }
@@ -862,23 +916,12 @@ void drawUc1Vector(ImGui_Context* ctx)
     drawTextCentered_(c, kColCx + 138, 466, 0x808088FF, "MAIN");
     drawTextCentered_(c, kColCx + 138, 486, 0xE0E0E0FF, "Track Name");
     drawTextCentered_(c, kColCx + 138, 506, 0x4488DDFF, "Stereo Bus");
-    // 360° round button (top-right, not bind-able — fixed function)
-    circle_(c, kColCx + kColCw - 28, 468, 11, 0x1A1E24FF, 0x383C44FF);
-    // Magnifier round button (under 360°)
-    circle_(c, kColCx + kColCw - 28, 518, 11, 0x1A1E24FF, 0x383C44FF);
 
     // CS encoder + BC encoder — symmetrically centred under the LCD.
     {
         const float midX = kColCx + kColCw / 2.0f;
         knob(midX - 40, 590, 24, kGreyCap, "CS Encoder");
         knob(midX + 40, 590, 24, kGreyCap, "BC Encoder");
-    }
-
-    // Four menu buttons in a row (BACK / CONFIRM / ROUTING / PRESETS) —
-    // fixed-function, unlabelled per Frank's note (too small to label).
-    for (int i = 0; i < 4; ++i) {
-        const float bx = kColCx + 24 + (i * 50);
-        rect_(c, bx, 686, 40, 20, 0x1A1E24FF, 0x383C44FF, 3.0);
     }
 
     // ---- Right column: Dynamics + Channel ------------------------------
@@ -899,15 +942,17 @@ void drawUc1Vector(ImGui_Context* ctx)
         knob(c2x, 124, 20, kGreyCap, "THRESHOLD");
         knob(c1x, 158, 20, kGreyCap, "RELEASE");
     }
-    // Dyn IN toggle on the left edge.
-    rect_(c, kColRx + 14, 200, 22, 22, 0xE0E0E0FF, 0x808088FF, 3.0);
-    drawTextCentered_(c, kColRx + 25, 230, 0x9CA0AAFF, "IN");
-    // GR meter on the RIGHT side, under the Threshold knob, labels left.
+    // Dyn IN toggle (left) + GR meter (right) — vertically centred
+    // in the gap between the Compressor knob block (ends ~y=194 incl.
+    // RELEASE label) and the Gate section label (y=270). Mid-point
+    // y=232. GR row spacing 12 px (was 8) so values + LEDs breathe.
+    rect_(c, kColRx + 14, 221, 22, 22, 0xE0E0E0FF, 0x808088FF, 3.0);
+    drawTextCentered_(c, kColRx + 25, 251, 0x9CA0AAFF, "IN");
     {
-        const float gx = kColRx + kColRw - 26, gy = 198;
+        const float gx = kColRx + kColRw - 26, gy = 208;
         const char* steps[] = { "20", "14", "9", "6", "3" };
         for (int i = 0; i < 5; ++i) {
-            const float ly = gy + i * 8;
+            const float ly = gy + i * 12;
             circle_(c, gx, ly, 2.5, 0x404448FF, 0);
             drawText_(c, gx - 18, ly - 5, 0x808088FF, steps[i]);
         }
@@ -952,7 +997,9 @@ void drawUc1Vector(ImGui_Context* ctx)
         drawTextCentered_(c, c1x + bw / 2.0f, 573, 0xC0C4CCFF, "SOLO CLR");
         // Large bottom row — SOLO / CUT / FINE share one Y-line, but
         // each button is half-size and centred in its column slot.
-        const float largeY = 672;         // shifted down to keep visual baseline
+        // Bottom edge (largeY + lh = 635) bündig with the LF Gain
+        // label bottom on the left column.
+        const float largeY = 607;
         const float soloX = c1x + (bw - lbw) / 2.0f;
         const float cutX  = c2x + (bw - lbw) / 2.0f;
         const float fineX = c3x + (bw - lbw) / 2.0f;
