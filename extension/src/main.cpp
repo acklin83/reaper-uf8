@@ -48,6 +48,7 @@
 #include "UC1Device.h"
 #include "UC1Surface.h"
 #include "UF8Device.h"
+#include "UserPluginCatalog.h"
 
 // File-scope forward decl — onTimer (inside the anonymous namespace below)
 // drains this every tick. Definition lives further down with the other
@@ -5561,6 +5562,11 @@ extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(
     // write bindings.json under the REAPER resource path), then csurf.
     registerBindingHandlers();
     uf8::bindings::load();
+    // Phase 2.5d-A — user-learned plugin catalogue. Load after the
+    // built-in PluginMap registry is initialised (it's static so it's
+    // always ready). Two-stage lookup in lookupPluginMapByName falls
+    // through to this catalogue.
+    uf8::user_plugins::load();
 
     // Register as a full control-surface class. The user adds a
     // "Rea-Sixty" entry in Preferences → Control/OSC/Web; REAPER then

@@ -5,6 +5,7 @@
 #include <string>
 
 #include "reaper_plugin_functions.h"
+#include "UserPluginCatalog.h"
 
 namespace uf8 {
 namespace {
@@ -381,10 +382,14 @@ constexpr PluginMap kMaps[] = {
 
 const PluginMap* lookupPluginMapByName(std::string_view fxName)
 {
+    // Two-stage lookup: built-ins win first, user catalog second. The
+    // collision check on UserPluginCatalog::save() guarantees no user
+    // entry can shadow a built-in, so this ordering is consistent with
+    // what the user actually persisted.
     for (const auto& m : kMaps) {
         if (fxName.find(m.match) != std::string_view::npos) return &m;
     }
-    return nullptr;
+    return user_plugins::lookupByName(fxName);
 }
 
 std::span<const PluginMap> allPluginMaps()
