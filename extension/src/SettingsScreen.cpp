@@ -696,18 +696,22 @@ void drawUf8Vector(ImGui_Context* ctx, ButtonId& sel)
 // Colour codes follow the silk-screen: red Gain caps on HF, green on
 // HMF, blue on LMF, grey on LF + filters + dynamics. Decorative-only;
 // no hit-targets in this iteration.
-void drawUc1Vector(ImGui_Context* ctx)
+// Pure visual rendering of the UC1 face. Caller must already have set up
+// the canvas (cursor pos + DrawList) and is responsible for reserving
+// layout space (via Dummy or InvisibleButton) — this function only paints
+// into the DrawList.
+//
+// `dimDomain` controls the section-level dim overlay used by the FX-Learn
+// schematic:
+//   Domain::None         → full saturation everywhere (passive face).
+//   Domain::ChannelStrip → BC section rendered at ~30% alpha (we're
+//                          editing a CS user map; BC controls aren't
+//                          relevant).
+//   Domain::BusComp      → EQ + DYNAMICS sections dimmed (we're editing
+//                          a BC user map).
+void drawUc1Face_(VCanvas& c, uf8::Domain dimDomain)
 {
     constexpr float W = 860, H = 660;
-
-    double oxd = 0, oyd = 0;
-    ImGui_GetCursorScreenPos(ctx, &oxd, &oyd);
-    ImGui_InvisibleButton(ctx, "uc1_canvas", W, H, /*flags*/ nullptr);
-
-    VCanvas c {
-        ctx, ImGui_GetWindowDrawList(ctx),
-        static_cast<float>(oxd), static_cast<float>(oyd)
-    };
 
     // Helpers --------------------------------------------------------------
     auto knob = [&](float cx, float cy, float r, uint32_t cap,
@@ -1033,6 +1037,40 @@ void drawUc1Vector(ImGui_Context* ctx)
 
     // Brand line
     drawTextCentered_(c, W / 2.0f, H - 14, 0x9CA0AAFF, "Rea-Sixty / UC1");
+
+    // ---- Section dim overlay (FX-Learn off-domain mask) ------------------
+    // 50% alpha black rect over the inactive region. Drawn LAST so it
+    // dims everything below it. Coordinates mirror the column backplates
+    // above (kColLx/kColLw, kColCx/kColCw, kColRx/kColRw).
+    constexpr uint32_t kDim = 0x000000A0;     // ~63% alpha black
+    constexpr float kColLxDim = 12,  kColLwDim = 230;
+    constexpr float kColCxDim = 250, kColCwDim = 360;  // = kColLx + kColLw + 8
+    constexpr float kColRxDim = 618, kColRwDim = 230;  // = kColCx + kColCw + 8
+    if (dimDomain == uf8::Domain::ChannelStrip) {
+        // Editing a CS map → dim BC (centre column, top section only —
+        // leave the Central Control Panel below it lit).
+        rect_(c, kColCxDim, 12, kColCwDim, 420, kDim, 0, 6.0);
+    } else if (dimDomain == uf8::Domain::BusComp) {
+        // Editing a BC map → dim left (EQ/Filters) + right (DYN/Channel).
+        rect_(c, kColLxDim, 12, kColLwDim, H - 24, kDim, 0, 6.0);
+        rect_(c, kColRxDim, 12, kColRwDim, H - 24, kDim, 0, 6.0);
+    }
+}
+
+// Thin wrapper around drawUc1Face_ for the passive use-case (Bindings
+// editor or future Mixer-tab live mockup) — reserves layout space via a
+// canvas-wide InvisibleButton that can also receive clicks.
+void drawUc1Vector(ImGui_Context* ctx)
+{
+    constexpr float W = 860, H = 660;
+    double oxd = 0, oyd = 0;
+    ImGui_GetCursorScreenPos(ctx, &oxd, &oyd);
+    ImGui_InvisibleButton(ctx, "uc1_canvas", W, H, /*flags*/ nullptr);
+    VCanvas c {
+        ctx, ImGui_GetWindowDrawList(ctx),
+        static_cast<float>(oxd), static_cast<float>(oyd)
+    };
+    drawUc1Face_(c, uf8::Domain::None);
 }
 
 // Push a Rea-Sixty-themed colour set so the editor's combos / buttons /
@@ -2520,250 +2558,269 @@ void toggleInverted_(int linkIdx)
     }
 }
 
-// ---- Schematic layout -----------------------------------------------------
-// One pad per slot in a domain's canonical topology. Coordinates are local
-// to the schematic origin (0,0 = top-left of the canvas inside the left
-// child window). Width/height fixed per pad (60x24) for an even grid.
+// ---- UC1 mockup as the FX-Learn schematic --------------------------------
 //
-// linkIdx values must be a subset of the canonical topology (kSsl360LinkSlots
-// for CS, kSsl360LinkBcSlots for BC). Anything not present in the topology
-// gets a ghost-render placeholder ("n/a") — keeps the layout stable when
-// the canonical map changes.
-struct SchematicPad {
+// Each entry binds a position on the UC1 face to an SSL 360 Link slot.
+// Coordinates match drawUc1Face_ exactly (cx/cy in canvas-local coords;
+// for knobs use the centre + radius, for toggles/btns use top-left + w/h).
+//
+// Domain tags drive the dim mask: when the user is editing a CS map,
+// Domain::ChannelStrip controls render in their full state-aware colour,
+// Domain::BusComp controls disappear under a 30 % alpha overlay and
+// register no hits (their per-control InvisibleButton is skipped).
+//
+// linkIdx values cross-reference kSsl360LinkSlots (CS) and
+// kSsl360LinkBcSlots (BC) — same indices used by the canonical built-in
+// PluginMap and by the now-obsolete kCsPads/kBcPads tables below.
+//
+// Slots without a UC1 control (Fader, Pan, Width, Output Trim, Bypass,
+// QA1..6, SAT, SAT.I, GRP for CS; Bypass, GRP for BC) are out of scope
+// for this commit. They can still be edited via the master view's text
+// fields; a future "extras tray" can add them as small tiles.
+struct Uc1Control {
+    enum Kind : uint8_t { Knob, Toggle, DynBtn };
+    Kind        kind;
     int         linkIdx;
-    float       x, y;
-    const char* shortLabel;   // 4-6 chars rendered inside the pad
+    uf8::Domain domain;
+    float       cx, cy;        // knob centre; toggle/btn top-left
+    float       r;             // knob radius (0 for toggle/btn)
+    float       w, h;          // toggle/btn box (0 for knob)
+    uint32_t    cap;           // accent colour (RedHF / GreenHMF / …)
+    const char* label;         // 4-char overlay; "" to skip
 };
 
-struct SchematicSection {
-    const char* title;
-    float       x, y;
+// Colour palette mirrors drawUc1Face_'s constants.
+constexpr uint32_t kCapRed   = 0xC03038FF;  // HF Gain
+constexpr uint32_t kCapGreen = 0x408840FF;  // HMF Gain + Q
+constexpr uint32_t kCapBlue  = 0x4070C0FF;  // LMF Gain + Q
+constexpr uint32_t kCapGrey  = 0x6A707CFF;  // filters + dynamics
+constexpr uint32_t kCapBlack = 0x101418FF;  // LF Gain + Freq
+constexpr uint32_t kCapBC    = 0x2A4870FF;  // Bus-Comp section
+
+// Coords match drawUc1Face_ — see the function for the layout reasoning.
+// Column anchors: kColLx=12, kColCx=250, kColRx=618. BC knobs c1x=370,
+// c2x=490; cInL=310, cInR=550.
+constexpr Uc1Control kUc1Controls[] = {
+    // ---- LEFT COLUMN — CS Filters + EQ ----------------------------------
+    // Filters
+    { Uc1Control::Knob,    6, uf8::Domain::ChannelStrip,
+      72, 44,  20, 0, 0, kCapGrey,  "LPF" },
+    { Uc1Control::Knob,    7, uf8::Domain::ChannelStrip,
+      182, 70, 20, 0, 0, kCapGrey,  "HPF" },
+
+    // HF band (red caps)
+    { Uc1Control::Toggle,  8, uf8::Domain::ChannelStrip,
+      204, 146, 0, 28, 14, 0, "HFBL" },
+    { Uc1Control::Knob,    9, uf8::Domain::ChannelStrip,
+      72,  154, 20, 0, 0, kCapRed,  "HFGN" },
+    { Uc1Control::Knob,   10, uf8::Domain::ChannelStrip,
+      182, 182, 20, 0, 0, kCapRed,  "HFFQ" },
+
+    // HMF band (green caps)
+    { Uc1Control::Knob,   11, uf8::Domain::ChannelStrip,
+      72,  232, 20, 0, 0, kCapGreen, "HMFG" },
+    { Uc1Control::Knob,   12, uf8::Domain::ChannelStrip,
+      182, 260, 20, 0, 0, kCapGreen, "HMFF" },
+    { Uc1Control::Knob,   13, uf8::Domain::ChannelStrip,
+      72,  300, 20, 0, 0, kCapGreen, "HMFQ" },
+
+    // EQ Type / EQ In toggles
+    { Uc1Control::Toggle, 14, uf8::Domain::ChannelStrip,
+      204, 356, 0, 28, 14, 0, "EQTY" },
+    { Uc1Control::Toggle, 15, uf8::Domain::ChannelStrip,
+      204, 376, 0, 28, 14, 0, "EQIN" },
+
+    // LMF band (blue caps)
+    { Uc1Control::Knob,   16, uf8::Domain::ChannelStrip,
+      72,  430, 20, 0, 0, kCapBlue,  "LMFG" },
+    { Uc1Control::Knob,   17, uf8::Domain::ChannelStrip,
+      182, 458, 20, 0, 0, kCapBlue,  "LMFF" },
+    { Uc1Control::Knob,   18, uf8::Domain::ChannelStrip,
+      72,  498, 20, 0, 0, kCapBlue,  "LMFQ" },
+
+    // LF band (black caps)
+    { Uc1Control::Knob,   19, uf8::Domain::ChannelStrip,
+      182, 558, 20, 0, 0, kCapBlack, "LFFQ" },
+    { Uc1Control::Knob,   20, uf8::Domain::ChannelStrip,
+      72,  598, 20, 0, 0, kCapBlack, "LFGN" },
+    { Uc1Control::Toggle, 21, uf8::Domain::ChannelStrip,
+      204, 591, 0, 28, 14, 0, "LFBL" },
+
+    // ---- CENTRE COLUMN — BC ---------------------------------------------
+    // Threshold, Make-Up, Attack, Release, Ratio, S/C HPF, Mix.
+    { Uc1Control::Knob,    1, uf8::Domain::BusComp,
+      370, 172, 20, 0, 0, kCapBC, "THR" },
+    { Uc1Control::Knob,    2, uf8::Domain::BusComp,
+      490, 172, 20, 0, 0, kCapBC, "MAKE" },
+    { Uc1Control::Knob,    3, uf8::Domain::BusComp,
+      370, 234, 20, 0, 0, kCapBC, "ATK" },
+    { Uc1Control::Knob,    4, uf8::Domain::BusComp,
+      490, 234, 20, 0, 0, kCapBC, "REL" },
+    { Uc1Control::Knob,    5, uf8::Domain::BusComp,
+      370, 296, 20, 0, 0, kCapBC, "RAT" },
+    // BC IN = compressor in/out toggle = BC linkIdx 0 (Bypass).
+    { Uc1Control::Toggle,  0, uf8::Domain::BusComp,
+      476, 282, 0, 28, 28, 0, "IN" },
+    { Uc1Control::Knob,    6, uf8::Domain::BusComp,
+      370, 358, 20, 0, 0, kCapBC, "S/C" },
+    { Uc1Control::Knob,    7, uf8::Domain::BusComp,
+      490, 358, 20, 0, 0, kCapBC, "MIX" },
+
+    // ---- RIGHT COLUMN — CS Comp + Gate + Channel ------------------------
+    // Comp section
+    { Uc1Control::DynBtn, 24, uf8::Domain::ChannelStrip,
+      772, 24,  0, 66, 22, 0, "C ATK" },     // FAST ATK
+    { Uc1Control::DynBtn, 25, uf8::Domain::ChannelStrip,
+      772, 50,  0, 66, 22, 0, "C PK" },      // PEAK
+    { Uc1Control::Knob,   26, uf8::Domain::ChannelStrip,
+      678, 96,  20, 0, 0, kCapGrey, "C RAT" },
+    { Uc1Control::Knob,   27, uf8::Domain::ChannelStrip,
+      774, 124, 20, 0, 0, kCapGrey, "C THR" },
+    { Uc1Control::Knob,   28, uf8::Domain::ChannelStrip,
+      678, 158, 20, 0, 0, kCapGrey, "C REL" },
+
+    // DYN IN toggle (square button left of GR meter)
+    { Uc1Control::Toggle, 22, uf8::Domain::ChannelStrip,
+      632, 221, 0, 22, 22, 0, "DYN" },
+
+    // Gate section
+    { Uc1Control::Knob,   29, uf8::Domain::ChannelStrip,
+      678, 308, 20, 0, 0, kCapGrey, "G RNG" },
+    { Uc1Control::Knob,   30, uf8::Domain::ChannelStrip,
+      774, 332, 20, 0, 0, kCapGrey, "G THR" },
+    { Uc1Control::Knob,   31, uf8::Domain::ChannelStrip,
+      678, 374, 20, 0, 0, kCapGrey, "G REL" },
+    { Uc1Control::Knob,   32, uf8::Domain::ChannelStrip,
+      774, 398, 20, 0, 0, kCapGrey, "G HLD" },
+    { Uc1Control::DynBtn, 33, uf8::Domain::ChannelStrip,
+      632, 430, 0, 66, 22, 0, "G/E" },       // EXPAND
+    { Uc1Control::DynBtn, 34, uf8::Domain::ChannelStrip,
+      632, 456, 0, 66, 22, 0, "G ATK" },     // GATE FAST ATK
+
+    // Channel section — Polarity, S/C Listen, Channel-IN
+    { Uc1Control::DynBtn,  5, uf8::Domain::ChannelStrip,
+      632, 510, 0, 66, 22, 0, "POL" },        // Polarity (Ø)
+    { Uc1Control::DynBtn, 36, uf8::Domain::ChannelStrip,
+      632, 536, 0, 66, 22, 0, "S/C L" },     // S/C Listen
+    // Channel-IN — narrow tall button per drawUc1Face_'s c3x slot.
+    { Uc1Control::Toggle,  4, uf8::Domain::ChannelStrip,
+      778, 521, 0, 33, 37, 0, "IN" },        // Channel In / Input Trim
 };
 
-struct DomainSchematic {
-    const SchematicPad*     pads;
-    int                     padCount;
-    const SchematicSection* sections;
-    int                     sectionCount;
-    float                   width, height;
-};
+constexpr int kUc1ControlsCount =
+    sizeof(kUc1Controls) / sizeof(kUc1Controls[0]);
 
-constexpr float kPadW = 60.0f, kPadH = 22.0f;
-
-// Channel-Strip canvas — 8 columns of 60px pads + 4px gaps == 508 px wide.
-// Section labels track the row above each cluster.
-constexpr SchematicSection kCsSections[] = {
-    { "INPUT",     4,    8 },
-    { "EQ",        4,   58 },
-    { "FILTERS",   4,  204 },
-    { "DYNAMICS",  4,  254 },
-    { "OUTPUT",    4,  362 },
-    { "EXTRAS",    4,  418 },
-};
-
-// Channel-Strip pads. linkIdx columns refer to kSsl360LinkSlots indices.
-constexpr SchematicPad kCsPads[] = {
-    // INPUT row
-    {  0,   4,  22, "BYP"   },
-    {  4,  68,  22, "IN"    },
-    {  5, 132,  22, "POL"   },
-    { 36, 196,  22, "S/C L" },
-
-    // EQ row 1: EqIn / EqType
-    { 15,   4,  72, "EQ IN" },
-    { 14,  68,  72, "TYPE"  },
-
-    // EQ columns: HF / HMF / LMF / LF (3 controls each, stacked rows)
-    //   row a (y=104): bell/Q
-    {  8,   4, 104, "HF BL" },
-    { 13,  68, 104, "HMF Q" },
-    { 18, 132, 104, "LMF Q" },
-    { 21, 196, 104, "LF BL" },
-    //   row b (y=128): gain
-    {  9,   4, 128, "HF GN" },
-    { 11,  68, 128, "HMF G" },
-    { 16, 132, 128, "LMF G" },
-    { 20, 196, 128, "LF GN" },
-    //   row c (y=152): freq
-    { 10,   4, 152, "HF FQ" },
-    { 12,  68, 152, "HMF F" },
-    { 17, 132, 152, "LMF F" },
-    { 19, 196, 152, "LF FQ" },
-
-    // FILTERS row
-    {  7,   4, 218, "HPF"   },
-    {  6,  68, 218, "LPF"   },
-
-    // DYNAMICS — DynIn + Comp row + Gate row
-    { 22,   4, 268, "DYN IN" },
-
-    {  27,  4, 296, "C THR" },
-    {  26, 68, 296, "C RAT" },
-    {  24,132, 296, "C ATK" },
-    {  28,196, 296, "C REL" },
-    {  23,260, 296, "C MIX" },
-    {  25,324, 296, "C PK"  },
-
-    {  30,  4, 324, "G THR" },
-    {  29, 68, 324, "G RNG" },
-    {  34,132, 324, "G ATK" },
-    {  31,196, 324, "G REL" },
-    {  32,260, 324, "G HLD" },
-    {  33,324, 324, "G/E"   },
-
-    // OUTPUT — width / pan / out / fader (FaderLevel highlighted)
-    {   2,  4, 376, "WID"   },
-    {   3, 68, 376, "PAN"   },
-    {  37,132, 376, "OUT"   },
-    {   1,196, 376, "FADER" },
-
-    // EXTRAS — quick-access, saturation, group sense
-    {  38,  4, 432, "QA1"   },
-    {  39, 68, 432, "QA2"   },
-    {  40,132, 432, "QA3"   },
-    {  41,196, 432, "QA4"   },
-    {  42,260, 432, "QA5"   },
-    {  43,324, 432, "QA6"   },
-    {  44,388, 432, "SAT"   },
-    {  45,452, 432, "SAT.I" },
-    {  46,516, 432, "GRP"   },
-};
-
-// Bus-Comp canvas — much smaller. One row of ratio/threshold/etc + a
-// second row for sidechain + group sense.
-constexpr SchematicSection kBcSections[] = {
-    { "COMPRESSOR", 4,   8 },
-    { "SIDECHAIN",  4,  84 },
-    { "EXTRAS",     4, 140 },
-};
-
-constexpr SchematicPad kBcPads[] = {
-    {  0,   4,  22, "BYP"  },
-    {  1,  68,  22, "THR"  },
-    {  5, 132,  22, "RAT"  },
-    {  3, 196,  22, "ATK"  },
-    {  4, 260,  22, "REL"  },
-    {  2, 324,  22, "MAKE" },
-    {  7, 388,  22, "MIX"  },
-
-    {  6,   4,  98, "S/C HPF" },
-
-    { 46,   4, 154, "GRP"  },
-};
-
-DomainSchematic schematicFor_(uf8::Domain d)
+// Render the FX-Learn interactive overlay on top of one already-painted
+// UC1 control (drawUc1Face_ has already drawn the cap, ring, indicator,
+// and silk-screen label). Adds:
+//   - state-aware ring (mapped green / listening amber pulse / unmapped
+//     thin grey / ghost dark) at +3 px outside the knob, or as a thin
+//     box outline around toggles + dyn buttons
+//   - small "p<param>" tag in green for mapped controls
+//   - small "i" inverted-flag indicator in upper-right when set
+//   - InvisibleButton hit area for click / drag-drop / context-menu
+//   - hover tooltip with slot name + param info
+//
+// Caller must skip out-of-domain controls — drawUc1Face_'s dim overlay
+// handles those visually and the absence of an InvisibleButton means
+// no hover/click reaches them.
+void drawUc1Control_(ImGui_Context* ctx, ImGui_DrawList* dl,
+                     float ox, float oy,
+                     const Uc1Control& ctrl,
+                     const uf8::PluginMap& topo,
+                     const EditingFx& fx)
 {
-    switch (d) {
-        case uf8::Domain::ChannelStrip:
-            return { kCsPads,
-                     int(sizeof(kCsPads) / sizeof(kCsPads[0])),
-                     kCsSections,
-                     int(sizeof(kCsSections) / sizeof(kCsSections[0])),
-                     584.0f, 470.0f };
-        case uf8::Domain::BusComp:
-            return { kBcPads,
-                     int(sizeof(kBcPads) / sizeof(kBcPads[0])),
-                     kBcSections,
-                     int(sizeof(kBcSections) / sizeof(kBcSections[0])),
-                     460.0f, 200.0f };
-        default:
-            return { nullptr, 0, nullptr, 0, 0, 0 };
-    }
-}
+    using namespace uf8;
 
-// Render one schematic pad. Combines the visual rect/text (via DrawList,
-// always drawn) with an InvisibleButton (so drag-drop targets and popups
-// can hook off the last-added item). State drives the colour:
-//   - listening : amber fill + outline
-//   - mapped    : green outline
-//   - unmapped  : flat dark fill
-// Returns true on left-click (caller toggles listening). Drag-drop accept
-// + right-click context popup are handled inline.
-void drawSchematicPad_(ImGui_Context* ctx,
-                       ImGui_DrawList* dl,
-                       float ox, float oy,
-                       const SchematicPad& pad,
-                       const uf8::PluginMap& topo,
-                       const EditingFx& fx)
-{
-    const uf8::LinkSlot* slot = uf8::findSlotByLinkIdx(topo, pad.linkIdx);
-    const int  mapped     = mappedVst3For_(pad.linkIdx);
-    const bool isMapped   = (mapped >= 0);
-    const bool isListen   = (g_listeningLinkIdx == pad.linkIdx);
-    const bool exists     = (slot != nullptr);
+    const LinkSlot* slot = findSlotByLinkIdx(topo, ctrl.linkIdx);
+    const int  mapped    = mappedVst3For_(ctrl.linkIdx);
+    const bool isMapped  = (mapped >= 0);
+    const bool isListen  = (g_listeningLinkIdx == ctrl.linkIdx);
+    const bool exists    = (slot != nullptr);
 
-    // Colours — match the Bindings-editor schematic palette so the
-    // FX-Learn view feels like part of the same family. Listening state
-    // pulses the border alpha (sin wave, 1 Hz-ish) so the user sees at
-    // a glance which pad is awaiting a bind.
-    uint32_t fill, border, txt;
-    if (!exists) {
-        fill   = 0x14181EFF;
-        border = 0x2A3038FF;
-        txt    = 0x55595FFF;
-    } else if (isListen) {
-        const double t     = ImGui_GetTime(ctx);
-        const double pulse = 0.5 + 0.5 * std::sin(t * 6.0);  // 0..1
-        const uint32_t bA  = static_cast<uint32_t>(140 + 115 * pulse) & 0xFFu;
-        fill   = 0x4A3A1AFF;
-        border = (0xFFE040u << 8) | bA;
-        txt    = 0xFFFFFFFF;
-    } else if (isMapped) {
-        fill   = 0x1F3A24FF;
-        border = 0x60C060FF;
-        txt    = 0xE0E0E0FF;
+    // Bounding box — knob = (cx-r, cy-r, 2r, 2r); toggle/btn = (cx, cy, w, h).
+    float bx, by, bw, bh;
+    if (ctrl.kind == Uc1Control::Knob) {
+        bx = ctrl.cx - ctrl.r;
+        by = ctrl.cy - ctrl.r;
+        bw = bh = ctrl.r * 2.0f;
     } else {
-        fill   = 0x252A33FF;
-        border = 0x4A5060FF;
-        txt    = 0xC0C4CAFF;
+        bx = ctrl.cx; by = ctrl.cy;
+        bw = ctrl.w;  bh = ctrl.h;
     }
 
-    double rounding = 3.0;
-    ImGui_DrawList_AddRectFilled(dl, ox, oy, ox + kPadW, oy + kPadH,
-                                 fill, &rounding, nullptr);
-    ImGui_DrawList_AddRect(dl, ox, oy, ox + kPadW, oy + kPadH,
-                           border, &rounding, nullptr, nullptr);
+    // State → ring colour.
+    uint32_t ringCol;
+    if (!exists)        ringCol = 0x303338FF;
+    else if (isListen) {
+        const double t     = ImGui_GetTime(ctx);
+        const double pulse = 0.5 + 0.5 * std::sin(t * 6.0);
+        const uint32_t bA  =
+            static_cast<uint32_t>(140 + 115 * pulse) & 0xFFu;
+        ringCol = (0xFFE040u << 8) | bA;
+    }
+    else if (isMapped)  ringCol = 0x60C060FF;
+    else                ringCol = 0x808890FF;
 
-    // Centred label.
-    double tw = 0, th = 0;
-    ImGui_CalcTextSize(ctx, pad.shortLabel, &tw, &th, nullptr, nullptr);
-    ImGui_DrawList_AddText(dl,
-        ox + (kPadW - float(tw)) / 2.0f,
-        oy + (kPadH - float(th)) / 2.0f,
-        txt, pad.shortLabel);
+    // Ring overlay on top of drawUc1Face_'s already-painted control.
+    if (ctrl.kind == Uc1Control::Knob) {
+        ImGui_DrawList_AddCircle(dl, ox + ctrl.cx, oy + ctrl.cy,
+                                 ctrl.r + 3, ringCol,
+                                 /*num_segments*/ nullptr,
+                                 /*thickness*/ nullptr);
+    } else {
+        double rounding = (ctrl.kind == Uc1Control::DynBtn) ? 3.0 : 2.5;
+        ImGui_DrawList_AddRect(dl,
+            ox + bx - 1, oy + by - 1,
+            ox + bx + bw + 1, oy + by + bh + 1,
+            ringCol, &rounding, /*flags*/ nullptr, /*thickness*/ nullptr);
+    }
 
-    // Inverted-flag mark — small "i" in upper-right corner.
+    // "p<n>" tag in green for mapped controls — placed at the centre
+    // of the knob (overrides the silk-screen label) or below toggles.
+    if (isMapped) {
+        char tag[12];
+        std::snprintf(tag, sizeof(tag), "p%d", mapped);
+        double tw = 0, th = 0;
+        ImGui_CalcTextSize(ctx, tag, &tw, &th, nullptr, nullptr);
+        const float tx = (ctrl.kind == Uc1Control::Knob)
+            ? ox + ctrl.cx - float(tw) / 2.0f
+            : ox + bx + (bw - float(tw)) / 2.0f;
+        const float ty = (ctrl.kind == Uc1Control::Knob)
+            ? oy + ctrl.cy - float(th) / 2.0f
+            : oy + by + bh + 2;
+        ImGui_DrawList_AddText(dl, tx, ty, 0x80FF80FF, tag);
+    }
+
+    // "i" inverted-flag indicator (upper-right corner of the bbox).
     if (isMapped) {
         bool inv = false;
         for (const auto& m : uf8::user_plugins::get().maps) {
             if (m.match != g_editingMatch) continue;
             for (const auto& s : m.slots) {
-                if (s.linkIdx == pad.linkIdx) { inv = s.inverted; break; }
+                if (s.linkIdx == ctrl.linkIdx) { inv = s.inverted; break; }
             }
             break;
         }
         if (inv) {
-            ImGui_DrawList_AddText(dl, ox + kPadW - 8, oy + 1, 0xFFC04CFF, "i");
+            ImGui_DrawList_AddText(dl,
+                ox + bx + bw - 6, oy + by - 4,
+                0xFFC04CFF, "i");
         }
     }
 
-    // ---- ImGui interaction layer over the pad ---------------------------
-    // SetCursorScreenPos + InvisibleButton makes this a real ImGui item so
-    // BeginDragDropTarget / BeginPopupContextItem hook off it correctly.
-    char btnId[32];
-    std::snprintf(btnId, sizeof(btnId), "##fxl_pad_%d", pad.linkIdx);
-    ImGui_SetCursorScreenPos(ctx, ox, oy);
+    // Hit area + interactions — same pattern drawSchematicPad_ used.
+    char btnId[40];
+    std::snprintf(btnId, sizeof(btnId), "##fxl_pad_%d", ctrl.linkIdx);
+    ImGui_SetCursorScreenPos(ctx, ox + bx, oy + by);
     int ibFlags = 0;
-    ImGui_InvisibleButton(ctx, btnId, kPadW, kPadH, &ibFlags);
+    ImGui_InvisibleButton(ctx, btnId, bw, bh, &ibFlags);
 
-    // Left click = toggle listen. Disabled for slots not in the topology.
     int lbtn = 0;
     if (exists && ImGui_IsItemClicked(ctx, &lbtn) && lbtn == 0) {
-        g_listeningLinkIdx = isListen ? -1 : pad.linkIdx;
+        g_listeningLinkIdx = isListen ? -1 : ctrl.linkIdx;
     }
 
-    // Hover tooltip: long slot name + currently-bound param info. Only when
-    // the slot exists in the canonical topology.
     if (exists && ImGui_IsItemHovered(ctx, nullptr)) {
         char tip[256];
         if (isMapped) {
@@ -2777,14 +2834,12 @@ void drawSchematicPad_(ImGui_Context* ctx,
                 slot->name ? slot->name : "(slot)", mapped, pname);
         } else {
             std::snprintf(tip, sizeof(tip),
-                "%s\n  unmapped — drag a param here to bind",
+                "%s\n  unmapped — drag a param here or click to listen",
                 slot->name ? slot->name : "(slot)");
         }
         ImGui_SetTooltip(ctx, tip);
     }
 
-    // Drag-drop target — accept "FXL_PARAM" payload (vst3 param index as
-    // ASCII). Bind directly without going through the listening state.
     if (exists && ImGui_BeginDragDropTarget(ctx)) {
         char payload[16] = {};
         int  dropFlags   = 0;
@@ -2793,24 +2848,17 @@ void drawSchematicPad_(ImGui_Context* ctx,
                                         &dropFlags)) {
             const int p = std::atoi(payload);
             if (p >= 0) {
-                bindSlot_(pad.linkIdx, p);
-                // If the user was click-and-turn listening on this same
-                // pad, advance to the next unmapped slot — DnD finishes
-                // the bind, no need for a second click to move on.
-                if (g_listeningLinkIdx == pad.linkIdx) {
+                bindSlot_(ctrl.linkIdx, p);
+                if (g_listeningLinkIdx == ctrl.linkIdx)
                     autoAdvanceListening_(topo);
-                }
             }
         }
         ImGui_EndDragDropTarget(ctx);
     }
 
-    // Right-click context menu — only meaningful when something is mapped.
-    // Open the popup and remember which slot it belongs to so the popup
-    // body can render the right actions.
     if (exists && isMapped) {
         char popId[40];
-        std::snprintf(popId, sizeof(popId), "fxl_ctx_%d", pad.linkIdx);
+        std::snprintf(popId, sizeof(popId), "fxl_ctx_%d", ctrl.linkIdx);
         if (ImGui_BeginPopupContextItem(ctx, popId, nullptr)) {
             char title[160];
             std::snprintf(title, sizeof(title),
@@ -2823,7 +2871,9 @@ void drawSchematicPad_(ImGui_Context* ctx,
             for (const auto& m : uf8::user_plugins::get().maps) {
                 if (m.match != g_editingMatch) continue;
                 for (const auto& s : m.slots) {
-                    if (s.linkIdx == pad.linkIdx) { inverted = s.inverted; break; }
+                    if (s.linkIdx == ctrl.linkIdx) {
+                        inverted = s.inverted; break;
+                    }
                 }
                 break;
             }
@@ -2831,30 +2881,37 @@ void drawSchematicPad_(ImGui_Context* ctx,
             std::snprintf(invLbl, sizeof(invLbl),
                 inverted ? "Inverted [on]" : "Inverted [off]");
             if (ImGui_MenuItem(ctx, invLbl, nullptr, nullptr, nullptr)) {
-                toggleInverted_(pad.linkIdx);
+                toggleInverted_(ctrl.linkIdx);
             }
             if (ImGui_MenuItem(ctx, "Clear binding", nullptr,
                                nullptr, nullptr)) {
-                if (g_listeningLinkIdx == pad.linkIdx)
+                if (g_listeningLinkIdx == ctrl.linkIdx)
                     g_listeningLinkIdx = -1;
-                unbindSlot_(pad.linkIdx);
+                unbindSlot_(ctrl.linkIdx);
             }
             ImGui_EndPopup(ctx);
         }
     }
 }
 
-// Render the full schematic into the current window. Caller owns the
-// surrounding child-window + scroll. Origin = current cursor screen pos.
+// Render the FX-Learn schematic as the UC1 hardware face. drawUc1Face_
+// paints the chassis + colour-coded knobs + section silk-screen + dim
+// overlay over the off-domain region; we then iterate kUc1Controls and
+// add the interactive overlay (state ring + hit area + drag-drop +
+// popup) on top of the in-domain controls only. Off-domain controls
+// are visually present but unreachable (no InvisibleButton drawn).
 void drawFxLearnSchematic_(ImGui_Context* ctx,
                            const uf8::PluginMap& topo,
                            uf8::Domain domain,
                            const EditingFx& fx)
 {
-    const DomainSchematic ds = schematicFor_(domain);
-    if (!ds.pads || ds.padCount == 0) {
+    constexpr float W = 860, H = 660;
+
+    if (domain != uf8::Domain::ChannelStrip &&
+        domain != uf8::Domain::BusComp)
+    {
         ImGui_TextDisabled(ctx,
-            "(no schematic for this domain — slot list fallback TODO)");
+            "(no schematic for this domain — UC1 mockup not applicable)");
         return;
     }
 
@@ -2864,43 +2921,21 @@ void drawFxLearnSchematic_(ImGui_Context* ctx,
 
     ImGui_DrawList* dl = ImGui_GetWindowDrawList(ctx);
 
-    // Backplate — subtle chassis tint behind the whole canvas. Keeps the
-    // schematic visually distinct from the surrounding panels.
-    {
-        double rnd = 6.0;
-        ImGui_DrawList_AddRectFilled(dl, ox, oy,
-            ox + ds.width, oy + ds.height,
-            0x10141AFF, &rnd, nullptr);
-        ImGui_DrawList_AddRect(dl, ox, oy,
-            ox + ds.width, oy + ds.height,
-            0x252A33FF, &rnd, nullptr, nullptr);
-    }
+    // Paint the full UC1 face including the dim overlay over the
+    // off-domain section.
+    VCanvas c { ctx, dl, ox, oy };
+    drawUc1Face_(c, domain);
 
-    // Section labels.
-    for (int i = 0; i < ds.sectionCount; ++i) {
-        const auto& sec = ds.sections[i];
-        ImGui_DrawList_AddText(dl,
-            ox + sec.x, oy + sec.y,
-            0x9CA0AAFF, sec.title);
-        // Underline under the label.
-        double tw = 0, th = 0;
-        ImGui_CalcTextSize(ctx, sec.title, &tw, &th, nullptr, nullptr);
-        double thick = 1.0;
-        ImGui_DrawList_AddLine(dl,
-            ox + sec.x, oy + sec.y + float(th) + 1,
-            ox + sec.x + ds.width - 8 - float(sec.x), oy + sec.y + float(th) + 1,
-            0x2A3038FF, &thick);
-    }
-
-    // Pads.
-    for (int i = 0; i < ds.padCount; ++i) {
-        const auto& pad = ds.pads[i];
-        drawSchematicPad_(ctx, dl, ox + pad.x, oy + pad.y, pad, topo, fx);
+    // Interactive overlay on each in-domain control.
+    for (int i = 0; i < kUc1ControlsCount; ++i) {
+        const Uc1Control& ctrl = kUc1Controls[i];
+        if (ctrl.domain != domain) continue;
+        drawUc1Control_(ctx, dl, ox, oy, ctrl, topo, fx);
     }
 
     // Reserve content rect so the parent BeginChild scrolls to fit.
     ImGui_SetCursorScreenPos(ctx, oxd, oyd);
-    ImGui_Dummy(ctx, ds.width, ds.height);
+    ImGui_Dummy(ctx, W, H);
 }
 
 // Render the Editor-View. Pre-condition: g_editingMatch is non-empty and
@@ -3093,16 +3128,22 @@ void drawFxLearnEditor_(ImGui_Context* ctx)
     ImGui_GetContentRegionAvail(ctx, &avX, &avY);
     if (avX < 200.0) avX = 600.0;   // safety for embedded contexts
     if (avY < 200.0) avY = 360.0;
-    // Non-const because ImGui_BeginChild takes double* (in/out for the
-    // size hint). WDL's macros also #define min/max, so std::min has to
-    // be parenthesised to dodge the macro.
-    double leftW  = avX * 0.52;
-    double rightW = avX - leftW - 12.0;  // gutter
+    // UC1 mockup is 860 px wide — give the schematic pane the lion's
+    // share of the available width. Right (param-list) pane gets the
+    // remainder; child has horizontal scrollbar if the window's narrow
+    // enough that 860 still doesn't fit.
+    double leftW  = avX * 0.72;
+    double rightW = avX - leftW - 12.0;
+    if (rightW < 280.0) {
+        rightW = 280.0;
+        leftW  = avX - rightW - 12.0;
+    }
 
-    // Left pane — vector schematic of the canonical SSL 360 Link
-    // topology. Slots render as colour-coded pads; click to listen,
-    // drag a param onto a pad to bind, right-click for context menu.
-    int childFlags = 0, winFlags = 0;
+    // Left pane — UC1 hardware face mockup. Knobs / toggles map to SSL
+    // 360 Link slots; click to listen, drag a param onto a knob to bind,
+    // right-click for Inverted/Clear context menu.
+    int childFlags = 0;
+    int winFlags   = ImGui_WindowFlags_HorizontalScrollbar;
     double hLeft = avY - 8.0;
     if (ImGui_BeginChild(ctx, "fxl_slots", &leftW, &hLeft,
                          &childFlags, &winFlags)) {
@@ -3113,8 +3154,9 @@ void drawFxLearnEditor_(ImGui_Context* ctx)
     ImGui_SameLine(ctx, nullptr, nullptr);
 
     // Right pane — param list.
+    int rightWinFlags = 0;
     if (ImGui_BeginChild(ctx, "fxl_params", &rightW, &hLeft,
-                         &childFlags, &winFlags)) {
+                         &childFlags, &rightWinFlags)) {
         if (!fx.ok) {
             ImGui_TextDisabled(ctx, "Insert a matching FX to list its params.");
         } else {
