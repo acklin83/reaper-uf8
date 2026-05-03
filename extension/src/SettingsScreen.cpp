@@ -10,7 +10,9 @@
 
 #include "Bindings.h"
 #include "CsiImport.h"
+#include "PluginMap.h"
 #include "Protocol.h"
+#include "UserPluginCatalog.h"
 #include "reaper_imgui_functions.h"
 
 // Forward declarations of accessors defined in main.cpp. Same pattern as
@@ -2205,20 +2207,281 @@ void SettingsScreen::drawSoftKeyBanks(ImGui_Context* ctx)
 }
 
 // ---- FX Learn -------------------------------------------------------------
-// Phase 2.5d-A: visual mapping UI for third-party plugins. First slice
-// renders the UC1 schematic so the layout / palette / labels are visible
-// while the data-model + drag-and-drop wiring lands. Plan:
-//   docs/plan-fx-learn-and-multi-instance.md
+// Phase 2.5d-A Step 3: Master-View. Lists every UserPluginMap in the
+// catalog, lets the user toggle isDefault per domain, delete a map, or
+// add a new one with a small inline form. Editor-View (Step 3b) adds
+// the schematic + drag-and-drop on top. See:
+//   docs/plan-fx-learn-and-multi-instance.md §"Master-View — Liste + CRUD"
+namespace {
+
+// Inline form state for "+ New" / per-row error reporting. File-scope
+// statics — same pattern as the bindings editor's transient buffers.
+char        g_newMatch[128]      = {};
+char        g_newDisplay[8]      = {};   // 4 chars + NUL, padded for slack
+int         g_newDomain          = 1;    // 1=CS, 2=BC. 0=None reserved.
+std::string g_newError;                  // transient inline error text
+std::string g_pendingDeleteMatch;        // populated when the confirm popup is open
+std::string g_lastSaveError;             // last persistence error, sticky until next save
+
+const char* domainLabel_(uf8::Domain d)
+{
+    switch (d) {
+        case uf8::Domain::ChannelStrip: return "CS";
+        case uf8::Domain::BusComp:      return "BC";
+        default:                        return "—";
+    }
+}
+
+void persistAndReport_()
+{
+    using uf8::user_plugins::SaveResult;
+    g_lastSaveError.clear();
+    switch (uf8::user_plugins::save()) {
+        case SaveResult::Ok:        break;
+        case SaveResult::Collision: g_lastSaveError = "Save refused: a match collides with a built-in plugin map."; break;
+        case SaveResult::IoError:   g_lastSaveError = "Save failed: could not write user_plugins.json (see /tmp/rea_sixty.log)."; break;
+    }
+}
+
+} // namespace
+
 void SettingsScreen::drawFxLearn(ImGui_Context* ctx)
 {
+    using namespace uf8;
+
     ImGui_Text(ctx, "FX Learn — User Plugin Maps");
-    ImGui_Text(ctx, "");
-    ImGui_Text(ctx, "Map third-party plugins as virtual Channel-Strip / Bus-Comp.");
-    ImGui_Text(ctx, "TODO: + New / Import / Master-View / Editor (per docs/plan-fx-learn-and-multi-instance.md).");
-    ImGui_Text(ctx, "");
+    ImGui_Spacing(ctx);
+    ImGui_TextWrapped(ctx,
+        "Teach third-party plug-ins to behave as virtual Channel-Strip or "
+        "Bus-Comp. Built-in maps (SSL CS 2 / 4K B/E/G / BC 2 / 360 Link) "
+        "always win — user maps can't shadow them.");
+    ImGui_Spacing(ctx);
+
+    if (ImGui_Button(ctx, "+ New##fxl_new", nullptr, nullptr)) {
+        std::memset(g_newMatch,   0, sizeof(g_newMatch));
+        std::memset(g_newDisplay, 0, sizeof(g_newDisplay));
+        g_newDomain = 1;
+        g_newError.clear();
+        ImGui_OpenPopup(ctx, "fxl_new_popup", nullptr);
+    }
+    ImGui_SameLine(ctx, nullptr, nullptr);
+    ImGui_TextDisabled(ctx, "Import / Export — TODO");
+
+    if (!g_lastSaveError.empty()) {
+        ImGui_Spacing(ctx);
+        // Use TextColored via packed RGBA (red, fully opaque).
+        ImGui_TextColored(ctx, 0xCC4444FF, g_lastSaveError.c_str());
+    }
+
+    ImGui_Spacing(ctx);
     ImGui_Separator(ctx);
-    ImGui_Text(ctx, "UC1 Schematic (decorative preview):");
-    drawUc1Vector(ctx);
+    ImGui_Spacing(ctx);
+
+    const auto& cat = user_plugins::get();
+
+    if (cat.maps.empty()) {
+        ImGui_TextDisabled(ctx,
+            "No user plugin maps yet. Click '+ New' to teach a third-party "
+            "plug-in.");
+    } else {
+        const int kCols = 6;
+        int tblFlags = 0;  // default: borders=outer, no row-bg
+        if (ImGui_BeginTable(ctx, "fxl_master", kCols, &tblFlags,
+                             nullptr, nullptr, nullptr)) {
+            int wFlag = 0;
+            double wDefault = 36.0, wShort = 64.0, wMatch = 240.0,
+                   wDomain = 50.0, wSlots = 64.0, wActions = 100.0;
+            ImGui_TableSetupColumn(ctx, "Default", &wFlag, &wDefault, nullptr);
+            ImGui_TableSetupColumn(ctx, "Short",   &wFlag, &wShort,   nullptr);
+            ImGui_TableSetupColumn(ctx, "Match",   &wFlag, &wMatch,   nullptr);
+            ImGui_TableSetupColumn(ctx, "Domain",  &wFlag, &wDomain,  nullptr);
+            ImGui_TableSetupColumn(ctx, "Slots",   &wFlag, &wSlots,   nullptr);
+            ImGui_TableSetupColumn(ctx, "Actions", &wFlag, &wActions, nullptr);
+            ImGui_TableHeadersRow(ctx);
+
+            // Index loop so per-row IDs are stable. A drop while iterating
+            // would invalidate references; defer destructive actions to
+            // post-loop via the popup.
+            for (size_t i = 0; i < cat.maps.size(); ++i) {
+                const UserPluginMap& m = cat.maps[i];
+
+                ImGui_TableNextRow(ctx, nullptr, nullptr);
+
+                // Default — clickable star toggle.
+                ImGui_TableNextColumn(ctx);
+                {
+                    char btnId[64];
+                    std::snprintf(btnId, sizeof(btnId),
+                        "%s##fxl_def_%zu", m.isDefault ? "*" : "-", i);
+                    if (ImGui_Button(ctx, btnId, nullptr, nullptr)) {
+                        UserPluginMap copy = m;
+                        copy.isDefault = !copy.isDefault;
+                        user_plugins::upsert(std::move(copy));
+                        persistAndReport_();
+                    }
+                }
+
+                ImGui_TableNextColumn(ctx);
+                ImGui_Text(ctx,
+                    m.displayShort.empty() ? "USR" : m.displayShort.c_str());
+
+                ImGui_TableNextColumn(ctx);
+                ImGui_Text(ctx, m.match.c_str());
+
+                ImGui_TableNextColumn(ctx);
+                ImGui_Text(ctx, domainLabel_(m.domain));
+
+                ImGui_TableNextColumn(ctx);
+                {
+                    char buf[32];
+                    std::snprintf(buf, sizeof(buf), "%zu", m.slots.size());
+                    ImGui_Text(ctx, buf);
+                }
+
+                ImGui_TableNextColumn(ctx);
+                {
+                    // Edit lands in Step 3b — show as disabled placeholder.
+                    char editId[64];
+                    std::snprintf(editId, sizeof(editId),
+                                  "Edit##fxl_edit_%zu", i);
+                    int dis = ImGui_SelectableFlags_Disabled;
+                    bool sel = false;
+                    double w = 40.0, h = 0.0;
+                    ImGui_Selectable(ctx, editId, &sel, &dis, &w, &h);
+
+                    ImGui_SameLine(ctx, nullptr, nullptr);
+                    char delId[64];
+                    std::snprintf(delId, sizeof(delId),
+                                  "Del##fxl_del_%zu", i);
+                    if (ImGui_Button(ctx, delId, nullptr, nullptr)) {
+                        g_pendingDeleteMatch = m.match;
+                        ImGui_OpenPopup(ctx, "fxl_del_popup", nullptr);
+                    }
+                }
+            }
+
+            ImGui_EndTable(ctx);
+        }
+    }
+
+    // ---- "+ New" popup ----------------------------------------------------
+    if (ImGui_BeginPopupModal(ctx, "fxl_new_popup", nullptr, nullptr)) {
+        ImGui_Text(ctx, "New User Plugin Map");
+        ImGui_Spacing(ctx);
+
+        ImGui_Text(ctx, "FX-name match (substring of TrackFX_GetFXName):");
+        ImGui_InputTextWithHint(ctx, "##fxl_new_match",
+            "e.g. 'FabFilter Pro-Q 4'",
+            g_newMatch, static_cast<int>(sizeof(g_newMatch)),
+            nullptr, nullptr);
+
+        ImGui_Spacing(ctx);
+        ImGui_Text(ctx, "4-char display label (scribble-strip zone):");
+        // displayShort caps at 4 chars; back the field with a 5-byte buf.
+        ImGui_InputTextWithHint(ctx, "##fxl_new_short",
+            "FFP4",
+            g_newDisplay, 5, nullptr, nullptr);
+
+        ImGui_Spacing(ctx);
+        ImGui_Text(ctx, "Domain:");
+        ImGui_SameLine(ctx, nullptr, nullptr);
+        if (ImGui_RadioButton(ctx, "Channel-Strip##fxl_new_cs", g_newDomain == 1))
+            g_newDomain = 1;
+        ImGui_SameLine(ctx, nullptr, nullptr);
+        if (ImGui_RadioButton(ctx, "Bus-Comp##fxl_new_bc", g_newDomain == 2))
+            g_newDomain = 2;
+
+        if (!g_newError.empty()) {
+            ImGui_Spacing(ctx);
+            ImGui_TextColored(ctx, 0xCC4444FF, g_newError.c_str());
+        }
+
+        ImGui_Spacing(ctx);
+        ImGui_Separator(ctx);
+        ImGui_Spacing(ctx);
+
+        if (ImGui_Button(ctx, "Create##fxl_new_ok", nullptr, nullptr)) {
+            g_newError.clear();
+
+            std::string match = g_newMatch;
+            std::string disp  = g_newDisplay;
+            if (disp.size() > 4) disp.resize(4);
+
+            // Trim leading/trailing whitespace from the match. Inner spaces
+            // are preserved on purpose ('Pro-Q 4' is a real FX name).
+            auto trim = [](std::string& s) {
+                while (!s.empty() && (s.front() == ' ' || s.front() == '\t')) s.erase(s.begin());
+                while (!s.empty() && (s.back()  == ' ' || s.back()  == '\t')) s.pop_back();
+            };
+            trim(match);
+
+            if (match.empty()) {
+                g_newError = "Match string is required.";
+            } else if (disp.empty()) {
+                g_newError = "Display label is required (1..4 ASCII chars).";
+            } else if (g_newDomain != 1 && g_newDomain != 2) {
+                g_newError = "Pick a domain.";
+            } else if (user_plugins::collidesWithBuiltin(match)) {
+                g_newError = "That match string collides with a built-in plugin map.";
+            } else {
+                // Reject duplicate match within the catalog up-front so the
+                // user gets a clear message instead of a silent overwrite.
+                bool dup = false;
+                for (const auto& existing : user_plugins::get().maps) {
+                    if (existing.match == match) { dup = true; break; }
+                }
+                if (dup) {
+                    g_newError = "A user map with that match already exists.";
+                } else {
+                    UserPluginMap m;
+                    m.match        = match;
+                    m.displayShort = disp;
+                    m.domain       = (g_newDomain == 2) ? Domain::BusComp
+                                                        : Domain::ChannelStrip;
+                    m.isDefault    = false;
+                    user_plugins::upsert(std::move(m));
+                    persistAndReport_();
+                    if (g_lastSaveError.empty())
+                        ImGui_CloseCurrentPopup(ctx);
+                    else
+                        g_newError = g_lastSaveError;  // surfaced in popup too
+                }
+            }
+        }
+        ImGui_SameLine(ctx, nullptr, nullptr);
+        if (ImGui_Button(ctx, "Cancel##fxl_new_cancel", nullptr, nullptr)) {
+            ImGui_CloseCurrentPopup(ctx);
+        }
+        ImGui_EndPopup(ctx);
+    }
+
+    // ---- Delete confirm popup --------------------------------------------
+    if (ImGui_BeginPopupModal(ctx, "fxl_del_popup", nullptr, nullptr)) {
+        ImGui_Text(ctx, "Delete user plugin map?");
+        ImGui_Spacing(ctx);
+        char line[256];
+        std::snprintf(line, sizeof(line),
+            "  match: %s", g_pendingDeleteMatch.c_str());
+        ImGui_Text(ctx, line);
+        ImGui_Spacing(ctx);
+        ImGui_TextWrapped(ctx,
+            "Tracks hosting this plug-in fall back to no mapping.");
+        ImGui_Spacing(ctx);
+
+        if (ImGui_Button(ctx, "Delete##fxl_del_ok", nullptr, nullptr)) {
+            if (!g_pendingDeleteMatch.empty())
+                user_plugins::removeByMatch(g_pendingDeleteMatch);
+            g_pendingDeleteMatch.clear();
+            persistAndReport_();
+            ImGui_CloseCurrentPopup(ctx);
+        }
+        ImGui_SameLine(ctx, nullptr, nullptr);
+        if (ImGui_Button(ctx, "Cancel##fxl_del_cancel", nullptr, nullptr)) {
+            g_pendingDeleteMatch.clear();
+            ImGui_CloseCurrentPopup(ctx);
+        }
+        ImGui_EndPopup(ctx);
+    }
 }
 
 // ---- Modes ----------------------------------------------------------------
