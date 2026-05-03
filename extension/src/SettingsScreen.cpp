@@ -14,6 +14,7 @@
 #include "Protocol.h"
 #include "UserPluginCatalog.h"
 #include "reaper_imgui_functions.h"
+#include "reaper_plugin_functions.h"
 
 // Forward declarations of accessors defined in main.cpp. Same pattern as
 // reasixty_followSelectedInMixer / reasixty_toggleMixerWindow — keeps the
@@ -2207,11 +2208,12 @@ void SettingsScreen::drawSoftKeyBanks(ImGui_Context* ctx)
 }
 
 // ---- FX Learn -------------------------------------------------------------
-// Phase 2.5d-A Step 3: Master-View. Lists every UserPluginMap in the
-// catalog, lets the user toggle isDefault per domain, delete a map, or
-// add a new one with a small inline form. Editor-View (Step 3b) adds
-// the schematic + drag-and-drop on top. See:
-//   docs/plan-fx-learn-and-multi-instance.md §"Master-View — Liste + CRUD"
+// Phase 2.5d-A Step 3: Master-View + Editor-View.
+//   3a Master-View — table of UserPluginMaps with CRUD.
+//   3b Editor-View — slot list (canonical SSL 360 Link topology) on the
+//      left, FX-param list on the right, click-to-listen + click-param
+//      to bind. Drag-and-drop and vector schematic come in 3c.
+// See: docs/plan-fx-learn-and-multi-instance.md §"Editor-View"
 namespace {
 
 // Inline form state for "+ New" / per-row error reporting. File-scope
@@ -2222,6 +2224,14 @@ int         g_newDomain          = 1;    // 1=CS, 2=BC. 0=None reserved.
 std::string g_newError;                  // transient inline error text
 std::string g_pendingDeleteMatch;        // populated when the confirm popup is open
 std::string g_lastSaveError;             // last persistence error, sticky until next save
+
+// Editor-View state. `g_editingMatch` is the current map's `match`
+// substring; empty = master-view. `g_listeningLinkIdx == -1` means no
+// slot is awaiting a param bind. Param-list filter is sticky between
+// renders so the search query survives a tab switch.
+std::string g_editingMatch;
+int         g_listeningLinkIdx = -1;
+char        g_paramFilter[64]  = {};
 
 const char* domainLabel_(uf8::Domain d)
 {
@@ -2243,11 +2253,440 @@ void persistAndReport_()
     }
 }
 
+// ---- Editor helpers --------------------------------------------------------
+
+// Pick the canonical slot topology for a domain. The SSL 360 Link CS map
+// has the broadest CS slot coverage (input/EQ/dyn/output incl. ext::*
+// extension slots); the SSL 360 Link Bus Compressor map covers BC.
+// Falling back to the first map of that domain keeps the editor
+// renderable even if the Link maps are renamed in future.
+const uf8::PluginMap* canonicalTopology_(uf8::Domain d)
+{
+    const uf8::PluginMap* fallback = nullptr;
+    for (const auto& m : uf8::allPluginMaps()) {
+        if (m.domain != d) continue;
+        if (!fallback) fallback = &m;
+        if (d == uf8::Domain::ChannelStrip &&
+            std::strcmp(m.displayShort, "Link") == 0) return &m;
+        if (d == uf8::Domain::BusComp &&
+            std::strcmp(m.displayShort, "L-BC") == 0) return &m;
+    }
+    return fallback;
+}
+
+// Find the first FX (across all tracks) whose name contains the user
+// map's match substring. The editor needs SOME live FX instance to
+// enumerate parameters from; we don't care which track. Master track
+// is included by checking GetMasterTrack first. Returns ok=false when
+// nothing matches (the param list shows a hint then).
+struct EditingFx { MediaTrack* tr = nullptr; int fxIdx = -1; bool ok = false; };
+
+EditingFx findEditingFx_(const std::string& match)
+{
+    if (match.empty()) return {};
+    char buf[512];
+
+    auto checkTrack = [&](MediaTrack* tr) -> EditingFx {
+        if (!tr) return {};
+        const int n = TrackFX_GetCount(tr);
+        for (int i = 0; i < n; ++i) {
+            if (TrackFX_GetFXName(tr, i, buf, sizeof(buf)) &&
+                std::strstr(buf, match.c_str()) != nullptr) {
+                return { tr, i, true };
+            }
+        }
+        return {};
+    };
+
+    // Prefer the last-touched track — if the user just clicked on a
+    // track hosting the plugin, this picks the right instance.
+    if (auto hit = checkTrack(GetLastTouchedTrack()); hit.ok) return hit;
+    if (auto hit = checkTrack(GetMasterTrack(nullptr));   hit.ok) return hit;
+    const int trackCount = CountTracks(nullptr);
+    for (int t = 0; t < trackCount; ++t) {
+        if (auto hit = checkTrack(GetTrack(nullptr, t)); hit.ok) return hit;
+    }
+    return {};
+}
+
+// Find the existing vst3Param (if any) bound to `linkIdx` for the map
+// currently being edited. Returns -1 when not yet mapped.
+int mappedVst3For_(int linkIdx)
+{
+    for (const auto& m : uf8::user_plugins::get().maps) {
+        if (m.match != g_editingMatch) continue;
+        for (const auto& s : m.slots) {
+            if (s.linkIdx == linkIdx) return s.vst3Param;
+        }
+        break;
+    }
+    return -1;
+}
+
+// Bind / overwrite a slot's vst3Param on the editing map, then save.
+void bindSlot_(int linkIdx, int vst3Param)
+{
+    if (g_editingMatch.empty() || linkIdx < 0 || vst3Param < 0) return;
+
+    auto cat = uf8::user_plugins::get();   // copy
+    bool changed = false;
+    for (auto& m : cat.maps) {
+        if (m.match != g_editingMatch) continue;
+        bool replaced = false;
+        for (auto& s : m.slots) {
+            if (s.linkIdx == linkIdx) {
+                s.vst3Param = vst3Param;
+                replaced = true;
+                break;
+            }
+        }
+        if (!replaced) {
+            uf8::UserLinkSlot s{};
+            s.linkIdx   = linkIdx;
+            s.vst3Param = vst3Param;
+            s.inverted  = false;
+            m.slots.push_back(s);
+        }
+        uf8::user_plugins::upsert(m);
+        changed = true;
+        break;
+    }
+    if (changed) persistAndReport_();
+}
+
+// Remove a slot binding from the editing map.
+void unbindSlot_(int linkIdx)
+{
+    if (g_editingMatch.empty() || linkIdx < 0) return;
+    auto cat = uf8::user_plugins::get();
+    for (auto& m : cat.maps) {
+        if (m.match != g_editingMatch) continue;
+        auto before = m.slots.size();
+        m.slots.erase(
+            std::remove_if(m.slots.begin(), m.slots.end(),
+                [&](const uf8::UserLinkSlot& s) { return s.linkIdx == linkIdx; }),
+            m.slots.end());
+        if (m.slots.size() != before) {
+            uf8::user_plugins::upsert(m);
+            persistAndReport_();
+        }
+        break;
+    }
+}
+
+// Toggle the inverted-flag on a mapped slot.
+void toggleInverted_(int linkIdx)
+{
+    if (g_editingMatch.empty() || linkIdx < 0) return;
+    auto cat = uf8::user_plugins::get();
+    for (auto& m : cat.maps) {
+        if (m.match != g_editingMatch) continue;
+        for (auto& s : m.slots) {
+            if (s.linkIdx == linkIdx) {
+                s.inverted = !s.inverted;
+                uf8::user_plugins::upsert(m);
+                persistAndReport_();
+                return;
+            }
+        }
+        break;
+    }
+}
+
+// Render the Editor-View. Pre-condition: g_editingMatch is non-empty and
+// names a map currently in the catalog. Caller is drawFxLearn.
+void drawFxLearnEditor_(ImGui_Context* ctx)
+{
+    using namespace uf8;
+
+    // Resolve the editing map. If the catalog no longer contains it
+    // (e.g. user deleted via another path), bail back to master-view.
+    const UserPluginMap* editing = nullptr;
+    for (const auto& m : user_plugins::get().maps) {
+        if (m.match == g_editingMatch) { editing = &m; break; }
+    }
+    if (!editing) {
+        g_editingMatch.clear();
+        g_listeningLinkIdx = -1;
+        return;
+    }
+
+    // ---- Header / breadcrumb --------------------------------------------
+    if (ImGui_Button(ctx, "<- All maps##fxl_back", nullptr, nullptr)) {
+        g_editingMatch.clear();
+        g_listeningLinkIdx = -1;
+        return;
+    }
+    ImGui_SameLine(ctx, nullptr, nullptr);
+    char hdr[256];
+    std::snprintf(hdr, sizeof(hdr), "  Editing: %s  [%s]",
+                  editing->match.c_str(), domainLabel_(editing->domain));
+    ImGui_Text(ctx, hdr);
+
+    // Find a live FX instance to enumerate params from.
+    const EditingFx fx = findEditingFx_(editing->match);
+    if (!fx.ok) {
+        ImGui_Spacing(ctx);
+        ImGui_TextColored(ctx, 0xFFC04CFF,
+            "No FX matching that name found on any track. Insert one to "
+            "see its parameter list.");
+    } else {
+        // Track index for the user's reference. -1 = master.
+        int trIdx = -1;
+        const int trackCount = CountTracks(nullptr);
+        for (int t = 0; t < trackCount; ++t) {
+            if (GetTrack(nullptr, t) == fx.tr) { trIdx = t; break; }
+        }
+        char info[256];
+        char fxNameBuf[256] = {};
+        TrackFX_GetFXName(fx.tr, fx.fxIdx, fxNameBuf, sizeof(fxNameBuf));
+        if (trIdx >= 0)
+            std::snprintf(info, sizeof(info),
+                "  Reading params from: track %d, FX %d  '%s'",
+                trIdx + 1, fx.fxIdx + 1, fxNameBuf);
+        else
+            std::snprintf(info, sizeof(info),
+                "  Reading params from: master, FX %d  '%s'",
+                fx.fxIdx + 1, fxNameBuf);
+        ImGui_TextDisabled(ctx, info);
+    }
+
+    if (!g_lastSaveError.empty()) {
+        ImGui_Spacing(ctx);
+        ImGui_TextColored(ctx, 0xCC4444FF, g_lastSaveError.c_str());
+    }
+
+    ImGui_Spacing(ctx);
+    ImGui_Separator(ctx);
+    ImGui_Spacing(ctx);
+
+    // ---- Two-column body ------------------------------------------------
+    const PluginMap* topo = canonicalTopology_(editing->domain);
+    if (!topo) {
+        ImGui_TextDisabled(ctx,
+            "No canonical slot topology available for this domain.");
+        return;
+    }
+
+    double avX = 0.0, avY = 0.0;
+    ImGui_GetContentRegionAvail(ctx, &avX, &avY);
+    if (avX < 200.0) avX = 600.0;   // safety for embedded contexts
+    if (avY < 200.0) avY = 360.0;
+    // Non-const because ImGui_BeginChild takes double* (in/out for the
+    // size hint). WDL's macros also #define min/max, so std::min has to
+    // be parenthesised to dodge the macro.
+    double leftW  = avX * 0.52;
+    double rightW = avX - leftW - 12.0;  // gutter
+
+    // Left pane — slot list.
+    int childFlags = 0, winFlags = 0;
+    double hLeft = avY - 8.0;
+    if (ImGui_BeginChild(ctx, "fxl_slots", &leftW, &hLeft,
+                         &childFlags, &winFlags)) {
+        ImGui_Text(ctx, "Slots (canonical topology):");
+        ImGui_Spacing(ctx);
+
+        for (const auto& s : topo->slots) {
+            const int mapped = mappedVst3For_(s.linkIdx);
+            const bool isMapped    = (mapped >= 0);
+            const bool isListening = (g_listeningLinkIdx == s.linkIdx);
+
+            // Status glyph + colour.
+            const char* glyph = isListening ? "[L]"
+                              : isMapped    ? "[*]"
+                                            : "[ ]";
+            const int color  = isListening ? 0xFFE040FF
+                              : isMapped    ? 0x60C060FF
+                                            : 0x808080FF;
+            ImGui_TextColored(ctx, color, glyph);
+            ImGui_SameLine(ctx, nullptr, nullptr);
+
+            // Click-to-listen button. Label is the canonical slot name +
+            // current binding info. ID disambiguator includes linkIdx so
+            // two slots with the same name (shouldn't exist) still work.
+            char btn[160];
+            if (isMapped) {
+                // Look up the param name on the live FX, if available.
+                char pname[128] = {};
+                if (fx.ok) {
+                    TrackFX_GetParamName(fx.tr, fx.fxIdx, mapped,
+                                         pname, sizeof(pname));
+                }
+                std::snprintf(btn, sizeof(btn),
+                    "%-22s  ->  %3d  %s##fxl_slot_%d",
+                    s.name ? s.name : "(unnamed)",
+                    mapped, pname, s.linkIdx);
+            } else {
+                std::snprintf(btn, sizeof(btn),
+                    "%-22s     unmapped##fxl_slot_%d",
+                    s.name ? s.name : "(unnamed)", s.linkIdx);
+            }
+
+            if (isListening) {
+                ImGui_PushStyleColor(ctx, ImGui_Col_Button,        0xC0902080);
+                ImGui_PushStyleColor(ctx, ImGui_Col_ButtonHovered, 0xE0A02080);
+                ImGui_PushStyleColor(ctx, ImGui_Col_ButtonActive,  0xFFC04080);
+            }
+            double bw = leftW - 24.0, bh = 0.0;
+            if (ImGui_Button(ctx, btn, &bw, &bh)) {
+                g_listeningLinkIdx = isListening ? -1 : s.linkIdx;
+            }
+            if (isListening) ImGui_PopStyleColor(ctx, nullptr);  // pops 1 by default
+
+            // Per-slot trailing actions: invert + clear.
+            if (isMapped) {
+                ImGui_SameLine(ctx, nullptr, nullptr);
+                char invId[32];
+                std::snprintf(invId, sizeof(invId), "Inv##fxl_inv_%d", s.linkIdx);
+                if (ImGui_Button(ctx, invId, nullptr, nullptr)) {
+                    toggleInverted_(s.linkIdx);
+                }
+                ImGui_SameLine(ctx, nullptr, nullptr);
+                char xId[32];
+                std::snprintf(xId, sizeof(xId), "X##fxl_clr_%d", s.linkIdx);
+                if (ImGui_Button(ctx, xId, nullptr, nullptr)) {
+                    if (g_listeningLinkIdx == s.linkIdx)
+                        g_listeningLinkIdx = -1;
+                    unbindSlot_(s.linkIdx);
+                }
+            }
+        }
+
+        ImGui_EndChild(ctx);
+    }
+
+    ImGui_SameLine(ctx, nullptr, nullptr);
+
+    // Right pane — param list.
+    if (ImGui_BeginChild(ctx, "fxl_params", &rightW, &hLeft,
+                         &childFlags, &winFlags)) {
+        if (!fx.ok) {
+            ImGui_TextDisabled(ctx, "Insert a matching FX to list its params.");
+        } else {
+            char hint[160];
+            if (g_listeningLinkIdx >= 0) {
+                const LinkSlot* listenSlot =
+                    findSlotByLinkIdx(*topo, g_listeningLinkIdx);
+                std::snprintf(hint, sizeof(hint),
+                    "Click a parameter to bind it to: %s",
+                    listenSlot ? listenSlot->name : "(slot)");
+                ImGui_TextColored(ctx, 0xFFE040FF, hint);
+            } else {
+                ImGui_TextDisabled(ctx,
+                    "Click a slot on the left to start listening.");
+            }
+            ImGui_Spacing(ctx);
+
+            ImGui_Text(ctx, "Filter:");
+            ImGui_SameLine(ctx, nullptr, nullptr);
+            double filterW = rightW - 80.0;
+            if (filterW < 80.0) filterW = 80.0;
+            // No SetNextItemWidth in this ReaImGui sig set; use plain
+            // InputTextWithHint at default width.
+            ImGui_InputTextWithHint(ctx, "##fxl_param_filter",
+                "type to filter...", g_paramFilter,
+                static_cast<int>(sizeof(g_paramFilter)),
+                nullptr, nullptr);
+            ImGui_Spacing(ctx);
+            ImGui_Separator(ctx);
+            ImGui_Spacing(ctx);
+
+            // Build a quick reverse-map: vst3Param -> linkIdx (any of
+            // the editing map's slots). Lets us tag the "Already mapped
+            // -> Slot Name" badge in the param list.
+            std::unordered_map<int, int> usedBy;
+            for (const auto& slt : editing->slots) {
+                usedBy[slt.vst3Param] = slt.linkIdx;
+            }
+
+            const int paramCount = TrackFX_GetNumParams(fx.tr, fx.fxIdx);
+            // Cap iteration so a 5000-param plugin doesn't tank the
+            // frame; the user can always sharpen the filter to reach
+            // the rest. 1024 is comfortably above any musical plugin.
+            const int kMaxParams = 1024;
+            const int n = (std::min)(paramCount, kMaxParams);
+            const std::string filt = g_paramFilter;
+
+            char pname[128];
+            for (int p = 0; p < n; ++p) {
+                pname[0] = 0;
+                TrackFX_GetParamName(fx.tr, fx.fxIdx, p, pname, sizeof(pname));
+
+                if (!filt.empty()) {
+                    if (std::string(pname).find(filt) == std::string::npos)
+                        continue;
+                }
+
+                // Visually mark already-mapped params by appending the
+                // bound slot name as a suffix in the button label.
+                char rowLbl[256];
+                auto it = usedBy.find(p);
+                if (it != usedBy.end()) {
+                    const LinkSlot* boundSlot =
+                        findSlotByLinkIdx(*topo, it->second);
+                    std::snprintf(rowLbl, sizeof(rowLbl),
+                        "  [%4d] %-32s  -> %s##fxl_param_%d",
+                        p, pname,
+                        boundSlot ? boundSlot->name : "(slot)", p);
+                } else {
+                    std::snprintf(rowLbl, sizeof(rowLbl),
+                        "  [%4d] %-32s##fxl_param_%d",
+                        p, pname, p);
+                }
+
+                bool selected = false;
+                int  selFlags = ImGui_SelectableFlags_AllowDoubleClick;
+                if (ImGui_Selectable(ctx, rowLbl, &selected, &selFlags,
+                                     nullptr, nullptr)) {
+                    if (g_listeningLinkIdx >= 0) {
+                        bindSlot_(g_listeningLinkIdx, p);
+                        // Auto-advance: jump listening to the next still-
+                        // unmapped slot in topology order so quick mass
+                        // mapping doesn't need an extra click per slot.
+                        bool advanced = false;
+                        bool past = false;
+                        for (const auto& cs : topo->slots) {
+                            if (!past) {
+                                if (cs.linkIdx == g_listeningLinkIdx) past = true;
+                                continue;
+                            }
+                            if (mappedVst3For_(cs.linkIdx) < 0) {
+                                g_listeningLinkIdx = cs.linkIdx;
+                                advanced = true;
+                                break;
+                            }
+                        }
+                        if (!advanced) g_listeningLinkIdx = -1;
+                    }
+                }
+            }
+
+            if (paramCount > kMaxParams) {
+                ImGui_Spacing(ctx);
+                char overflow[96];
+                std::snprintf(overflow, sizeof(overflow),
+                    "(showing first %d of %d params — use filter)",
+                    kMaxParams, paramCount);
+                ImGui_TextDisabled(ctx, overflow);
+            }
+        }
+        ImGui_EndChild(ctx);
+    }
+}
+
 } // namespace
 
 void SettingsScreen::drawFxLearn(ImGui_Context* ctx)
 {
     using namespace uf8;
+
+    // Editor-View takes over when a map is being edited. Master-View is
+    // the default. Switch is driven by g_editingMatch (set by the Edit
+    // button below; cleared by the editor's "<- All maps" breadcrumb).
+    if (!g_editingMatch.empty()) {
+        drawFxLearnEditor_(ctx);
+        return;
+    }
 
     ImGui_Text(ctx, "FX Learn — User Plugin Maps");
     ImGui_Spacing(ctx);
@@ -2340,14 +2779,14 @@ void SettingsScreen::drawFxLearn(ImGui_Context* ctx)
 
                 ImGui_TableNextColumn(ctx);
                 {
-                    // Edit lands in Step 3b — show as disabled placeholder.
                     char editId[64];
                     std::snprintf(editId, sizeof(editId),
                                   "Edit##fxl_edit_%zu", i);
-                    int dis = ImGui_SelectableFlags_Disabled;
-                    bool sel = false;
-                    double w = 40.0, h = 0.0;
-                    ImGui_Selectable(ctx, editId, &sel, &dis, &w, &h);
+                    if (ImGui_Button(ctx, editId, nullptr, nullptr)) {
+                        g_editingMatch     = m.match;
+                        g_listeningLinkIdx = -1;
+                        std::memset(g_paramFilter, 0, sizeof(g_paramFilter));
+                    }
 
                     ImGui_SameLine(ctx, nullptr, nullptr);
                     char delId[64];
