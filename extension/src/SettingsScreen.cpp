@@ -3141,9 +3141,15 @@ void SettingsScreen::drawFxLearn(ImGui_Context* ctx)
     } else {
         const int kCols = 6;
         int tblFlags = 0;  // default: borders=outer, no row-bg
+        // CRITICAL: each TableSetupColumn that passes a non-null init_width
+        // MUST also pass WidthFixed in flags — otherwise ImGui interprets
+        // the value as a stretch *weight*, which with values like 36..240
+        // explodes the column layout and bricks the parent window for the
+        // next frame (Begin returns false forever). See learnings.md
+        // "ReaImGui TableSetupColumn pixel-width trap" (2026-05-03).
         if (ImGui_BeginTable(ctx, "fxl_master", kCols, &tblFlags,
                              nullptr, nullptr, nullptr)) {
-            int wFlag = 0;
+            int wFlag = ImGui_TableColumnFlags_WidthFixed;
             double wDefault = 36.0, wShort = 64.0, wMatch = 240.0,
                    wDomain = 50.0, wSlots = 64.0, wActions = 100.0;
             ImGui_TableSetupColumn(ctx, "Default", &wFlag, &wDefault, nullptr);
