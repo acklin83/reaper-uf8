@@ -1626,6 +1626,8 @@ void ReaSixtySurface::SetSurfaceRecArm(MediaTrack* tr, bool arm)
 // on shutdown.
 void onTimer();
 void onUf8Input(const uint8_t* data, size_t len);
+void faderInputLog_(const char* kind, int strip, int pb14, int prevPb,
+                    int delta, const char* decision);
 void onMidiFromReaper(std::span<const uint8_t> bytes);
 
 ReaSixtySurface::ReaSixtySurface()
@@ -1881,10 +1883,14 @@ void onUf8Input(const uint8_t* data, size_t len)
                 const uint16_t prevPb = static_cast<uint16_t>(
                     (uint16_t(g_lastMsbOut[strip].load()) << 7) |
                      uint16_t(g_lastLsbOut[strip].load()));
-                if (std::abs(int(pb14) - int(prevPb)) >= 4) {
+                const int signedDelta = int(pb14) - int(prevPb);
+                if (std::abs(signedDelta) >= 4) {
                     g_lastMsbOut[strip].store(msb);
                     g_lastLsbOut[strip].store(lsb);
                     queueInput({PendingInput::VolumeAbs, strip, pbToLinearVolume(pb14)});
+                    faderInputLog_("POS", strip, pb14, prevPb, signedDelta, "ACC");
+                } else {
+                    faderInputLog_("POS", strip, pb14, prevPb, signedDelta, "REJ");
                 }
             }
         } else if (cmd == 0x22 && data[i + 2] == 0x03) {
@@ -2017,6 +2023,8 @@ void onUf8Input(const uint8_t* data, size_t len)
                                  static_cast<long long>(ms), strip, state);
                     std::fclose(lg);
                 }
+                faderInputLog_("TOUCH", strip, state, 0, 0,
+                               state ? "ON" : "OFF");
                 // UF8 in PM mode does not auto-release the fader motor
                 // on capacitive touch (that behaviour is only present in
                 // DAW/MCU mode), so we send the motor-limp command
@@ -4324,6 +4332,61 @@ custom_action_register_t g_actionToggleFaderCal{
 };
 int g_cmdToggleFaderCal = 0;
 
+// Diagnostic — log every inbound FF 21 03 fader-position frame plus
+// the deadband filter's accept/reject decision into a tab-separated
+// file so we can see exactly what the hardware emits vs what REAPER
+// receives. Off by default. Toggle via REASIXTY_TOGGLE_FADER_INPUT_LOG.
+//
+// Format: t_ms<TAB>kind<TAB>strip<TAB>pb14<TAB>prevPb<TAB>delta<TAB>decision
+//   kind = "POS" (position frame) | "TOUCH" (touch on/off)
+//   delta = signed pb14 - prevPb (positive = upward, negative = downward)
+//   decision = "ACC" (accepted, queued to REAPER) | "REJ" (filtered out)
+std::atomic<bool>             g_faderInputLog{false};
+std::mutex                    g_faderInputLogMutex;
+std::chrono::steady_clock::time_point g_faderInputLogStart{};
+
+void faderInputLog_(const char* kind, int strip, int pb14, int prevPb,
+                    int delta, const char* decision)
+{
+    if (!g_faderInputLog.load()) return;
+    std::lock_guard<std::mutex> lk(g_faderInputLogMutex);
+    static FILE* f = nullptr;
+    if (!f) {
+        f = std::fopen("/tmp/uf8_fader_input.log", "w");
+        if (!f) return;
+        std::fprintf(f, "t_ms\tkind\tstrip\tpb14\tprevPb\tdelta\tdecision\n");
+    }
+    const auto now = std::chrono::steady_clock::now();
+    const auto ms  = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now - g_faderInputLogStart).count();
+    std::fprintf(f, "%lld\t%s\t%d\t%d\t%d\t%+d\t%s\n",
+                 (long long)ms, kind, strip, pb14, prevPb, delta, decision);
+    std::fflush(f);
+}
+
+void toggleFaderInputLog()
+{
+    const bool now = !g_faderInputLog.load();
+    if (now) {
+        g_faderInputLogStart = std::chrono::steady_clock::now();
+        std::remove("/tmp/uf8_fader_input.log");
+        g_faderInputLog.store(true);
+        ShowConsoleMsg(
+            "Rea-Sixty: fader input log ON -> /tmp/uf8_fader_input.log\n"
+            "Pull a fader slowly once, then toggle OFF and send the file.\n");
+    } else {
+        g_faderInputLog.store(false);
+        ShowConsoleMsg(
+            "Rea-Sixty: fader input log OFF\n");
+    }
+}
+
+custom_action_register_t g_actionToggleFaderInputLog{
+    0, "REASIXTY_TOGGLE_FADER_INPUT_LOG",
+    "Rea-Sixty: Toggle fader input log (diagnostic)", nullptr,
+};
+int g_cmdToggleFaderInputLog = 0;
+
 // Diagnostic — replay the EXACT byte sequence captured from SSL360
 // at uc1_40 t=8.700 (first indicator frame in the sweep). Bypasses
 // our build* functions entirely. If this still doesn't paint the
@@ -4588,6 +4651,7 @@ bool hookCommand2(KbdSectionInfo* /*sec*/, int command,
     if (command == g_cmdProbeLegacyLed) { probeNextLegacyLedCell(); return true; }
     if (command == g_cmdFrameTrace)     { toggleFrameTrace();       return true; }
     if (command == g_cmdToggleFaderCal) { toggleFaderCal();         return true; }
+    if (command == g_cmdToggleFaderInputLog) { toggleFaderInputLog(); return true; }
     if (command == g_cmdUc1TestIndicator) { uc1FireTestIndicator();  return true; }
     if (command == g_cmdProbeGateGr)    { probeGateGrSources();     return true; }
     if (command == g_cmdDumpParams)     { dumpCsPluginParams();     return true; }
@@ -5674,6 +5738,7 @@ extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(
     g_cmdProbeLegacyLed = plugin_register("custom_action", &g_actionProbeLegacyLed);
     g_cmdFrameTrace     = plugin_register("custom_action", &g_actionFrameTrace);
     g_cmdToggleFaderCal = plugin_register("custom_action", &g_actionToggleFaderCal);
+    g_cmdToggleFaderInputLog = plugin_register("custom_action", &g_actionToggleFaderInputLog);
     g_cmdUc1TestIndicator = plugin_register("custom_action", &g_actionUc1TestIndicator);
     g_cmdProbeGateGr    = plugin_register("custom_action", &g_actionProbeGateGr);
     g_cmdDumpParams     = plugin_register("custom_action", &g_actionDumpParams);
