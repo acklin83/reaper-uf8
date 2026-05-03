@@ -446,10 +446,10 @@ void drawUf8Vector(ImGui_Context* ctx, ButtonId& sel)
         // Scribble LCD — show the live top-soft-key label. Resolution
         // mirrors the runtime render path:
         //   1. binding.shortPress[Plain].label   (user override)
-        //   2. SSL plug-in's softkey label for the current bank slot
+        //   2. SSL plug-in's softkey label for the current bank slot —
+        //      only when the binding is ssl_softkey (otherwise an empty
+        //      slot on a fresh layer would still display SSL labels)
         //   3. blank
-        // Bank-switch via the V-POT/Bank tiles updates this on the
-        // next render tick.
         rect_(c, sx + 4, 40, kStripW - 8, 58, 0x080C12FF, 0x444A55FF, 2.0);
         std::string scribble;
         {
@@ -457,9 +457,12 @@ void drawUf8Vector(ImGui_Context* ctx, ButtonId& sel)
                 uf8::bindings::getBinding(activeLayer, kStripTsk[i]);
             const auto& sp = bd.shortPress[
                 static_cast<int>(uf8::bindings::Modifier::Plain)];
+            const bool isSslSoftkey =
+                sp.type == uf8::bindings::ActionType::Builtin &&
+                sp.action == "ssl_softkey";
             if (!sp.label.empty()) {
                 scribble = sp.label;
-            } else if (sslLabels && sslLabels[i] && *sslLabels[i]) {
+            } else if (isSslSoftkey && sslLabels && sslLabels[i] && *sslLabels[i]) {
                 scribble = sslLabels[i];
             }
         }
