@@ -2960,6 +2960,43 @@ void drawFxLearnEditor_(ImGui_Context* ctx)
         ImGui_TextColored(ctx, 0xFFC04CFF,
             "No FX matching that name found on any track. Insert one to "
             "see its parameter list.");
+        ImGui_Spacing(ctx);
+
+        // Pick target: first selected track, else first track in project,
+        // else master. Surface the choice in the button label so the user
+        // doesn't have to guess where it landed.
+        MediaTrack* target = GetSelectedTrack(nullptr, 0);
+        const char* targetLabel = "selected track";
+        if (!target) {
+            target = GetTrack(nullptr, 0);
+            targetLabel = "first track";
+        }
+        if (!target) {
+            target = GetMasterTrack(nullptr);
+            targetLabel = "master track";
+        }
+
+        char insLabel[160];
+        std::snprintf(insLabel, sizeof(insLabel),
+            "Insert '%s' on %s##fxl_ins",
+            editing->match.c_str(), targetLabel);
+        if (target && ImGui_Button(ctx, insLabel, nullptr, nullptr)) {
+            // TrackFX_AddByName matches partial / fuzzy. instantiate=-1
+            // means "always add a new instance".
+            const int idx = TrackFX_AddByName(target, editing->match.c_str(),
+                                              /*recFX*/ false,
+                                              /*instantiate*/ -1);
+            if (idx >= 0) {
+                // 3 = show floating window so the user can wiggle controls
+                // and the GetLastTouchedFX poll picks them up.
+                TrackFX_Show(target, idx, 3);
+            } else {
+                g_lastSaveError =
+                    "Insert failed — REAPER couldn't find a plug-in matching "
+                    "the match string. Edit the match in the master view to "
+                    "match an installed plug-in name.";
+            }
+        }
     } else {
         // Plugin-selector combo. Preview shows the active instance's
         // label; opening the combo lists all matches across master + tracks.
