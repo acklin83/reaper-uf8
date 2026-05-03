@@ -820,15 +820,18 @@ void drawUc1Vector(ImGui_Context* ctx)
     rect_(c, kColCx, 12, kColCw, 420, 0x1A1E24FF, kAccentBC, 6.0);
     sectionLabel(kColCx + 14, 22, "BUS COMPRESSOR");
 
-    // SSL-style analog VU — cream face, black scale, red zone past
-    // 0 dB, ballistic needle. Pivot just below the visible face so
-    // the mechanism stays hidden, like a real Sifam meter.
+    // SSL Bus Comp GR meter — LCD-black face, blue scale, 0 left →
+    // 20 right (gain-reduction in dB, NOT input level). Red zone at
+    // the high-GR end. Ballistic needle with hidden pivot below the
+    // face, same Sifam mechanic as the original analog meter.
     {
         const float mx = kColCx + 30, my = 44;
         const float mw = kColCw - 60, mh = 80;
-        // Black bezel + cream face inset
+        // Outer bezel + LCD-black face inset (palette matches the
+        // 7-seg / LCD blocks in the Central Control panel).
         rect_(c, mx, my, mw, mh, 0x141416FF, 0x282A2EFF, 4.0);
-        rect_(c, mx + 4, my + 4, mw - 8, mh - 8, 0xE8DCB4FF, 0x806840FF, 2.0);
+        rect_(c, mx + 4, my + 4, mw - 8, mh - 8,
+              0x080C12FF, 0x444A55FF, 2.0);
         const float mcx = mx + mw / 2.0f;
         const float mcy = my + mh + 6;            // pivot below face
         const float ra  = 70;                     // outer scale radius
@@ -836,52 +839,54 @@ void drawUc1Vector(ImGui_Context* ctx)
         const float a0 = -3.14159265f * 130.0f / 180.0f;
         const float a1 = -3.14159265f *  50.0f / 180.0f;
         auto dBtoA = [&](float dB) {
-            const float t = (dB + 20.0f) / 23.0f;  // -20..+3
+            const float t = dB / 20.0f;            // 0..20
             return a0 + t * (a1 - a0);
         };
-        // Red zone arc from 0 dB to +3 dB — short multi-segment curve
+        constexpr uint32_t kVuBlue = 0x4499DDFF;   // matches LCD text
+        constexpr uint32_t kVuRed  = 0xC02020FF;
+        // Red zone arc from 15 dB → 20 dB (excessive GR end)
         {
             constexpr int kSegs = 10;
-            const float aZ0 = dBtoA(0.0f), aZ1 = dBtoA(3.0f);
+            const float aZ0 = dBtoA(15.0f), aZ1 = dBtoA(20.0f);
             for (int i = 0; i < kSegs; ++i) {
                 const float ta = aZ0 + (aZ1 - aZ0) * i / kSegs;
                 const float tb = aZ0 + (aZ1 - aZ0) * (i + 1) / kSegs;
                 line_(c,
                     mcx + std::cos(ta) * (ra - 1), mcy + std::sin(ta) * (ra - 1),
                     mcx + std::cos(tb) * (ra - 1), mcy + std::sin(tb) * (ra - 1),
-                    0xC02020FF, 2.5);
+                    kVuRed, 2.5);
             }
         }
-        // Tick marks: majors with labels at -20/-10/0/+3, minors elsewhere
+        // Tick marks: majors at 0/5/10/15/20, minors at 1/2/3/7
         struct Tick { float dB; const char* label; };
         const Tick ticks[] = {
-            {-20, "20"}, {-10, "10"}, {-7, ""}, {-5, ""}, {-3, ""},
-            {-2, ""}, {-1, ""}, {0, "0"}, {1, ""}, {2, ""}, {3, "3"}
+            {0, "0"}, {1, ""}, {2, ""}, {3, ""}, {5, "5"},
+            {7, ""}, {10, "10"}, {15, "15"}, {20, "20"}
         };
         for (const Tick& t : ticks) {
             const float a = dBtoA(t.dB);
-            const float tlen = (t.label[0] || t.dB == 0.0f) ? 8.0f : 5.0f;
+            const float tlen = t.label[0] ? 8.0f : 5.0f;
             const float x1 = mcx + std::cos(a) * ra,
                         y1 = mcy + std::sin(a) * ra;
             const float x2 = mcx + std::cos(a) * (ra - tlen),
                         y2 = mcy + std::sin(a) * (ra - tlen);
-            const uint32_t col = (t.dB > 0.0f) ? 0xC02020FF : 0x202020FF;
+            const uint32_t col = (t.dB >= 15.0f) ? kVuRed : kVuBlue;
             line_(c, x1, y1, x2, y2, col, 1.6);
             if (t.label[0]) {
                 const float lx = mcx + std::cos(a) * (ra - 16);
                 const float ly = mcy + std::sin(a) * (ra - 16);
-                drawTextCentered_(c, lx, ly, 0x202020FF, t.label);
+                drawTextCentered_(c, lx, ly, kVuBlue, t.label);
             }
         }
-        // Needle — mock reading at -3 dB
-        const float aN = dBtoA(-3.0f);
+        // Needle — mock reading at 7 dB of gain reduction
+        const float aN = dBtoA(7.0f);
         line_(c, mcx, mcy,
                  mcx + std::cos(aN) * (ra - 4),
                  mcy + std::sin(aN) * (ra - 4),
-                 0x141416FF, 2.0);
-        circle_(c, mcx, mcy, 3, 0x141416FF, 0);
-        // VU label inside the face, just below the arc
-        drawTextCentered_(c, mcx, my + mh - 12, 0x404040FF, "VU");
+                 kVuBlue, 2.0);
+        circle_(c, mcx, mcy, 3, kVuBlue, 0);
+        // "GR" badge inside the face
+        drawTextCentered_(c, mcx, my + mh - 12, kVuBlue, "GR");
     }
 
     // BC knob 4×2 grid: column 1 (Threshold / Attack / Ratio / SC HPF)
