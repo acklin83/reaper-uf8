@@ -2393,6 +2393,380 @@ void toggleInverted_(int linkIdx)
     }
 }
 
+// ---- Schematic layout -----------------------------------------------------
+// One pad per slot in a domain's canonical topology. Coordinates are local
+// to the schematic origin (0,0 = top-left of the canvas inside the left
+// child window). Width/height fixed per pad (60x24) for an even grid.
+//
+// linkIdx values must be a subset of the canonical topology (kSsl360LinkSlots
+// for CS, kSsl360LinkBcSlots for BC). Anything not present in the topology
+// gets a ghost-render placeholder ("n/a") — keeps the layout stable when
+// the canonical map changes.
+struct SchematicPad {
+    int         linkIdx;
+    float       x, y;
+    const char* shortLabel;   // 4-6 chars rendered inside the pad
+};
+
+struct SchematicSection {
+    const char* title;
+    float       x, y;
+};
+
+struct DomainSchematic {
+    const SchematicPad*     pads;
+    int                     padCount;
+    const SchematicSection* sections;
+    int                     sectionCount;
+    float                   width, height;
+};
+
+constexpr float kPadW = 60.0f, kPadH = 22.0f;
+
+// Channel-Strip canvas — 8 columns of 60px pads + 4px gaps == 508 px wide.
+// Section labels track the row above each cluster.
+constexpr SchematicSection kCsSections[] = {
+    { "INPUT",     4,    8 },
+    { "EQ",        4,   58 },
+    { "FILTERS",   4,  204 },
+    { "DYNAMICS",  4,  254 },
+    { "OUTPUT",    4,  362 },
+    { "EXTRAS",    4,  418 },
+};
+
+// Channel-Strip pads. linkIdx columns refer to kSsl360LinkSlots indices.
+constexpr SchematicPad kCsPads[] = {
+    // INPUT row
+    {  0,   4,  22, "BYP"   },
+    {  4,  68,  22, "IN"    },
+    {  5, 132,  22, "POL"   },
+    { 36, 196,  22, "S/C L" },
+
+    // EQ row 1: EqIn / EqType
+    { 15,   4,  72, "EQ IN" },
+    { 14,  68,  72, "TYPE"  },
+
+    // EQ columns: HF / HMF / LMF / LF (3 controls each, stacked rows)
+    //   row a (y=104): bell/Q
+    {  8,   4, 104, "HF BL" },
+    { 13,  68, 104, "HMF Q" },
+    { 18, 132, 104, "LMF Q" },
+    { 21, 196, 104, "LF BL" },
+    //   row b (y=128): gain
+    {  9,   4, 128, "HF GN" },
+    { 11,  68, 128, "HMF G" },
+    { 16, 132, 128, "LMF G" },
+    { 20, 196, 128, "LF GN" },
+    //   row c (y=152): freq
+    { 10,   4, 152, "HF FQ" },
+    { 12,  68, 152, "HMF F" },
+    { 17, 132, 152, "LMF F" },
+    { 19, 196, 152, "LF FQ" },
+
+    // FILTERS row
+    {  7,   4, 218, "HPF"   },
+    {  6,  68, 218, "LPF"   },
+
+    // DYNAMICS — DynIn + Comp row + Gate row
+    { 22,   4, 268, "DYN IN" },
+
+    {  27,  4, 296, "C THR" },
+    {  26, 68, 296, "C RAT" },
+    {  24,132, 296, "C ATK" },
+    {  28,196, 296, "C REL" },
+    {  23,260, 296, "C MIX" },
+    {  25,324, 296, "C PK"  },
+
+    {  30,  4, 324, "G THR" },
+    {  29, 68, 324, "G RNG" },
+    {  34,132, 324, "G ATK" },
+    {  31,196, 324, "G REL" },
+    {  32,260, 324, "G HLD" },
+    {  33,324, 324, "G/E"   },
+
+    // OUTPUT — width / pan / out / fader (FaderLevel highlighted)
+    {   2,  4, 376, "WID"   },
+    {   3, 68, 376, "PAN"   },
+    {  37,132, 376, "OUT"   },
+    {   1,196, 376, "FADER" },
+
+    // EXTRAS — quick-access, saturation, group sense
+    {  38,  4, 432, "QA1"   },
+    {  39, 68, 432, "QA2"   },
+    {  40,132, 432, "QA3"   },
+    {  41,196, 432, "QA4"   },
+    {  42,260, 432, "QA5"   },
+    {  43,324, 432, "QA6"   },
+    {  44,388, 432, "SAT"   },
+    {  45,452, 432, "SAT.I" },
+    {  46,516, 432, "GRP"   },
+};
+
+// Bus-Comp canvas — much smaller. One row of ratio/threshold/etc + a
+// second row for sidechain + group sense.
+constexpr SchematicSection kBcSections[] = {
+    { "COMPRESSOR", 4,   8 },
+    { "SIDECHAIN",  4,  84 },
+    { "EXTRAS",     4, 140 },
+};
+
+constexpr SchematicPad kBcPads[] = {
+    {  0,   4,  22, "BYP"  },
+    {  1,  68,  22, "THR"  },
+    {  5, 132,  22, "RAT"  },
+    {  3, 196,  22, "ATK"  },
+    {  4, 260,  22, "REL"  },
+    {  2, 324,  22, "MAKE" },
+    {  7, 388,  22, "MIX"  },
+
+    {  6,   4,  98, "S/C HPF" },
+
+    { 46,   4, 154, "GRP"  },
+};
+
+DomainSchematic schematicFor_(uf8::Domain d)
+{
+    switch (d) {
+        case uf8::Domain::ChannelStrip:
+            return { kCsPads,
+                     int(sizeof(kCsPads) / sizeof(kCsPads[0])),
+                     kCsSections,
+                     int(sizeof(kCsSections) / sizeof(kCsSections[0])),
+                     584.0f, 470.0f };
+        case uf8::Domain::BusComp:
+            return { kBcPads,
+                     int(sizeof(kBcPads) / sizeof(kBcPads[0])),
+                     kBcSections,
+                     int(sizeof(kBcSections) / sizeof(kBcSections[0])),
+                     460.0f, 200.0f };
+        default:
+            return { nullptr, 0, nullptr, 0, 0, 0 };
+    }
+}
+
+// Render one schematic pad. Combines the visual rect/text (via DrawList,
+// always drawn) with an InvisibleButton (so drag-drop targets and popups
+// can hook off the last-added item). State drives the colour:
+//   - listening : amber fill + outline
+//   - mapped    : green outline
+//   - unmapped  : flat dark fill
+// Returns true on left-click (caller toggles listening). Drag-drop accept
+// + right-click context popup are handled inline.
+void drawSchematicPad_(ImGui_Context* ctx,
+                       ImGui_DrawList* dl,
+                       float ox, float oy,
+                       const SchematicPad& pad,
+                       const uf8::PluginMap& topo,
+                       const EditingFx& fx)
+{
+    const uf8::LinkSlot* slot = uf8::findSlotByLinkIdx(topo, pad.linkIdx);
+    const int  mapped     = mappedVst3For_(pad.linkIdx);
+    const bool isMapped   = (mapped >= 0);
+    const bool isListen   = (g_listeningLinkIdx == pad.linkIdx);
+    const bool exists     = (slot != nullptr);
+
+    // Colours — match the Bindings-editor schematic palette so the
+    // FX-Learn view feels like part of the same family.
+    uint32_t fill, border, txt;
+    if (!exists) {
+        fill   = 0x14181EFF;
+        border = 0x2A3038FF;
+        txt    = 0x55595FFF;
+    } else if (isListen) {
+        fill   = 0x4A3A1AFF;
+        border = 0xFFE040FF;
+        txt    = 0xFFFFFFFF;
+    } else if (isMapped) {
+        fill   = 0x1F3A24FF;
+        border = 0x60C060FF;
+        txt    = 0xE0E0E0FF;
+    } else {
+        fill   = 0x252A33FF;
+        border = 0x4A5060FF;
+        txt    = 0xC0C4CAFF;
+    }
+
+    double rounding = 3.0;
+    ImGui_DrawList_AddRectFilled(dl, ox, oy, ox + kPadW, oy + kPadH,
+                                 fill, &rounding, nullptr);
+    ImGui_DrawList_AddRect(dl, ox, oy, ox + kPadW, oy + kPadH,
+                           border, &rounding, nullptr, nullptr);
+
+    // Centred label.
+    double tw = 0, th = 0;
+    ImGui_CalcTextSize(ctx, pad.shortLabel, &tw, &th, nullptr, nullptr);
+    ImGui_DrawList_AddText(dl,
+        ox + (kPadW - float(tw)) / 2.0f,
+        oy + (kPadH - float(th)) / 2.0f,
+        txt, pad.shortLabel);
+
+    // Inverted-flag mark — small "i" in upper-right corner.
+    if (isMapped) {
+        bool inv = false;
+        for (const auto& m : uf8::user_plugins::get().maps) {
+            if (m.match != g_editingMatch) continue;
+            for (const auto& s : m.slots) {
+                if (s.linkIdx == pad.linkIdx) { inv = s.inverted; break; }
+            }
+            break;
+        }
+        if (inv) {
+            ImGui_DrawList_AddText(dl, ox + kPadW - 8, oy + 1, 0xFFC04CFF, "i");
+        }
+    }
+
+    // ---- ImGui interaction layer over the pad ---------------------------
+    // SetCursorScreenPos + InvisibleButton makes this a real ImGui item so
+    // BeginDragDropTarget / BeginPopupContextItem hook off it correctly.
+    char btnId[32];
+    std::snprintf(btnId, sizeof(btnId), "##fxl_pad_%d", pad.linkIdx);
+    ImGui_SetCursorScreenPos(ctx, ox, oy);
+    int ibFlags = 0;
+    ImGui_InvisibleButton(ctx, btnId, kPadW, kPadH, &ibFlags);
+
+    // Left click = toggle listen. Disabled for slots not in the topology.
+    int lbtn = 0;
+    if (exists && ImGui_IsItemClicked(ctx, &lbtn) && lbtn == 0) {
+        g_listeningLinkIdx = isListen ? -1 : pad.linkIdx;
+    }
+
+    // Hover tooltip: long slot name + currently-bound param info. Only when
+    // the slot exists in the canonical topology.
+    if (exists && ImGui_IsItemHovered(ctx, nullptr)) {
+        char tip[256];
+        if (isMapped) {
+            char pname[128] = {};
+            if (fx.ok) {
+                TrackFX_GetParamName(fx.tr, fx.fxIdx, mapped,
+                                     pname, sizeof(pname));
+            }
+            std::snprintf(tip, sizeof(tip),
+                "%s\n  -> param %d  '%s'",
+                slot->name ? slot->name : "(slot)", mapped, pname);
+        } else {
+            std::snprintf(tip, sizeof(tip),
+                "%s\n  unmapped — drag a param here to bind",
+                slot->name ? slot->name : "(slot)");
+        }
+        ImGui_SetTooltip(ctx, tip);
+    }
+
+    // Drag-drop target — accept "FXL_PARAM" payload (vst3 param index as
+    // ASCII). Bind directly without going through the listening state.
+    if (exists && ImGui_BeginDragDropTarget(ctx)) {
+        char payload[16] = {};
+        int  dropFlags   = 0;
+        if (ImGui_AcceptDragDropPayload(ctx, "FXL_PARAM",
+                                        payload, int(sizeof(payload)),
+                                        &dropFlags)) {
+            const int p = std::atoi(payload);
+            if (p >= 0) {
+                bindSlot_(pad.linkIdx, p);
+                if (g_listeningLinkIdx == pad.linkIdx)
+                    g_listeningLinkIdx = -1;
+            }
+        }
+        ImGui_EndDragDropTarget(ctx);
+    }
+
+    // Right-click context menu — only meaningful when something is mapped.
+    // Open the popup and remember which slot it belongs to so the popup
+    // body can render the right actions.
+    if (exists && isMapped) {
+        char popId[40];
+        std::snprintf(popId, sizeof(popId), "fxl_ctx_%d", pad.linkIdx);
+        if (ImGui_BeginPopupContextItem(ctx, popId, nullptr)) {
+            char title[160];
+            std::snprintf(title, sizeof(title),
+                "%s  -> param %d",
+                slot->name ? slot->name : "(slot)", mapped);
+            ImGui_TextDisabled(ctx, title);
+            ImGui_Separator(ctx);
+
+            bool inverted = false;
+            for (const auto& m : uf8::user_plugins::get().maps) {
+                if (m.match != g_editingMatch) continue;
+                for (const auto& s : m.slots) {
+                    if (s.linkIdx == pad.linkIdx) { inverted = s.inverted; break; }
+                }
+                break;
+            }
+            char invLbl[40];
+            std::snprintf(invLbl, sizeof(invLbl),
+                inverted ? "Inverted [on]" : "Inverted [off]");
+            if (ImGui_MenuItem(ctx, invLbl, nullptr, nullptr, nullptr)) {
+                toggleInverted_(pad.linkIdx);
+            }
+            if (ImGui_MenuItem(ctx, "Clear binding", nullptr,
+                               nullptr, nullptr)) {
+                if (g_listeningLinkIdx == pad.linkIdx)
+                    g_listeningLinkIdx = -1;
+                unbindSlot_(pad.linkIdx);
+            }
+            ImGui_EndPopup(ctx);
+        }
+    }
+}
+
+// Render the full schematic into the current window. Caller owns the
+// surrounding child-window + scroll. Origin = current cursor screen pos.
+void drawFxLearnSchematic_(ImGui_Context* ctx,
+                           const uf8::PluginMap& topo,
+                           uf8::Domain domain,
+                           const EditingFx& fx)
+{
+    const DomainSchematic ds = schematicFor_(domain);
+    if (!ds.pads || ds.padCount == 0) {
+        ImGui_TextDisabled(ctx,
+            "(no schematic for this domain — slot list fallback TODO)");
+        return;
+    }
+
+    double oxd = 0, oyd = 0;
+    ImGui_GetCursorScreenPos(ctx, &oxd, &oyd);
+    const float ox = float(oxd), oy = float(oyd);
+
+    ImGui_DrawList* dl = ImGui_GetWindowDrawList(ctx);
+
+    // Backplate — subtle chassis tint behind the whole canvas. Keeps the
+    // schematic visually distinct from the surrounding panels.
+    {
+        double rnd = 6.0;
+        ImGui_DrawList_AddRectFilled(dl, ox, oy,
+            ox + ds.width, oy + ds.height,
+            0x10141AFF, &rnd, nullptr);
+        ImGui_DrawList_AddRect(dl, ox, oy,
+            ox + ds.width, oy + ds.height,
+            0x252A33FF, &rnd, nullptr, nullptr);
+    }
+
+    // Section labels.
+    for (int i = 0; i < ds.sectionCount; ++i) {
+        const auto& sec = ds.sections[i];
+        ImGui_DrawList_AddText(dl,
+            ox + sec.x, oy + sec.y,
+            0x9CA0AAFF, sec.title);
+        // Underline under the label.
+        double tw = 0, th = 0;
+        ImGui_CalcTextSize(ctx, sec.title, &tw, &th, nullptr, nullptr);
+        double thick = 1.0;
+        ImGui_DrawList_AddLine(dl,
+            ox + sec.x, oy + sec.y + float(th) + 1,
+            ox + sec.x + ds.width - 8 - float(sec.x), oy + sec.y + float(th) + 1,
+            0x2A3038FF, &thick);
+    }
+
+    // Pads.
+    for (int i = 0; i < ds.padCount; ++i) {
+        const auto& pad = ds.pads[i];
+        drawSchematicPad_(ctx, dl, ox + pad.x, oy + pad.y, pad, topo, fx);
+    }
+
+    // Reserve content rect so the parent BeginChild scrolls to fit.
+    ImGui_SetCursorScreenPos(ctx, oxd, oyd);
+    ImGui_Dummy(ctx, ds.width, ds.height);
+}
+
 // Render the Editor-View. Pre-condition: g_editingMatch is non-empty and
 // names a map currently in the catalog. Caller is drawFxLearn.
 void drawFxLearnEditor_(ImGui_Context* ctx)
@@ -2478,80 +2852,14 @@ void drawFxLearnEditor_(ImGui_Context* ctx)
     double leftW  = avX * 0.52;
     double rightW = avX - leftW - 12.0;  // gutter
 
-    // Left pane — slot list.
+    // Left pane — vector schematic of the canonical SSL 360 Link
+    // topology. Slots render as colour-coded pads; click to listen,
+    // drag a param onto a pad to bind, right-click for context menu.
     int childFlags = 0, winFlags = 0;
     double hLeft = avY - 8.0;
     if (ImGui_BeginChild(ctx, "fxl_slots", &leftW, &hLeft,
                          &childFlags, &winFlags)) {
-        ImGui_Text(ctx, "Slots (canonical topology):");
-        ImGui_Spacing(ctx);
-
-        for (const auto& s : topo->slots) {
-            const int mapped = mappedVst3For_(s.linkIdx);
-            const bool isMapped    = (mapped >= 0);
-            const bool isListening = (g_listeningLinkIdx == s.linkIdx);
-
-            // Status glyph + colour.
-            const char* glyph = isListening ? "[L]"
-                              : isMapped    ? "[*]"
-                                            : "[ ]";
-            const int color  = isListening ? 0xFFE040FF
-                              : isMapped    ? 0x60C060FF
-                                            : 0x808080FF;
-            ImGui_TextColored(ctx, color, glyph);
-            ImGui_SameLine(ctx, nullptr, nullptr);
-
-            // Click-to-listen button. Label is the canonical slot name +
-            // current binding info. ID disambiguator includes linkIdx so
-            // two slots with the same name (shouldn't exist) still work.
-            char btn[160];
-            if (isMapped) {
-                // Look up the param name on the live FX, if available.
-                char pname[128] = {};
-                if (fx.ok) {
-                    TrackFX_GetParamName(fx.tr, fx.fxIdx, mapped,
-                                         pname, sizeof(pname));
-                }
-                std::snprintf(btn, sizeof(btn),
-                    "%-22s  ->  %3d  %s##fxl_slot_%d",
-                    s.name ? s.name : "(unnamed)",
-                    mapped, pname, s.linkIdx);
-            } else {
-                std::snprintf(btn, sizeof(btn),
-                    "%-22s     unmapped##fxl_slot_%d",
-                    s.name ? s.name : "(unnamed)", s.linkIdx);
-            }
-
-            if (isListening) {
-                ImGui_PushStyleColor(ctx, ImGui_Col_Button,        0xC0902080);
-                ImGui_PushStyleColor(ctx, ImGui_Col_ButtonHovered, 0xE0A02080);
-                ImGui_PushStyleColor(ctx, ImGui_Col_ButtonActive,  0xFFC04080);
-            }
-            double bw = leftW - 24.0, bh = 0.0;
-            if (ImGui_Button(ctx, btn, &bw, &bh)) {
-                g_listeningLinkIdx = isListening ? -1 : s.linkIdx;
-            }
-            if (isListening) ImGui_PopStyleColor(ctx, nullptr);  // pops 1 by default
-
-            // Per-slot trailing actions: invert + clear.
-            if (isMapped) {
-                ImGui_SameLine(ctx, nullptr, nullptr);
-                char invId[32];
-                std::snprintf(invId, sizeof(invId), "Inv##fxl_inv_%d", s.linkIdx);
-                if (ImGui_Button(ctx, invId, nullptr, nullptr)) {
-                    toggleInverted_(s.linkIdx);
-                }
-                ImGui_SameLine(ctx, nullptr, nullptr);
-                char xId[32];
-                std::snprintf(xId, sizeof(xId), "X##fxl_clr_%d", s.linkIdx);
-                if (ImGui_Button(ctx, xId, nullptr, nullptr)) {
-                    if (g_listeningLinkIdx == s.linkIdx)
-                        g_listeningLinkIdx = -1;
-                    unbindSlot_(s.linkIdx);
-                }
-            }
-        }
-
+        drawFxLearnSchematic_(ctx, *topo, editing->domain, fx);
         ImGui_EndChild(ctx);
     }
 
@@ -2573,7 +2881,8 @@ void drawFxLearnEditor_(ImGui_Context* ctx)
                 ImGui_TextColored(ctx, 0xFFE040FF, hint);
             } else {
                 ImGui_TextDisabled(ctx,
-                    "Click a slot on the left to start listening.");
+                    "Drag a param onto a slot, or click a slot to start "
+                    "listening.");
             }
             ImGui_Spacing(ctx);
 
@@ -2658,6 +2967,21 @@ void drawFxLearnEditor_(ImGui_Context* ctx)
                         }
                         if (!advanced) g_listeningLinkIdx = -1;
                     }
+                }
+
+                // Drag source — payload is the vst3 param index encoded
+                // as ASCII. Schematic pads accept it via "FXL_PARAM" type.
+                int dndFlags = 0;
+                if (ImGui_BeginDragDropSource(ctx, &dndFlags)) {
+                    char payload[16];
+                    std::snprintf(payload, sizeof(payload), "%d", p);
+                    ImGui_SetDragDropPayload(ctx, "FXL_PARAM", payload,
+                                             nullptr);
+                    char preview[160];
+                    std::snprintf(preview, sizeof(preview),
+                        "param %d  %s", p, pname);
+                    ImGui_Text(ctx, preview);
+                    ImGui_EndDragDropSource(ctx);
                 }
             }
 
