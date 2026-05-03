@@ -2280,6 +2280,17 @@ std::string deriveShortLabel_(const std::string& fxName)
 std::string g_editingMatch;
 int         g_listeningLinkIdx = -1;
 char        g_paramFilter[64]  = {};
+
+// Click-and-turn state: when a slot is in listening mode we poll
+// REAPER's GetLastTouchedFX every frame so wiggling the actual
+// plugin-GUI control binds the touched param to the listening slot.
+// We snapshot the current GetLastTouchedFX value at the moment the
+// listen begins (or jumps to the next slot) so a stale prior touch
+// doesn't auto-bind on entry.
+int g_listeningPrevIdx     = -1;
+int g_lastTouchedTr        = -2;   // -2 = uninitialised; -1 = no last touch
+int g_lastTouchedFx        = -1;
+int g_lastTouchedParam     = -1;
 // Plugin-selector key — "trackIdx:fxIdx" of the FX instance whose param
 // list the editor reads from. -1 trackIdx = master. Empty string = pick
 // first match (auto). Cleared whenever the editing map changes so the
@@ -2998,6 +3009,45 @@ void drawFxLearnEditor_(ImGui_Context* ctx)
         return;
     }
 
+    // Click-and-turn: while listening, poll REAPER's GetLastTouchedFX
+    // and bind the touched param to the listening slot if the touched
+    // FX's name contains our editing match. Snapshot baseline whenever
+    // listening just started or auto-advanced so prior touches don't
+    // auto-bind on entry.
+    if (g_listeningLinkIdx >= 0 && g_listeningLinkIdx != g_listeningPrevIdx) {
+        int t = -1, f = -1, p = -1;
+        if (GetLastTouchedFX(&t, &f, &p)) {
+            g_lastTouchedTr = t; g_lastTouchedFx = f; g_lastTouchedParam = p;
+        } else {
+            g_lastTouchedTr = -1; g_lastTouchedFx = -1; g_lastTouchedParam = -1;
+        }
+    }
+    g_listeningPrevIdx = g_listeningLinkIdx;
+
+    if (g_listeningLinkIdx >= 0) {
+        int t = -1, f = -1, p = -1;
+        if (GetLastTouchedFX(&t, &f, &p)) {
+            const bool changed = (t != g_lastTouchedTr ||
+                                  f != g_lastTouchedFx ||
+                                  p != g_lastTouchedParam);
+            if (changed) {
+                MediaTrack* tr = nullptr;
+                if (t == 0)      tr = GetMasterTrack(nullptr);
+                else if (t > 0)  tr = GetTrack(nullptr, t - 1);
+                if (tr) {
+                    char fxName[256] = {};
+                    if (TrackFX_GetFXName(tr, f, fxName, sizeof(fxName)) &&
+                        std::string(fxName).find(editing->match) != std::string::npos)
+                    {
+                        bindSlot_(g_listeningLinkIdx, p);
+                        autoAdvanceListening_(*topo);
+                    }
+                }
+                g_lastTouchedTr = t; g_lastTouchedFx = f; g_lastTouchedParam = p;
+            }
+        }
+    }
+
     double avX = 0.0, avY = 0.0;
     ImGui_GetContentRegionAvail(ctx, &avX, &avY);
     if (avX < 200.0) avX = 600.0;   // safety for embedded contexts
@@ -3027,12 +3077,14 @@ void drawFxLearnEditor_(ImGui_Context* ctx)
         if (!fx.ok) {
             ImGui_TextDisabled(ctx, "Insert a matching FX to list its params.");
         } else {
-            char hint[160];
+            char hint[256];
             if (g_listeningLinkIdx >= 0) {
                 const LinkSlot* listenSlot =
                     findSlotByLinkIdx(*topo, g_listeningLinkIdx);
                 std::snprintf(hint, sizeof(hint),
-                    "Click a parameter to bind it to: %s",
+                    "Listening for: %s\n"
+                    "  - click a parameter below, OR\n"
+                    "  - wiggle the control in the plug-in window",
                     listenSlot ? listenSlot->name : "(slot)");
                 ImGui_TextColored(ctx, 0xFFE040FF, hint);
             } else {
