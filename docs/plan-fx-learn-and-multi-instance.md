@@ -267,14 +267,34 @@ Settings-Toggle: **"Plugin-Mode auto-fills Soft-Key Banks"** (im FX-Learn-Tab od
 
 ### GR-Metering (Tech-Stack)
 
-Damit GR-Werte von 3rd-party-Plugins auf UC1's moving-coil-Meter und UF8 sichtbar werden, müssen wir den Wert pro Tick lesen und auf die Hardware schicken. Zwei Detection-Wege analog zu 360 Link:
+Drei Detection-Wege, in dieser Lookup-Reihenfolge pro Track / FX:
 
-1. **VST3 Read-Only-Param** mit Flag `Vst::ParameterInfo::kIsReadOnly` — REAPER's `TrackFX_GetParameterStepSizes` / `TrackFX_GetNamedConfigParm` (z.B. `parm_flags.<n>`) liefert das Flag-Bitfield. Read-Only-Params sind by convention Output-Reporters (GR, Output-Level, etc.).
-2. **PreSonus IGainReductionInfo VST3-Extension** — Standard-Interface das mehrere Hersteller implementieren. Innerhalb REAPER nicht direkt zugänglich, müsste über einen kleinen VST3-Bridge (eigenes minimales Plugin als Hook?) oder über REAPER-API wenn die das exposed (Untersuchung erforderlich).
+1. **UserPluginMap.metering.gainReduction.vst3Param** — wenn der User explizit einen Param als GR getaggt hat (drag auf GR-Meter-Section), wird der gelesen. Höchste Priorität.
+2. **REAPER's `GainReduction_dB` Named-Config-Parm** — REAPER exposed den PreSonus-`IGainReductionInfo`-Standard direkt via `TrackFX_GetNamedConfigParm(tr, fxIdx, "GainReduction_dB", buf, sz)`. Heute schon genutzt für Built-in CS ([UC1Surface.cpp:2183](extension/src/UC1Surface.cpp:2183), [main.cpp:3991](extension/src/main.cpp:3991)). Wenn das Plugin den Standard implementiert (FabFilter Pro-C, Waves, UAD, viele andere), bekommen wir GR ohne irgendwas zu lernen.
+3. **VST3 Read-Only-Param** mit Flag `Vst::ParameterInfo::kIsReadOnly` — manueller Drag aus der "Assignable Meter Data"-Liste. Phase 1 für FX wo `GainReduction_dB` nichts liefert aber trotzdem ein Read-Only-Param vorhanden ist.
 
-Phase 1 reicht uns Methode 1: VST3-Read-Only-Param. Damit kriegen wir alle FabFilter-Pro-C-Plugins, alle moderne Waves/UAD, FabFilter Pro-Q (output-Level) etc. Methode 2 (IGainReductionInfo) als Phase-2-Bonus.
+**Settings-Toggle: "Use REAPER GR data when no learned mapping"** (im FX-Learn-Tab oder Modes-Tab — Modes wahrscheinlich besser, weil's UX-Verhalten betrifft, nicht Learn). Default **ON**. Wenn aus: nur explizit gemappte GR-Werte werden angezeigt (User entscheidet bewusst pro Plugin). Persistiert via `SetExtState("ReaSixty", "gr_use_reaper_fallback", "1"|"0", true)`.
 
-**Lese-Pfad**: pro Render-Tick `TrackFX_GetParamNormalized(tr, fxIdx, vst3Param)` für den gemappten GR-Slot, durchschicken auf UC1 und UF8 per-strip GR-Anzeige. Calibration-Offset wird vorher angewendet. UC1 hat schon die GR-Meter-Render-Pipeline ([UC1Surface.cpp:2183](extension/src/UC1Surface.cpp:2183) liest `GainReduction_dB` für built-in CS) — das funktioniert für UserPluginMap automatisch wenn der Slot gebunden ist.
+**Lookup-Logik** im Render-Tick (pro Strip, pro fokussiertem Track):
+```
+1. UserPluginMap match  → wenn metering.gainReduction.vst3Param gesetzt:
+                          TrackFX_GetParamNormalized(tr, fx, that param)
+                          + offsetDb. Done.
+2. Wenn nicht ODER UserPluginMap fehlt:
+   a. Built-in PluginMap match (CS 2 / 4K B/E/G / BC 2):
+                          TrackFX_GetNamedConfigParm("GainReduction_dB").
+                          (Existing path; behavior unchanged.)
+   b. Sonst: wenn Settings-Toggle "Use REAPER GR data when no learned
+      mapping" AKTIV → für jeden FX auf der Spur (in FX-Chain-Order)
+      probier TrackFX_GetNamedConfigParm("GainReduction_dB").
+      Erster der nicht-leer liefert gewinnt → das ist der GR-Wert
+      für die Strip.
+   c. Sonst leerer GR-Wert (Meter still).
+```
+
+Damit kriegt der User automatisch sinnvolle GR auf moderne 3rd-party-Plugins ohne sie überhaupt anlernen zu müssen — das ist effektiv "free GR for everyone who follows the PreSonus standard". Lernen bringt nur dann zusätzlichen Wert wenn das Plugin den Standard NICHT implementiert oder wenn der User Calibration-Offset braucht (gelernte Map > REAPER-Fallback in der Reihenfolge oben).
+
+**PreSonus IGainReductionInfo Direct-Hook** (Phase 3 / Bonus) — falls REAPER's Named-Config-Parm-Pfad in Edge-Cases zu langsam ist oder Werte nicht aktuell hält, könnten wir per VST3-Bridge selber die Extension queryen. Höchst unwahrscheinlich nötig — REAPER's Named-Config-Parm-Pfad funktioniert heute zuverlässig für Built-in CS bei jedem Render-Tick.
 
 ### Learn-Flow (UI) — sekundär: Wizard
 
