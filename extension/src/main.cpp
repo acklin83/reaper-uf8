@@ -1869,18 +1869,20 @@ void onUf8Input(const uint8_t* data, size_t len)
                 // ended up, even if every frame this touch was sub-deadband.
                 g_lastTouchPb[strip].store(pb14);
                 g_lastTouchPbValid[strip].store(true);
-                // Echo the position back to UF8 with bit 7 of LSB SET.
-                // SSL360 does this throughout every touch (cap32 OUT
-                // frames at 0.497..1.748). The firmware uses these
-                // echoes to update its motor-target buffer WITHOUT
-                // engaging the motor. When the touch ends the firmware
-                // implicitly re-engages on this target — no jerk
-                // because the target is exactly where the user's hand
-                // left the fader. Without these echoes the firmware
-                // re-engages to the pre-touch target = the jerk.
-                if (g_dev) {
-                    g_dev->send(uf8::buildFaderPosition(strip, lsb | 0x80, msb));
-                }
+                // Touch-echo (`lsb|0x80`) DISABLED 2026-05-03. Diagnosed
+                // via /tmp/uf8_fader_input.log: when present, the
+                // firmware periodically echoes our outgoing target-buffer
+                // updates back to us as inbound position events, with a
+                // ~50-200 ms delay and stale values 50-100 LSB above the
+                // user's actual position. That feedback was the source
+                // of the visible upward "ruckler" while pulling down.
+                // The original justification ("prevents jerk on release")
+                // is moot here: motor is held limp by FF 1D 02 strip 00
+                // sent on touch-press + the FF 1B 01 keepalive, and
+                // commitDebouncedTouchReleases re-engages with the
+                // user's exact final position 150 ms after release —
+                // no window for a stale firmware target to drive the
+                // motor.
                 // Deadband filter on the pb14 value, NOT on lsb alone.
                 // Splitting into msb/lsb produced upward "blips" while the
                 // user pulled the fader down: every MSB boundary crossed
