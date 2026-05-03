@@ -1278,27 +1278,85 @@ constexpr FaderCalPoint kFaderCal[] = {
     { -150.00, -150.0 },   // silence floor
 };
 
-double interpFaderCal(double x, bool current_to_target)
+// Monotonic cubic Hermite (Fritsch-Carlson) interpolation through the
+// calibration points. Piecewise-linear was producing visible jerks at
+// the table joints when the user pulled the fader smoothly — adjacent
+// segments had slope ratios up to 2× (e.g. 1.50 → 0.78 around 0 dB),
+// so REAPER's volume changed velocity abruptly at every joint. PCHIP
+// keeps the curve C1-continuous AND monotone (no overshoot), so the
+// fader feels smooth while still hitting every measured point exactly.
+constexpr size_t kFaderCalN = std::size(kFaderCal);
+
+struct FaderCalTangents { double dy[kFaderCalN]; };
+
+static FaderCalTangents computeFaderCalTangents_(bool forward)
 {
-    const auto& tab = kFaderCal;
-    constexpr size_t n = std::size(kFaderCal);
-
-    auto getX = [&](size_t i) {
-        return current_to_target ? tab[i].current_db : tab[i].target_db;
-    };
-    auto getY = [&](size_t i) {
-        return current_to_target ? tab[i].target_db  : tab[i].current_db;
-    };
-
-    if (x >= getX(0))     return getY(0);
-    if (x <= getX(n - 1)) return getY(n - 1);
-    for (size_t i = 1; i < n; ++i) {
-        if (x >= getX(i)) {
-            const double t = (x - getX(i)) / (getX(i - 1) - getX(i));
-            return getY(i) + t * (getY(i - 1) - getY(i));
+    double x[kFaderCalN], y[kFaderCalN];
+    for (size_t i = 0; i < kFaderCalN; ++i) {
+        x[i] = forward ? kFaderCal[i].current_db : kFaderCal[i].target_db;
+        y[i] = forward ? kFaderCal[i].target_db  : kFaderCal[i].current_db;
+    }
+    // Table is descending in both columns, so h[i] is negative and m[i]
+    // is positive (negative/negative). Fritsch-Carlson math is sign-
+    // agnostic — only the products and harmonic mean structure matter.
+    double h[kFaderCalN - 1], m[kFaderCalN - 1];
+    for (size_t i = 0; i + 1 < kFaderCalN; ++i) {
+        h[i] = x[i + 1] - x[i];
+        m[i] = (y[i + 1] - y[i]) / h[i];
+    }
+    FaderCalTangents r{};
+    r.dy[0]                = m[0];
+    r.dy[kFaderCalN - 1]   = m[kFaderCalN - 2];
+    for (size_t i = 1; i + 1 < kFaderCalN; ++i) {
+        if (m[i - 1] * m[i] <= 0.0) {
+            r.dy[i] = 0.0;                      // flat at extrema
+        } else {
+            const double w1 = 2.0 * h[i] + h[i - 1];
+            const double w2 = h[i] + 2.0 * h[i - 1];
+            r.dy[i] = (w1 + w2) / (w1 / m[i - 1] + w2 / m[i]);
         }
     }
-    return getY(n - 1);
+    return r;
+}
+
+double interpFaderCal(double x, bool current_to_target)
+{
+    static const FaderCalTangents fwdT = computeFaderCalTangents_(true);
+    static const FaderCalTangents invT = computeFaderCalTangents_(false);
+    const auto& tang = current_to_target ? fwdT : invT;
+
+    auto getX = [&](size_t i) {
+        return current_to_target
+            ? kFaderCal[i].current_db
+            : kFaderCal[i].target_db;
+    };
+    auto getY = [&](size_t i) {
+        return current_to_target
+            ? kFaderCal[i].target_db
+            : kFaderCal[i].current_db;
+    };
+
+    if (x >= getX(0))                 return getY(0);
+    if (x <= getX(kFaderCalN - 1))    return getY(kFaderCalN - 1);
+
+    for (size_t i = 1; i < kFaderCalN; ++i) {
+        if (x >= getX(i)) {
+            const size_t  k   = i - 1;
+            const double  xk  = getX(k),  xk1 = getX(i);
+            const double  yk  = getY(k),  yk1 = getY(i);
+            const double  h   = xk1 - xk;
+            const double  t   = (x - xk) / h;
+            const double  t2  = t * t;
+            const double  t3  = t2 * t;
+            const double  h00 =  2.0 * t3 - 3.0 * t2 + 1.0;
+            const double  h10 =        t3 - 2.0 * t2 + t;
+            const double  h01 = -2.0 * t3 + 3.0 * t2;
+            const double  h11 =        t3 -       t2;
+            return h00 * yk  + h10 * h * tang.dy[k]
+                 + h01 * yk1 + h11 * h * tang.dy[i];
+        }
+    }
+    return getY(kFaderCalN - 1);
 }
 
 // Convert a 14-bit pb value to linear REAPER volume. Two stages:
