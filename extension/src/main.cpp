@@ -1864,25 +1864,40 @@ void onUf8Input(const uint8_t* data, size_t len)
                 if (rawHigh) {
                     faderInputLog_("ECHO", strip, pb14, 0, int(rawA), "HIBIT");
                 }
+                // Bit 7 of byte 4 is a firmware-side flag, not an
+                // echo of our outbound bit-7-set frames. Verified by
+                // capturing /tmp/uf8_fader_input.log with our outbound
+                // echoes DISABLED — bit-7-set frames still arrived,
+                // and they were the only ones that formed a clean
+                // monotonic stream during a smooth pull. The bit-7-
+                // CLEAR frames carry the +50..+100 LSB upward spikes
+                // ("Werte korrigieren minimal gegen oben") and appear
+                // to be some secondary signal (capacitive vs mech
+                // sensor, or motor-state polling — exact semantics
+                // TBD). For volume tracking we only want the
+                // authoritative bit-7-set stream.
+                if (!rawHigh) {
+                    faderInputLog_("POS", strip, pb14, 0, 0, "DROP_NOHI");
+                    i += 6;
+                    continue;
+                }
                 // Always record the raw position so the touch-release
                 // commit can snap REAPER to where the fader physically
                 // ended up, even if every frame this touch was sub-deadband.
                 g_lastTouchPb[strip].store(pb14);
                 g_lastTouchPbValid[strip].store(true);
-                // Touch-echo (`lsb|0x80`) DISABLED 2026-05-03. Diagnosed
-                // via /tmp/uf8_fader_input.log: when present, the
-                // firmware periodically echoes our outgoing target-buffer
-                // updates back to us as inbound position events, with a
-                // ~50-200 ms delay and stale values 50-100 LSB above the
-                // user's actual position. That feedback was the source
-                // of the visible upward "ruckler" while pulling down.
-                // The original justification ("prevents jerk on release")
-                // is moot here: motor is held limp by FF 1D 02 strip 00
-                // sent on touch-press + the FF 1B 01 keepalive, and
-                // commitDebouncedTouchReleases re-engages with the
-                // user's exact final position 150 ms after release —
-                // no window for a stale firmware target to drive the
-                // motor.
+                // Echo the position back to UF8 with bit 7 of LSB SET.
+                // SSL360 does this throughout every touch (cap32 OUT
+                // frames). The firmware uses these echoes to update
+                // its motor-target buffer WITHOUT engaging the motor.
+                // When the touch ends the firmware implicitly
+                // re-engages on this target — no jerk because the
+                // target matches the user's last touch position.
+                // Without these echoes the motor falls back to a
+                // stale internal value (typically near 0) on release.
+                if (g_dev) {
+                    g_dev->send(uf8::buildFaderPosition(strip, lsb | 0x80, msb));
+                }
                 // Deadband filter on the pb14 value, NOT on lsb alone.
                 // Splitting into msb/lsb produced upward "blips" while the
                 // user pulled the fader down: every MSB boundary crossed
