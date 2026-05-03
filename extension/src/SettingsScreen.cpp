@@ -716,37 +716,60 @@ void drawUc1Vector(ImGui_Context* ctx)
     rect_(c, 4, 4, W - 8, H - 8, 0x14181EFF, 0x2A3038FF, /*rounding*/ 8.0);
 
     // ---- Left column: Filters + EQ -------------------------------------
+    // UC1 layout (per User Guide page 14): the four EQ bands sit in a
+    // 3-column knob grid (Gain / Freq / Q). The little toggle buttons
+    // (HF Bell, EQ Type, LF Bell, HPF In, LPF In) are NOT in their own
+    // rows — they're tucked DIAGONALLY between knob clusters. Mirror
+    // that on the schematic so it reads like the real hardware.
     constexpr float kColLx = 12, kColLw = 230;
     rect_(c, kColLx, 12, kColLw, H - 24, 0x1A1E24FF, 0x2A3038FF, 6.0);
 
-    // Top row: HF Bell + Eq Type (next to filter knobs)
-    btn(kColLx + 18,  24, 78, 18, "HF BELL");
-    btn(kColLx + 134, 24, 78, 18, "EQ TYPE");
+    constexpr float kSmallToggleW = 30, kSmallToggleH = 14;
+    auto smallToggle = [&](float x, float y, const char* label) {
+        rect_(c, x, y, kSmallToggleW, kSmallToggleH,
+              0x252A33FF, 0x4A5060FF, 2.5);
+        drawTextCentered_(c, x + kSmallToggleW / 2.0f,
+                              y + kSmallToggleH / 2.0f,
+                              0xC0C4CCFF, label);
+    };
 
-    // Filters
-    sectionLabel(kColLx + 12, 50, "FILTERS");
-    knob(kColLx + 60,  86, 22, kBlackCap, "HPF");
-    knob(kColLx + 170, 86, 22, kBlackCap, "LPF");
-    btn (kColLx + 18,  118, 50, 16, "IN");      // HPF in
-    btn (kColLx + 162, 118, 50, 16, "IN");      // LPF in
+    // Filters row — HPF + LPF knobs at the top with IN-toggles diagonal
+    // below-and-between (not aligned columnwise with the knobs).
+    sectionLabel(kColLx + 14, 16, "FILTERS");
+    knob(kColLx + 60,  60, 22, kBlackCap, "HPF");
+    knob(kColLx + 170, 60, 22, kBlackCap, "LPF");
+    smallToggle(kColLx + 96,  98, "IN");        // HPF In, diagonal-right of HPF knob
+    smallToggle(kColLx + 138, 98, "IN");        // LPF In, diagonal-left  of LPF knob
 
-    // EQ — four bands, each row: Gain + Freq (+ Q for HMF/LMF)
-    sectionLabel(kColLx + 12, 148, "EQ");
+    // EQ — four bands, each row: Gain + Freq (+ Q for HMF/LMF).
+    // HF Bell + EQ Type + LF Bell + EQ-To-SC sit DIAGONALLY in the gaps
+    // between bands so their LEDs read at a glance which band they
+    // affect (HF Bell upper-left of HF band, etc.).
+    sectionLabel(kColLx + 14, 134, "EQ");
+
     auto eqBand = [&](float yTop, const char* tag, bool hasQ) {
-        drawText_(c, kColLx + 12, yTop + 22, 0xB8BCC4FF, tag);
+        drawText_(c, kColLx + 14, yTop + 22, 0xB8BCC4FF, tag);
         knob(kColLx + 60,  yTop + 24, 20, kRedCap,  "GAIN");
         knob(kColLx + 124, yTop + 24, 20, kGreyCap, "FREQ");
         if (hasQ) {
             knob(kColLx + 188, yTop + 24, 20, kGreyCap, "Q");
         }
     };
-    eqBand(168, "HF",  false);
-    eqBand(238, "HMF", true);
-    eqBand(308, "LMF", true);
-    eqBand(378, "LF",  false);
-    btn (kColLx + 162, 402, 50, 16, "BELL");    // LF Bell
-    btn (kColLx + 18,  448, 78, 18, "EQ IN");
-    btn (kColLx + 134, 448, 78, 18, "EQ TO SC");
+    eqBand(150, "HF",  false);
+    eqBand(220, "HMF", true);
+    eqBand(290, "LMF", true);
+    eqBand(360, "LF",  false);
+
+    // Diagonal toggles — sit in the inter-band gutters, offset from any
+    // knob centre so they read as separate hardware. UC1 places them on
+    // alternating sides for visual rhythm.
+    smallToggle(kColLx + 188, 154, "BELL");  // HF Bell, between Filters and HF, on the right
+    smallToggle(kColLx + 188, 224, "TYPE");  // EQ Type, between HF and HMF
+    smallToggle(kColLx + 188, 364, "BELL");  // LF Bell, between LMF and LF
+
+    // Bottom strip — EQ in / EQ to S/C
+    btn (kColLx + 18,  430, 88, 18, "EQ IN");
+    btn (kColLx + 124, 430, 88, 18, "EQ TO SC");
 
     // ---- Centre column: Bus Comp (top) + Central Control Panel (bottom)
     constexpr float kColCx = kColLx + kColLw + 8, kColCw = 256;
@@ -810,36 +833,37 @@ void drawUc1Vector(ImGui_Context* ctx)
     constexpr float kColRx = kColCx + kColCw + 8, kColRw = 230;
     rect_(c, kColRx, 12, kColRw, H - 24, 0x1A1E24FF, 0x2A3038FF, 6.0);
 
-    // Output Trim top
-    knob(kColRx + kColRw / 2.0f, 38, 22, kRedCap, "OUTPUT");
+    // Output Trim — top of the column (red Output silk-screen on UC1).
+    sectionLabel(kColRx + 14, 16, "OUTPUT");
+    knob(kColRx + kColRw / 2.0f, 56, 22, kRedCap, "TRIM");
 
     // Comp section
-    sectionLabel(kColRx + 12, 76, "COMP");
-    knob(kColRx + 50,  108, 20, kGreyCap, "THR");
-    knob(kColRx + 116, 108, 20, kGreyCap, "RATIO");
-    knob(kColRx + 182, 108, 20, kGreyCap, "REL");
-    btn (kColRx + 18,  152, 60, 18, "FAST ATK");
-    btn (kColRx + 86,  152, 60, 18, "PEAK");
-    btn (kColRx + 154, 152, 60, 18, "DYN IN");
+    sectionLabel(kColRx + 14, 100, "COMP");
+    knob(kColRx + 50,  130, 20, kGreyCap, "THR");
+    knob(kColRx + 116, 130, 20, kGreyCap, "RATIO");
+    knob(kColRx + 182, 130, 20, kGreyCap, "REL");
+    btn (kColRx + 14,  174, 64, 18, "FAST ATK");
+    btn (kColRx + 84,  174, 60, 18, "PEAK");
+    btn (kColRx + 150, 174, 64, 18, "DYN IN");
 
     // Gate section
-    sectionLabel(kColRx + 12, 188, "GATE / EXPANDER");
-    knob(kColRx + 50,  220, 20, kGreyCap, "THR");
-    knob(kColRx + 116, 220, 20, kGreyCap, "RANGE");
-    knob(kColRx + 182, 220, 20, kGreyCap, "HOLD");
-    knob(kColRx + 116, 282, 20, kGreyCap, "REL");
-    btn (kColRx + 18,  316, 92, 18, "EXPAND");
-    btn (kColRx + 122, 316, 92, 18, "FAST ATK");
+    sectionLabel(kColRx + 14, 208, "GATE / EXPANDER");
+    knob(kColRx + 50,  240, 20, kGreyCap, "THR");
+    knob(kColRx + 116, 240, 20, kGreyCap, "RANGE");
+    knob(kColRx + 182, 240, 20, kGreyCap, "HOLD");
+    knob(kColRx + 116, 302, 20, kGreyCap, "REL");
+    btn (kColRx + 14,  338, 92, 18, "EXPAND");
+    btn (kColRx + 122, 338, 92, 18, "FAST ATK");
 
     // Channel section
-    sectionLabel(kColRx + 12, 360, "CHANNEL");
-    btn(kColRx + 18,  384, 92,  18, "POLARITY");
-    btn(kColRx + 122, 384, 92,  18, "S/C LISTEN");
-    btn(kColRx + 18,  410, 92,  18, "SOLO CLEAR");
-    btn(kColRx + 122, 410, 92,  18, "SOLO");
-    btn(kColRx + 18,  436, 92,  18, "CUT");
-    btn(kColRx + 122, 436, 92,  18, "CHANNEL IN");
-    btn(kColRx + 70,  466, 92,  20, "FINE");
+    sectionLabel(kColRx + 14, 376, "CHANNEL");
+    btn(kColRx + 14,  398, 92,  18, "POLARITY");
+    btn(kColRx + 122, 398, 92,  18, "S/C LISTEN");
+    btn(kColRx + 14,  424, 92,  18, "SOLO CLEAR");
+    btn(kColRx + 122, 424, 92,  18, "SOLO");
+    btn(kColRx + 14,  450, 92,  18, "CUT");
+    btn(kColRx + 122, 450, 92,  18, "CHANNEL IN");
+    btn(kColRx + 68,  482, 92,  20, "FINE");
 
     // Brand line
     drawTextCentered_(c, W / 2.0f, H - 16, 0x9CA0AAFF, "Rea-Sixty / UC1");
