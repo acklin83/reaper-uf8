@@ -811,16 +811,25 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
 
     MediaTrack* tr = static_cast<MediaTrack*>(writeTrackRaw);
     double cur = TrackFX_GetParamNormalized(tr, fxIdx, vst3Param);
-    double delta = clickToDelta_(ev.delta) * (map->inverted[ev.id] ? -1.0 : 1.0);
 
-    // Magnet at 0 dB on the four CS EQ-gain knobs (bipolar, centre at
-    // normalized 0.5). Snaps when the rotation crosses or enters the
-    // zone; once on the notch the next click moves freely so 0.1 dB
-    // nudges off-centre still work. Stateless — no sticky exit.
+    // EQ-gain knobs use a finer per-click step than the rest of the
+    // surface. With the global 1/64 the dB-per-click varies by band
+    // because different SSL EQ ranges map differently into the same
+    // normalized sweep — wider-range bands felt ~1 dB/click, narrower
+    // bands ~0.5 dB. Halving for the four gains gives a uniformly
+    // tighter feel and makes the post-snap nudge close to 0.25 dB.
     const bool isEqGain = (ev.id == knob::kCSHfGain
                         || ev.id == knob::kCSHmfGain
                         || ev.id == knob::kCSLmfGain
                         || ev.id == knob::kCSLfGain);
+    double delta = clickToDelta_(ev.delta);
+    if (isEqGain) delta *= 0.5;
+    delta *= (map->inverted[ev.id] ? -1.0 : 1.0);
+
+    // Magnet at 0 dB on the EQ-gain knobs (bipolar, centre at
+    // normalized 0.5). Snaps when the rotation crosses or enters the
+    // zone; once on the notch the next click moves freely so 0.1 dB
+    // nudges off-centre still work. Stateless — no sticky exit.
     const double next = isEqGain
         ? uf8::applyVirtualNotch(cur, delta, /*center*/0.5,
                                  /*zone*/0.015, 0.0, 1.0)
