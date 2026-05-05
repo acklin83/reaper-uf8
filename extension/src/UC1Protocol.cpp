@@ -220,6 +220,23 @@ std::vector<uint8_t> buildDisplayText(uint8_t zone, std::string_view text, size_
     return buildFrame(0x66, data);
 }
 
+std::vector<uint8_t> buildDisplayInvalidate(uint8_t zone)
+{
+    // FF 66 01 <zone> CK — single-byte payload, zone-invalidate. Used
+    // by SSL 360° to release the LCD layout slot for a readout zone
+    // when the user stops editing (uc1_46 capture: fires 3s after the
+    // last CS knob-touch).
+    const uint8_t data[1] = { zone };
+    return buildFrame(0x66, data);
+}
+
+std::vector<uint8_t> buildReadoutPrecursor(uint8_t flag)
+{
+    // FF 66 03 00 01 <flag> CK — see header for flag semantics.
+    const uint8_t data[3] = {0x00, 0x01, flag};
+    return buildFrame(0x66, data);
+}
+
 // ---- parsers ----
 
 namespace {

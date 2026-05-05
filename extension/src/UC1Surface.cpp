@@ -236,6 +236,17 @@ int UC1Surface::poll()
         refresh();
     }
 
+    // CS-scroll overlay revert — symmetric to bcScrollOverlay. Once the
+    // 3 s window elapses with no further Encoder 1 activity, drop the
+    // suppression so the next CS knob edit can repaint zone 0x03.
+    if (csScrollOverlayActive_
+        && std::chrono::steady_clock::now() >= csScrollOverlayUntil_
+        && device_
+        && mode_ == Uc1Mode::Main)
+    {
+        csScrollOverlayActive_ = false;
+    }
+
     // Per-tick value poll. Catches every cause of focused-param change:
     //   - UF8 Page <-/-> shifted slotIdx (text changes)
     //   - UF8 V-Pot rotation on the focused track (value changes)
@@ -307,6 +318,11 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
         static std::chrono::steady_clock::time_point lastT{};
         int step = stepFromAccumulator(acc, lastT, 4);
         if (step == 0) { ++stats_.knobEventsHandled; return; }
+        // Per uc1_47 capture every Encoder 1 detent ends with FF 66 01 0F
+        // (zone 0x0F invalidate). Without it the CS-carousel small-
+        // triple scroll doesn't visually animate on the UC1 LCD —
+        // refresh() builds the new triple but the firmware appears to
+        // need this redraw signal to actually advance the carousel.
         const int n = CountTracks(nullptr);
         if (n <= 0) return;
         int cur = -1;
@@ -336,6 +352,25 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
                 uf8::setFocus({uf8::Domain::ChannelStrip, 0});
                 refresh();
             }
+        }
+        if (device_) {
+            // Hide the CS readout (zone 0x03) so the channel-name
+            // carousel takes its space. User FR 2026-05-05: "Wenn an
+            // Encoder 1 gedreht wird, soll die obere parameter-zeile
+            // ausgeblendet werden". Set the overlay flag so subsequent
+            // pushFocusedParamReadout_ ticks skip zone 0x03 until the
+            // user actually touches a CS knob (or 3s elapse). Mirror
+            // of bcScrollOverlay for the CS side.
+            csScrollOverlayActive_ = true;
+            csScrollOverlayUntil_  = std::chrono::steady_clock::now()
+                                   + std::chrono::milliseconds(3000);
+            if (!lastZone03Text_.empty()) {
+                lastZone03Text_.clear();
+                device_->send(buildDisplayInvalidate(zone::kChannelStripReadout));
+            }
+            // Carousel scroll redraw signal — uc1_47 every Encoder 1
+            // detent ends with this 5-byte invalidate.
+            device_->send(buildDisplayInvalidate(0x0F));
         }
         if (logThis) {
             char line[96];
@@ -1176,20 +1211,13 @@ void UC1Surface::handleButton_(const ButtonEvent& ev)
     };
 
     if (ev.id == button::kChannelIn) {
-        if (!toggleBypassParam(tr, bindings.channelMap, bindings.channelFxIdx,
-                               "Channel Strip", zone::kChannelStripReadout)) {
-            // No SSL CS plug-in on the focused track — fall back to
-            // bypassing the first track FX (legacy behaviour). Edge
-            // case; LED still tracks the new state.
-            if (TrackFX_GetCount(tr) > 0) {
-                const bool wasEnabled = TrackFX_GetEnabled(tr, 0);
-                TrackFX_SetEnabled(tr, 0, !wasEnabled);
-                pushButtonLed_(ev.id, !wasEnabled);
-                pushButtonReadout_(ev.id, "Channel Strip",
-                                   !wasEnabled ? "In" : "Out",
-                                   zone::kChannelStripReadout);
-            }
-        }
+        // No SSL CS plug-in on the focused track → no-op. Previous code
+        // fell back to toggling the FIRST track FX's bypass, which
+        // hijacked unrelated plug-ins (user FR 2026-05-05: must not do
+        // that). The Channel-IN button only acts on a recognised CS
+        // plug-in's own Bypass param.
+        toggleBypassParam(tr, bindings.channelMap, bindings.channelFxIdx,
+                          "Channel Strip", zone::kChannelStripReadout);
         ++stats_.buttonEventsHandled;
         return;
     }
@@ -1413,12 +1441,26 @@ void UC1Surface::pushFocusedParamReadout_()
     // focusedTrack_. The two diverge when the user edits a plug-in
     // on a non-selected track — we still want to render the
     // param-value readout for what they just edited.
+    //
+    // Both pointers can outlive their MediaTrack across project switch /
+    // track delete; ValidatePtr2 returns false for stale tracks. Without
+    // these guards lookupPluginOnTrack → TrackFX_GetCount segfaults on
+    // the freed pointer (crash report 2026-05-05 17:18, PC=0x1000000003145393
+    // which is the pointer-auth tag pattern of a destroyed MediaTrack).
     void* lookupTrack = uf8::g_focusedFxTrack.load(std::memory_order_relaxed);
+    if (lookupTrack && !ValidatePtr2(nullptr, lookupTrack, "MediaTrack*")) {
+        lookupTrack = nullptr;
+        uf8::g_focusedFxTrack.store(nullptr, std::memory_order_relaxed);
+    }
     if (!lookupTrack) lookupTrack = focusedTrack_;
+    if (lookupTrack && !ValidatePtr2(nullptr, lookupTrack, "MediaTrack*")) {
+        lookupTrack = nullptr;
+    }
     if (!lookupTrack) return;
 
     auto match = uf8::lookupPluginOnTrack(lookupTrack, focused.domain);
-    if (!match.map && lookupTrack != focusedTrack_ && focusedTrack_) {
+    if (!match.map && lookupTrack != focusedTrack_ && focusedTrack_
+        && ValidatePtr2(nullptr, focusedTrack_, "MediaTrack*")) {
         lookupTrack = focusedTrack_;
         match = uf8::lookupPluginOnTrack(lookupTrack, focused.domain);
     }
@@ -1443,25 +1485,64 @@ void UC1Surface::pushFocusedParamReadout_()
     const uint8_t zoneByte = (focused.domain == uf8::Domain::BusComp)
                            ? zone::kBusCompReadout
                            : zone::kChannelStripReadout;
+    // Encoder-scroll overlay gates. While the CS / BC channel-encoder
+    // scroll overlay is active, suppress the matching readout zone so
+    // the carousel keeps the LCD area to itself.
+    if (zoneByte == zone::kChannelStripReadout && csScrollOverlayActive_) return;
+    if (zoneByte == zone::kBusCompReadout      && bcScrollOverlayActive_) return;
     std::string& cache = (zoneByte == zone::kBusCompReadout)
                        ? lastZone05Text_ : lastZone03Text_;
     if (readout == cache) return;
     cache = readout;
 
-    // SSL 360° readout-update burst (uc1_04 BC threshold sweep, uc1_15
-    // CS knob sweep): precursor → track-name-triple LARGE → text. The
-    // precursor (FF 66 03 00 01 00) is what the firmware reacts to —
-    // skipping it leaves the readout zone stale on subsequent updates.
-    // The triple comes from refresh()'s last build (cached) so the
-    // BC carousel content is restored after the precursor's reset.
-    device_->send(buildColourBarEnable(false));
-    if (!lastSmallTripleFrame_.empty()) {
-        device_->send(std::vector<uint8_t>(lastSmallTripleFrame_));
-    }
+    // SSL 360° readout-update burst (uc1_04 / uc1_15 / uc1_47):
+    // precursor (flag=0x00) → LARGE triple → text. uc1_47 capture
+    // confirms flag=0x00 for both CS-knob and BC-knob value updates;
+    // flag=0x02 is only emitted during Encoder-2 (BC anchor scroll)
+    // detents and is handled separately in the encoder path.
+    device_->send(buildReadoutPrecursor(0x00));
     if (!lastLargeTripleFrame_.empty()) {
         device_->send(std::vector<uint8_t>(lastLargeTripleFrame_));
     }
     device_->send(buildDisplayText(zoneByte, readout, readout.size()));
+
+    // Stamp this zone's edit time. poll()'s timeout check uses it to
+    // fire the SSL 360° "release LCD layout slot" invalidate ~3s after
+    // the last value-change (matches uc1_46 capture's t=44 burst).
+    auto& editTime = (zoneByte == zone::kBusCompReadout)
+                   ? lastZone05Edit_ : lastZone03Edit_;
+    editTime = std::chrono::steady_clock::now();
+
+    // Release the OPPOSITE readout zone immediately on a domain switch
+    // (CS-edit ↔ BC-edit) so two parameter lines don't sit on the LCD
+    // at once. Use the SSL 360° invalidate frame, not blank-text — the
+    // invalidate releases the layout slot, blank text leaves it active.
+    const uint8_t otherZone = (zoneByte == zone::kBusCompReadout)
+                            ? zone::kChannelStripReadout : zone::kBusCompReadout;
+    std::string& otherCache = (zoneByte == zone::kBusCompReadout)
+                            ? lastZone03Text_ : lastZone05Text_;
+    if (!otherCache.empty()) {
+        otherCache.clear();
+        device_->send(buildDisplayInvalidate(otherZone));
+    }
+
+    // Colour bar follows the touched plug-in's track colour. UC1's
+    // focusedTrack_ is gated to selection (so plug-in GUI clicks on a
+    // non-selected track don't hijack the surface) — but the COLOUR
+    // BAR + readout zone are about "which plug-in am I currently
+    // editing?", which is g_focusedFxTrack. Refresh() pushes the bar
+    // for focusedTrack_; we override it here while the user is editing.
+    if (void* fxTr = uf8::g_focusedFxTrack.load(std::memory_order_relaxed)) {
+        if (ValidatePtr2(nullptr, fxTr, "MediaTrack*")) {
+            const uint32_t rgb = static_cast<uint32_t>(
+                GetTrackColor(static_cast<MediaTrack*>(fxTr))) & 0x00FFFFFFu;
+            const uint8_t palette = (rgb == 0) ? 0x00 : uf8::quantize(rgb);
+            if (static_cast<int>(palette) != lastFocusedPalette_) {
+                lastFocusedPalette_ = palette;
+                device_->send(buildFocusedColour(palette));
+            }
+        }
+    }
 }
 
 void UC1Surface::renderExtFuncsSubscreen_()
@@ -2539,6 +2620,20 @@ void UC1Surface::refresh()
     // banner state was last written.
     const bool havePlugin = bindings.channelMap || bcBindings_.busCompMap;
     device_->send(buildColourBarEnable(havePlugin));
+
+    // Release stale readout zones for any domain the new focused track
+    // doesn't host. Without this, navigating to a CS-less track left
+    // the last CS readout text ("Bypass Off" etc.) ghosting in zone
+    // 0x03; same for BC. Send the SSL 360° invalidate frame
+    // (FF 66 01 <zone>) and clear the cache.
+    if (!bindings.channelMap && !lastZone03Text_.empty()) {
+        lastZone03Text_.clear();
+        device_->send(buildDisplayInvalidate(zone::kChannelStripReadout));
+    }
+    if (!bcBindings_.busCompMap && !lastZone05Text_.empty()) {
+        lastZone05Text_.clear();
+        device_->send(buildDisplayInvalidate(zone::kBusCompReadout));
+    }
     if (bcScrollOverlayActive_) {
         device_->send(buildCentralMode(CentralMode::Main, 0x02));
         device_->send(buildLcdHeader("BUS COMP 2"));
@@ -2635,12 +2730,21 @@ void UC1Surface::refresh()
                 if (longName.size() > 16) longName.resize(16);
             }
         }
-        if (!longName.empty()) {
-            device_->send(buildCentralMode(CentralMode::Main, 0x02));
-            device_->send(buildLcdHeader(longName));
-        } else {
-            device_->send(buildCentralMode(CentralMode::Main, 0x00));
-        }
+        // subMode = 0x00 in steady state (CS-mode layout: line low, CS
+        // carousel + CS readout area visible). 0x02 was sent here in
+        // earlier code which permanently parked the LCD in BC-encoder-
+        // scroll-overlay mode — that hid the CS carousel and pinned
+        // the "BUS COMP 2" header forever. uc1_47 capture confirms
+        // SSL 360° only fires sub=0x02 during the brief BC-encoder
+        // scroll window (handled in the bcScrollOverlayActive_ branch
+        // above).
+        // No buildLcdHeader(longName) here either: SSL 360° in CS
+        // mode only sends the 4-char buildCentralLabel via FF 66 05 01;
+        // the longer "BUS COMP 2"/"CHANNEL STRIP 2" header writes to the
+        // same zone 0x01 and would overwrite the area the SMALL triple
+        // (CS carousel) occupies, hiding the carousel entirely.
+        device_->send(buildCentralMode(CentralMode::Main, 0x00));
+        (void)longName;
     }
 
     // Focused-track colour bar — single palette byte. Uses the same

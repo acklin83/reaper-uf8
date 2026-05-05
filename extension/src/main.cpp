@@ -3979,23 +3979,30 @@ void chaseLastTouchedFx()
     const int linkIdx = uf8::slotIdxForVst3Param(*map, paramIdx);
     if (linkIdx < 0) return;
 
-    // Re-apply focus every tick the user has a touched-FX. The CHANNEL/BC
-    // encoders and domain_cs/domain_bc builtins all overwrite FocusedParam
-    // to {domain, 0} on a domain-switch — without this re-apply, a dedup
-    // on (tr, fx, param) leaves that {domain, 0} stuck even though the
-    // user is still editing the original linkIdx. Idempotent + cheap.
-    uf8::setFocus({map->domain, linkIdx});
-    // Park the touched track so UC1's param-value readout looks up the
-    // plug-in on whichever track the user actually edited, even when
-    // UC1's general focusedTrack_ is gated to selection (see the
-    // I_SELECTED check below — that gate exists so non-selected V-Pot
-    // edits don't hijack UC1's track display, but the *param-value*
-    // readout should still follow the edit).
-    uf8::g_focusedFxTrack.store(static_cast<void*>(tr),
-                                std::memory_order_relaxed);
+    // Re-apply focus when the user is ACTIVELY editing — either a new
+    // (tr, fx, param) touch OR the param value moved since last tick.
+    // GetLastTouchedFX returns the same (tr, fx, param) forever after
+    // the user touches it once, so a naive "fire setFocus every tick"
+    // overrides legitimate FocusedParam state set by encoders / domain
+    // builtins (e.g. {BC, 0} from BC-encoder, slot 0 from domain_bc) —
+    // that broke instance cycling. The value-changed gate makes chase
+    // yield FocusedParam to other paths during pure navigation, while
+    // still re-applying through dedup-blocked stale state when the
+    // user is genuinely turning a knob.
+    static int    lastTr = -2, lastFx = -2, lastParam = -2;
+    static double lastValue = -999.0;
+    const double  curValue = TrackFX_GetParamNormalized(tr, fxIdx, paramIdx);
+    const bool inputChanged = (trWord != lastTr || fxWord != lastFx
+                               || paramIdx != lastParam);
+    const bool valueChanged = (curValue != lastValue);
+    lastValue = curValue;
 
-    static int lastTr = -2, lastFx = -2, lastParam = -2;
-    if (trWord == lastTr && fxWord == lastFx && paramIdx == lastParam) return;
+    if (inputChanged || valueChanged) {
+        uf8::setFocus({map->domain, linkIdx});
+        uf8::g_focusedFxTrack.store(static_cast<void*>(tr),
+                                    std::memory_order_relaxed);
+    }
+    if (!inputChanged) return;
     lastTr = trWord; lastFx = fxWord; lastParam = paramIdx;
 
     // Multi-instance follow: a plug-in GUI click on a copy that isn't

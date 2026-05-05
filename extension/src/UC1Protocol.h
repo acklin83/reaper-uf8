@@ -221,6 +221,27 @@ std::vector<uint8_t> buildLedWrite(uint8_t bank, uint8_t cell, uint8_t state);
 // space-padded inside this helper.
 std::vector<uint8_t> buildDisplayText(uint8_t zone, std::string_view text, size_t width = 22);
 
+// Single-byte FF 66 01 <zone> CK frame — "zone <zone> invalidate". Tells
+// the firmware to deactivate that zone's readout area; SSL 360° fires
+// this ~3s after the user stops turning a CS/BC knob to revert the LCD
+// layout from "domain-active" back to neutral. Different effect from
+// buildDisplayText(zone, ""): blank-text leaves the zone visually
+// active with whitespace; invalidate releases the layout slot.
+std::vector<uint8_t> buildDisplayInvalidate(uint8_t zone);
+
+// FF 66 03 00 01 <flag> CK — readout-burst precursor with explicit
+// layout-mode flag. Per uc1_47 capture analysis the third payload byte
+// drives the LCD layout state:
+//   0x00 — CS / neutral mode (horizontal split line low; CS carousel
+//          gets the upper area, BC small)
+//   0x01 — transitional / colour-bar-on (matches the older
+//          buildColourBarEnable(true) semantics)
+//   0x02 — BC mode (line high; BC carousel gets more space)
+// SSL 360° fires the appropriate flag before EVERY readout-burst, plus
+// at encoder-mode-switch boundaries. buildColourBarEnable(false/true)
+// remains a thin wrapper for the 0x00/0x01 cases.
+std::vector<uint8_t> buildReadoutPrecursor(uint8_t flag);
+
 // Zero-GR convenience: FF 5B 02 00 00.
 inline std::vector<uint8_t> buildZeroGr() { return buildGrMeter(0.0f); }
 

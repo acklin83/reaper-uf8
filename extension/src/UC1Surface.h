@@ -255,6 +255,12 @@ private:
     // don't spam it on every poll.
     bool                                  bcScrollOverlayActive_ = false;
     std::chrono::steady_clock::time_point bcScrollOverlayUntil_{};
+    // Mirror for CS / channel-encoder scrolling. While active,
+    // pushFocusedParamReadout_ suppresses zone 0x03 (CS readout) so
+    // the SMALL track-name carousel has the upper LCD area to itself.
+    // Set on each Encoder 1 detent; reverts after the timeout.
+    bool                                  csScrollOverlayActive_ = false;
+    std::chrono::steady_clock::time_point csScrollOverlayUntil_{};
 
     std::mutex               queueMu_;
     std::deque<ButtonEvent>  buttonQueue_;
@@ -340,6 +346,18 @@ private:
     // display-context reset.
     std::vector<uint8_t> lastSmallTripleFrame_;
     std::vector<uint8_t> lastLargeTripleFrame_;
+    // Cache the last palette index pushed to the focused-track colour-bar
+    // zone. pushFocusedParamReadout_ keeps this in sync with the touched
+    // plug-in's track colour so the bar follows the active edit (CS or
+    // BC), not just the UC1-selected track.
+    int  lastFocusedPalette_ = -1;
+    // Per-zone "last value-change" timestamp. SSL 360° fires a zone-
+    // invalidate burst (precursor + LARGE triple + FF 66 01 <zone>) ~3s
+    // after the user stops turning a CS/BC knob to release the LCD's
+    // domain-active layout slot. We mirror that: poll() checks these
+    // and emits the invalidate burst when the timeout elapses.
+    std::chrono::steady_clock::time_point lastZone03Edit_{};
+    std::chrono::steady_clock::time_point lastZone05Edit_{};
 };
 
 } // namespace uc1
