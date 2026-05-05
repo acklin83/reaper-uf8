@@ -2586,15 +2586,21 @@ void UC1Surface::refresh()
     const std::string prevName = nameOfIdx(curIdx - 1);
     const std::string currName = nameOfIdx(curIdx);
     const std::string nextName = nameOfIdx(curIdx + 1);
+    // Build triples but defer sending — uc1_47 Encoder 1 burst at
+    // t=1.4309s shows SSL 360°'s order is layout-enable → central-label
+    // → LARGE triple → SMALL triple → palette → invalidate(0x0F). The
+    // sub-mode byte in `FF 66 03 00 01 <sub>` drives a layout state
+    // machine: 0x01 = CS-with-carousel visible, 0x00 = neutral (no
+    // carousel). Sending triples BEFORE the layout-enable, then sending
+    // sub=0x00 from steady-state code, was emptying the carousel slots
+    // every refresh.
     auto smallTriple = buildTrackNameTripleSmall(prevName, currName, nextName);
     lastSmallTripleFrame_ = smallTriple;
-    device_->send(std::move(smallTriple));
     auto largeTriple = buildTrackNameTripleLarge(
         bcNameAtRank(bcRank - 1),
         bcNameAtRank(bcRank),
         bcNameAtRank(bcRank + 1));
     lastLargeTripleFrame_ = largeTriple;
-    device_->send(std::move(largeTriple));
 
     // 7-segment push moved to the end of refresh() — see below. Several
     // knob ring cell maps (FaderLevel, BC Mix, BC Release) overlap the
@@ -2730,22 +2736,27 @@ void UC1Surface::refresh()
                 if (longName.size() > 16) longName.resize(16);
             }
         }
-        // subMode = 0x00 in steady state (CS-mode layout: line low, CS
-        // carousel + CS readout area visible). 0x02 was sent here in
-        // earlier code which permanently parked the LCD in BC-encoder-
-        // scroll-overlay mode — that hid the CS carousel and pinned
-        // the "BUS COMP 2" header forever. uc1_47 capture confirms
-        // SSL 360° only fires sub=0x02 during the brief BC-encoder
-        // scroll window (handled in the bcScrollOverlayActive_ branch
-        // above).
-        // No buildLcdHeader(longName) here either: SSL 360° in CS
-        // mode only sends the 4-char buildCentralLabel via FF 66 05 01;
-        // the longer "BUS COMP 2"/"CHANNEL STRIP 2" header writes to the
-        // same zone 0x01 and would overwrite the area the SMALL triple
-        // (CS carousel) occupies, hiding the carousel entirely.
-        device_->send(buildCentralMode(CentralMode::Main, 0x00));
+        // No buildLcdHeader(longName) here: SSL 360° in CS mode only
+        // sends the 4-char buildCentralLabel via FF 66 05 01; the longer
+        // "BUS COMP 2"/"CHANNEL STRIP 2" header writes to the same zone
+        // 0x01 and would overwrite the area the SMALL triple (CS
+        // carousel) occupies, hiding the carousel entirely.
+        // No buildCentralMode(Main, 0x00) here either: that frame is
+        // FF 66 03 00 01 00 — the sub=0x00 variant of the same
+        // FF 66 03 00 01 X frame buildColourBarEnable already wrote
+        // earlier as sub=0x01. Sending sub=0x00 from refresh()'s
+        // steady-state path was the carousel-killer (uc1_47 t=1.4309s
+        // confirms SSL fires sub=0x01 during Encoder-1 detents and
+        // only drops to sub=0x00 ~3 s after scroll stops, not on every
+        // tick).
         (void)longName;
     }
+
+    // Carousel triple sends, in SSL 360°'s order: LARGE then SMALL.
+    // Must come AFTER buildColourBarEnable + buildCentralLabel above
+    // — uc1_47 capture order is layout-enable → label → LARGE → SMALL.
+    device_->send(std::vector<uint8_t>(largeTriple));
+    device_->send(std::vector<uint8_t>(smallTriple));
 
     // Focused-track colour bar — single palette byte. Uses the same
     // quantizer as UF8's color-bar (uf8::quantize on the track's
