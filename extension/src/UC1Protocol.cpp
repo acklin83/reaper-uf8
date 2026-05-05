@@ -467,6 +467,18 @@ std::vector<uint8_t> buildMenuIndicator08()
     return buildFrame(0x66, data);
 }
 
+std::vector<uint8_t> buildIndicatorZoneSetup()
+{
+    // FF 66 02 0C 02 CKSUM. One-shot — primes the round-indicator
+    // zone so subsequent FF 66 04 0D paints actually render the
+    // yellow arc. Without it the indicator zone stays dead even
+    // when bytes match capture verbatim. Decoded from uc1_48
+    // (2026-05-05) — fired exactly once during SSL360 boot, no
+    // recurrence in 60s of EXT_FUNCS adjust activity.
+    const uint8_t data[2] = {0x0C, 0x02};
+    return buildFrame(0x66, data);
+}
+
 std::vector<uint8_t> buildCentralLabel(std::string_view fourChars)
 {
     // FF 66 05 01 <4 ASCII> CKSUM

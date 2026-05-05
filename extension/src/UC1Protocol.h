@@ -377,6 +377,15 @@ std::vector<uint8_t> buildMenuCommit(bool active = false);
 // alongside the commit by SSL360 in the browse path.
 std::vector<uint8_t> buildMenuIndicator08();
 
+// One-shot indicator-zone primer. SSL 360° sends `FF 66 02 0C 02`
+// exactly once during boot, immediately before the first
+// FF 66 04 0D round-indicator paint (uc1_48 t=0.5142s, ~0.0001s
+// before the indicator). Without this frame the indicator zone
+// stays dead — verbatim replay of the indicator burst paints the
+// value text but not the yellow arc. Send once after handshake /
+// init flood; subsequent FF 66 04 0D writes then paint correctly.
+std::vector<uint8_t> buildIndicatorZoneSetup();
+
 // Central Control Panel mode banner (decoded uc1_37 + uc1_38 2026-05-01).
 // Frame: FF 66 03 00 <mode> 00 <chk>. Selects which top-of-LCD layout
 // the firmware renders. All six bytes confirmed against captures.

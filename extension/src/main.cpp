@@ -1311,6 +1311,22 @@ void drainInputQueue()
                         slF->vst3Param, normF);
                     break;
                 }
+                // FLIP+PAN no-slot swap: fader writes track D_PAN.
+                // pb14 → 0..1 → -1..+1 pan range. Same kUf8FaderPbMax
+                // scaling as the FLIP+slot path so a centred fader
+                // lands at exactly 0.0 pan.
+                if (g_flip.load() && forcePanF) {
+                    const uint16_t pbF = linearVolumeToPb(e.value);
+                    double n = static_cast<double>(pbF) /
+                               static_cast<double>(kUf8FaderPbMax);
+                    if (n < 0.0) n = 0.0;
+                    if (n > 1.0) n = 1.0;
+                    double pan = n * 2.0 - 1.0;
+                    if (pan < -1.0) pan = -1.0;
+                    if (pan >  1.0) pan =  1.0;
+                    SetMediaTrackInfo_Value(tr, "D_PAN", pan);
+                    break;
+                }
                 // Plugin-fader mode: route the fader to the SSL strip's
                 // internal Fader Level param (vst3 index varies per
                 // variant) instead of REAPER's post-FX track volume.
@@ -1461,6 +1477,22 @@ void drainInputQueue()
                     const double newLin = pbToLinearVolume(
                         static_cast<uint16_t>(newPb));
                     CSurf_OnVolumeChange(tr, newLin, false);
+                    break;
+                }
+                // FLIP+PAN no-slot swap: V-Pot writes track volume.
+                // Same pb14-delta math as the FLIP+slot path above so
+                // detent feel matches. Active when no plug-in slot is
+                // present (otherwise FLIP+slot wins).
+                if (g_flip.load() && forcePan) {
+                    const uint16_t curPb = linearVolumeToPb(uiVolLinear(tr));
+                    double dPb = e.value * 16383.0;
+                    if (g_shiftHeld.load()) dPb *= 0.25;
+                    int newPb = static_cast<int>(std::round(
+                        static_cast<double>(curPb) + dPb));
+                    if (newPb < 0) newPb = 0;
+                    if (newPb > 16383) newPb = 16383;
+                    CSurf_OnVolumeChange(tr,
+                        pbToLinearVolume(static_cast<uint16_t>(newPb)), false);
                     break;
                 }
                 if (slPtr) {
@@ -3429,6 +3461,12 @@ void pushZonesForVisibleSlots()
         // fader, so the strip falls back to normal mode silently.
         const bool flipActive = g_flip.load() && slot && fxIdx >= 0;
 
+        // FLIP+PAN with no plug-in slot to swap onto. Per the documented
+        // decision tree (line ~3446), FLIP+PAN should swap pan↔volume:
+        // V-Pots show volume, faders show pan. flipActive only handles
+        // the plug-in-param case; this covers the simple Vol/Pan swap.
+        const bool flipPanSwap = g_flip.load() && g_forcePan.load() && !flipActive;
+
         // Plugin-fader mode active on this strip = global plugin-fader
         // toggle ON + a CS plug-in is loaded. FLIP wins if both are on
         // (FLIP is per-strip and explicit; plugin-fader is global).
@@ -3499,8 +3537,9 @@ void pushZonesForVisibleSlots()
                 // collapsed bar so the user sees the slot is empty.
                 vpotBar[s] = (uint16_t{0x00} | (uint16_t{0x80} << 8));
             }
-        } else if (flipActive) {
+        } else if (flipActive || flipPanSwap) {
             // FLIP: V-Pot reads track volume. Map pb14 → 0..100 unipolar.
+            // Same path for the FLIP+PAN swap (no plug-in slot needed).
             const double volLinFlip = uiVolLinear(tr);
             const uint16_t pbVol = linearVolumeToPb(volLinFlip);
             vpotBar[s] = vpotPosFromUnipolar(
@@ -3688,6 +3727,18 @@ void pushZonesForVisibleSlots()
                 if (p14 < 0)              p14 = 0;
                 if (p14 > kUf8FaderPbMax) p14 = kUf8FaderPbMax;
                 pb = static_cast<uint16_t>(p14);
+            } else if (flipPanSwap) {
+                // FLIP+PAN no-slot swap: fader parks at the track's pan
+                // position (centre = 0). Map -1..+1 → 0..kUf8FaderPbMax.
+                const double pan = GetMediaTrackInfo_Value(tr, "D_PAN");
+                double n = (pan + 1.0) * 0.5;
+                if (n < 0.0) n = 0.0;
+                if (n > 1.0) n = 1.0;
+                int p14 = static_cast<int>(std::round(
+                    n * static_cast<double>(kUf8FaderPbMax)));
+                if (p14 < 0)              p14 = 0;
+                if (p14 > kUf8FaderPbMax) p14 = kUf8FaderPbMax;
+                pb = static_cast<uint16_t>(p14);
             } else {
                 pb = linearVolumeToPb(volLin);
             }
@@ -3728,6 +3779,11 @@ void pushZonesForVisibleSlots()
                 valLine = std::string(19, ' ');
             }
         } else if (flipActive) {
+            valLine = composeValueLine("Vol", formatDbReadout(volLin));
+        } else if (flipPanSwap) {
+            // FLIP+PAN no-slot swap: V-Pot shows volume, fader shows pan.
+            // Value line follows the V-Pot ("Vol") so the dB readout
+            // matches what the V-Pot is actually displaying.
             valLine = composeValueLine("Vol", formatDbReadout(volLin));
         } else if (g_forcePan.load()) {
             // forcePan overrides Plugin mode + focus. Pure REAPER pan.
@@ -3902,8 +3958,9 @@ void pushZonesForVisibleSlots()
             // unipolar mode 0x01.
             if (slot && isVPotPanFocus(focused)) slot = nullptr;
             const bool flipHere = g_flip.load() && slot && fxIdx >= 0;
-            if (flipHere) {
-                vpotMode[s] = 0x01;  // FLIP: V-Pot = volume (unipolar)
+            const bool flipPanHere = g_flip.load() && g_forcePan.load() && !flipHere;
+            if (flipHere || flipPanHere) {
+                vpotMode[s] = 0x01;  // FLIP / FLIP+PAN: V-Pot = volume (unipolar)
             } else if (!slot) {
                 vpotMode[s] = 0x08;  // pan fallback — bipolar centre
             } else if (isBinarySlot(*slot)) {

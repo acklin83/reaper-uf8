@@ -422,12 +422,30 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
             const double curN = TrackFX_GetParamNormalized(
                 static_cast<MediaTrack*>(focusedTrack_),
                 match.fxIndex, s.vst3Param);
-            // 1% per detent; Fine modifier shrinks to 0.1%. Toggles
-            // and stepped enums snap to their nearest values via the
-            // plug-in's quantisation.
-            const double scale = fineMode_.load(std::memory_order_relaxed)
-                                   ? 0.001 : 0.01;
-            double next = curN + step * scale;
+            // Per-param step sizing. Toggles flip on a single detent;
+            // stepped enums advance one step per detent; continuous
+            // params use 1%/detent (0.1% in fine mode). REAPER returns
+            // step values in NORMALIZED [0..1] units via the
+            // GetParameterStepSizes API.
+            double pStep = 0.0, pSmallStep = 0.0, pLargeStep = 0.0;
+            bool isToggle = false;
+            const bool haveStepInfo = TrackFX_GetParameterStepSizes(
+                static_cast<MediaTrack*>(focusedTrack_),
+                match.fxIndex, s.vst3Param,
+                &pStep, &pSmallStep, &pLargeStep, &isToggle);
+            double next = curN;
+            if (haveStepInfo && isToggle) {
+                // 1 detent (in either direction) flips the toggle.
+                next = (curN >= 0.5) ? 0.0 : 1.0;
+            } else if (haveStepInfo && pStep > 0.0) {
+                // Discrete-stepped enum — advance one step per detent.
+                next = curN + step * pStep;
+            } else {
+                // Continuous — 1% per detent, 0.1% in fine mode.
+                const double scale = fineMode_.load(std::memory_order_relaxed)
+                                       ? 0.001 : 0.01;
+                next = curN + step * scale;
+            }
             if (next < 0.0) next = 0.0;
             if (next > 1.0) next = 1.0;
             TrackFX_SetParamNormalized(

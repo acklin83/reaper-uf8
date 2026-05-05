@@ -223,6 +223,30 @@ bool UC1Device::open()
     // Post-flood settle.
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
+    // One-shot indicator-zone primer (FF 66 02 0C 02). SSL 360° emits
+    // this exactly once during boot, immediately before the first
+    // round-indicator paint (uc1_48 t=0.5142s). Without it the yellow
+    // EXT_FUNCS arc never paints — the value-text and unit frames
+    // render but the indicator zone stays dead. Fired here as part of
+    // open() so it's always in place before main.cpp's surface init.
+    {
+        auto setup = buildIndicatorZoneSetup();
+        int t = 0;
+        const int rc = libusb_bulk_transfer(handle_, kEpOut,
+            setup.data(), static_cast<int>(setup.size()), &t, 500);
+        if (rc < 0) {
+            lastError_ = std::string("indicator-zone setup OUT failed: ")
+                       + libusb_error_name(rc);
+            libusb_release_interface(handle_, kInterface);
+            libusb_close(handle_);
+            libusb_exit(ctx_);
+            handle_ = nullptr;
+            ctx_    = nullptr;
+            return false;
+        }
+        frameLogWrite_(setup.data(), setup.size());
+    }
+
     // Brightness is pushed by main.cpp after open() using the stored
     // ExtState value.
 
