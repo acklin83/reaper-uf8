@@ -1030,7 +1030,12 @@ void UC1Surface::handleButton_(const ButtonEvent& ev)
                     // value frame regardless — list-mode also shows
                     // the current value, active-mode just makes the
                     // encoder rotate the value instead of scrolling.
+                    // buildMenuCommit on push toggle highlights the
+                    // active-state visual (yellow value / green name
+                    // per uc1_37↔uc1_39 diff). NOT sent per scroll
+                    // step — SSL360 only emits it on the push toggle.
                     extFuncsActive_ = !extFuncsActive_;
+                    if (device_) device_->send(buildMenuCommit(extFuncsActive_));
                     renderExtFuncsSubscreen_();
                     break;
                 case Uc1Mode::Routing:   /* nop */ break;
@@ -1433,6 +1438,16 @@ void UC1Surface::pushButtonReadout_(uint8_t /*buttonId*/, std::string_view label
 void UC1Surface::pushFocusedParamReadout_()
 {
     if (!device_) return;
+    // Only Main mode owns the CS/BC readout zones (0x03/0x05). Menu
+    // modes (EXT_FUNCS / PRESETS / ROUTING / TRANSPORT) repurpose the
+    // central LCD area and have their own value-field render paths
+    // (e.g. renderExtFuncsSubscreen_ writes the live value via
+    // buildLcdValue / FF 66 <len> 0E). Without this guard, a chase
+    // tick during an EXT_FUNCS adjust kept overwriting the subscreen
+    // with the regular readout text — the user saw their value
+    // jumping into the wrong LCD region instead of landing in the
+    // EXT_FUNCS parameter field.
+    if (mode_ != Uc1Mode::Main) return;
     const auto focused = uf8::getFocusedParam();
     if (focused.domain == uf8::Domain::None) return;
 
@@ -1568,16 +1583,11 @@ void UC1Surface::renderExtFuncsSubscreen_()
     // value field (FF 66 <len> 0E). Skip silently if no plug-in /
     // entry isn't on the focused plug-in.
     //
-    // NOTE 2026-05-01: yellow round-indicator (FF 66 04 0D ...) does
-    // not paint on the LCD even when bytes match capture verbatim.
-    // Header text + value text DO render. Verbatim replay of the
-    // exact uc1_40 t=8.700 burst (banner+header+triple+value+unit+
-    // indicator) also fails to paint the arc. Conclusion: SSL360
-    // must send a precursor "register/init" frame earlier in the
-    // session that primes the LCD's indicator zone. Capture sweep
-    // for that frame is the next debugging step. Until then, we
-    // still send the correct bytes — the value text and slot
-    // resolution are useful regardless.
+    // buildLcdRoundIndicator(v) is sent even though the yellow arc
+    // doesn't visibly paint — empirically the firmware uses it as a
+    // commit/repaint trigger for the bottom LCD region. Without it,
+    // the value text caches and stops updating on subsequent encoder
+    // detents (only the very first value-frame paints).
     if (focusedTrack_) {
         auto match = uf8::lookupPluginOnTrack(focusedTrack_,
                                               uf8::Domain::ChannelStrip);
