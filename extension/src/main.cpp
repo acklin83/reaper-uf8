@@ -167,6 +167,14 @@ std::atomic<bool> g_showOnlySelected{false};
 // Forward decl — defined further down with the other clock helpers.
 int64_t nowMs_();
 
+// Forward decls for Pan overlay used by drainInputQueue. The state +
+// formatters live further down with the other strip caches.
+std::string formatPanReadout(double pan);
+std::string composeValueLine(std::string_view label, std::string_view value);
+constexpr int64_t kPanOverlayMs = 600;
+extern std::array<int64_t, 8>     g_panOverlayUntilMs;
+extern std::array<std::string, 8> g_panOverlayText;
+
 // Surface-visible track list — REAPER's full track set filtered by
 // g_folderMode (parents-only: only top-level / depth-0 tracks pass,
 // plus the children of g_spilledParent when one is held expanded) and
@@ -1246,14 +1254,29 @@ void drainInputQueue()
             case PendingInput::VolumeAbs: {
                 // Send/Receive routing wins over every other fader-input
                 // path: when the user explicitly turned on a routing
-                // mode, the fader writes the routed level (no FLIP, no
-                // plugin-fader, no track-vol).
+                // mode, the fader writes the routed level (no plugin-fader,
+                // no track-vol). FLIP swaps fader/V-Pot inside send mode:
+                // fader writes the routed D_PAN, V-Pot takes vol.
                 {
                     const StripRoute fr = resolveFaderRoute_(
                         e.strip, bankOffset, trackCount);
                     if (fr.active() && fr.valid) {
-                        SetTrackSendInfo_Value(fr.track, fr.sendCategory,
-                                               fr.sendIndex, "D_VOL", e.value);
+                        if (g_flip.load()) {
+                            const uint16_t pbF = linearVolumeToPb(e.value);
+                            double pan = static_cast<double>(pbF) /
+                                         static_cast<double>(kUf8FaderPbMax);
+                            pan = pan * 2.0 - 1.0;
+                            if (pan < -1.0) pan = -1.0;
+                            if (pan >  1.0) pan =  1.0;
+                            SetTrackSendInfo_Value(fr.track, fr.sendCategory,
+                                                   fr.sendIndex, "D_PAN", pan);
+                            g_panOverlayUntilMs[e.strip] = nowMs_() + kPanOverlayMs;
+                            g_panOverlayText[e.strip]    =
+                                composeValueLine("Pan", formatPanReadout(pan));
+                        } else {
+                            SetTrackSendInfo_Value(fr.track, fr.sendCategory,
+                                                   fr.sendIndex, "D_VOL", e.value);
+                        }
                         break;
                     }
                     if (fr.active()) break;   // routed but slot doesn't exist — eat the event
@@ -1336,7 +1359,7 @@ void drainInputQueue()
                         e.strip, bankOffset, trackCount);
                     const StripRoute vr = resolveVpotRoute_(
                         e.strip, bankOffset, trackCount);
-                    auto writePan = [](const StripRoute& r, double dv) {
+                    auto writePan = [&](const StripRoute& r, double dv, int strip) -> double {
                         const double cur = GetTrackSendInfo_Value(
                             r.track, r.sendCategory, r.sendIndex, "D_PAN");
                         double next = cur + dv;
@@ -1344,12 +1367,42 @@ void drainInputQueue()
                         if (next < -1.0) next = -1.0;
                         SetTrackSendInfo_Value(r.track, r.sendCategory,
                                                r.sendIndex, "D_PAN", next);
+                        g_panOverlayUntilMs[strip] = nowMs_() + kPanOverlayMs;
+                        g_panOverlayText[strip]    =
+                            composeValueLine("Pan", formatPanReadout(next));
+                        return next;
+                    };
+                    auto writeRouteVolDelta = [](const StripRoute& r, double dv) {
+                        const double curLin = GetTrackSendInfo_Value(
+                            r.track, r.sendCategory, r.sendIndex, "D_VOL");
+                        const uint16_t curPb = linearVolumeToPb(curLin);
+                        double dPb = dv * 16383.0;
+                        int newPb = static_cast<int>(std::round(
+                            static_cast<double>(curPb) + dPb));
+                        if (newPb < 0)     newPb = 0;
+                        if (newPb > 16383) newPb = 16383;
+                        const double newLin = pbToLinearVolume(
+                            static_cast<uint16_t>(newPb));
+                        SetTrackSendInfo_Value(r.track, r.sendCategory,
+                                               r.sendIndex, "D_VOL", newLin);
                     };
                     if (fr.active()) {
                         if (fr.valid) {
                             double delta = e.value;
                             if (g_shiftHeld.load()) delta *= 0.25;
-                            writePan(fr, delta);
+                            if (g_flip.load() && g_forcePan.load()) {
+                                // FLIP+PAN held → V-Pot drives the strip
+                                // track's own pan (P_PAN), not the send.
+                                const double cur = GetMediaTrackInfo_Value(tr, "D_PAN");
+                                double next = cur + delta;
+                                if (next >  1.0) next =  1.0;
+                                if (next < -1.0) next = -1.0;
+                                SetMediaTrackInfo_Value(tr, "D_PAN", next);
+                            } else if (g_flip.load()) {
+                                writeRouteVolDelta(fr, delta);
+                            } else {
+                                writePan(fr, delta, e.strip);
+                            }
                         }
                         break;   // active route consumes the event either way
                     }
@@ -1358,20 +1411,11 @@ void drainInputQueue()
                             if (g_forcePan.load()) {
                                 double delta = e.value;
                                 if (g_shiftHeld.load()) delta *= 0.25;
-                                writePan(vr, delta);
+                                writePan(vr, delta, e.strip);
                             } else {
-                                const double curLin = readRouteVolumeLinear_(vr, tr);
-                                const uint16_t curPb = linearVolumeToPb(curLin);
-                                double dPb = e.value * 16383.0;
+                                double dPb = e.value;
                                 if (g_shiftHeld.load()) dPb *= 0.25;
-                                int newPb = static_cast<int>(std::round(
-                                    static_cast<double>(curPb) + dPb));
-                                if (newPb < 0)     newPb = 0;
-                                if (newPb > 16383) newPb = 16383;
-                                const double newLin = pbToLinearVolume(
-                                    static_cast<uint16_t>(newPb));
-                                SetTrackSendInfo_Value(vr.track, vr.sendCategory,
-                                                       vr.sendIndex, "D_VOL", newLin);
+                                writeRouteVolDelta(vr, dPb);
                             }
                         }
                         break;
@@ -1486,8 +1530,18 @@ void drainInputQueue()
                         e.strip, bankOffset, trackCount);
                     if (fr.active()) {
                         if (fr.valid) {
-                            SetTrackSendInfo_Value(fr.track, fr.sendCategory,
-                                                   fr.sendIndex, "D_PAN", 0.0);
+                            if (g_flip.load() && g_forcePan.load()) {
+                                SetMediaTrackInfo_Value(tr, "D_PAN", 0.0);
+                            } else if (g_flip.load()) {
+                                SetTrackSendInfo_Value(fr.track, fr.sendCategory,
+                                                       fr.sendIndex, "D_VOL", 1.0);
+                            } else {
+                                SetTrackSendInfo_Value(fr.track, fr.sendCategory,
+                                                       fr.sendIndex, "D_PAN", 0.0);
+                                g_panOverlayUntilMs[e.strip] = nowMs_() + kPanOverlayMs;
+                                g_panOverlayText[e.strip]    =
+                                    composeValueLine("Pan", formatPanReadout(0.0));
+                            }
                         }
                         break;
                     }
@@ -2804,6 +2858,14 @@ std::array<std::string, 8> g_lastChanNum{};
 std::array<uint16_t, 8>    g_lastVPotBar{};      // 16-bit LE per strip
 std::array<uint8_t, 8>     g_lastVPotMode{};     // FF 66 09 0D mode byte per strip
 
+// Routed pan-tweak overlay: when the user moves a control that writes
+// the routed D_PAN, the value-line briefly shows the formatted pan
+// readout instead of the send name, then reverts after kPanOverlayMs.
+// Touched from drainInputQueue (main thread) and read from the timer
+// (also main thread) — plain types are sufficient.
+std::array<int64_t, 8>     g_panOverlayUntilMs{};
+std::array<std::string, 8> g_panOverlayText{};
+
 // CUT LED last-pushed state per strip — int8_t with -1 = unknown / force
 // re-push, 0/1 = effective mute state. Effective mute follows routing:
 // in Send/Receive routing mode the LED reflects the routed entity's
@@ -3392,14 +3454,26 @@ void pushZonesForVisibleSlots()
         //   5. Plugin mode → SSL strip Pan (linkIdx 3).
         //   6. default     → REAPER track pan.
         if (routedFader) {
-            // Fader carries the route's volume → V-Pot is free for pan
-            // ALWAYS (no PAN-button gate). Bar = bipolar centre-out
-            // showing route's D_PAN. Empty slot collapses.
+            // Fader carries the route's volume → V-Pot is free for pan.
+            // FLIP swaps: fader=pan, V-Pot=volume. FLIP+PAN held shows
+            // the track's own pan on the V-Pot (transient overlay).
             if (faderRoute.valid) {
-                const double pan = GetTrackSendInfo_Value(
-                    faderRoute.track, faderRoute.sendCategory,
-                    faderRoute.sendIndex, "D_PAN");
-                vpotBar[s] = vpotPosFromPan(pan);
+                if (g_flip.load() && g_forcePan.load()) {
+                    const double pan = GetMediaTrackInfo_Value(tr, "D_PAN");
+                    vpotBar[s] = vpotPosFromPan(pan);
+                } else if (g_flip.load()) {
+                    const double volLin = GetTrackSendInfo_Value(
+                        faderRoute.track, faderRoute.sendCategory,
+                        faderRoute.sendIndex, "D_VOL");
+                    const uint16_t pbVol = linearVolumeToPb(volLin);
+                    vpotBar[s] = vpotPosFromUnipolar(
+                        static_cast<double>(pbVol) / 16383.0);
+                } else {
+                    const double pan = GetTrackSendInfo_Value(
+                        faderRoute.track, faderRoute.sendCategory,
+                        faderRoute.sendIndex, "D_PAN");
+                    vpotBar[s] = vpotPosFromPan(pan);
+                }
             } else {
                 vpotBar[s] = (uint16_t{0x00} | (uint16_t{0x80} << 8));
             }
@@ -3468,28 +3542,19 @@ void pushZonesForVisibleSlots()
             vpotBar[s] = vpotPosFromPan(pan);
         }
 
-        // Upper scribble row — REAPER track name (max 7 chars). When a
-        // Send/Receive route is active for this strip's V-Pot or Fader
-        // we override the line with the route's destination/source
-        // name so the user sees what they're controlling. V-Pot route
-        // wins over Fader route when both are active (V-Pot is the
-        // more granular per-strip control).
+        // Upper scribble row — REAPER track name (max 7 chars). Even in
+        // Send/Receive routing mode the upper line stays on P_NAME so
+        // the user always knows which track this strip belongs to; the
+        // route's own name moves to the value line below.
         {
             std::string n;
-            if (routedVpot && vpotRoute.valid) {
-                n = routeName_(vpotRoute);
-            } else if (routedFader && faderRoute.valid) {
-                n = routeName_(faderRoute);
-            }
+            char name[256] = {0};
+            GetSetMediaTrackInfo_String(tr, "P_NAME", name, false);
+            n = name;
             if (n.empty()) {
-                char name[256] = {0};
-                GetSetMediaTrackInfo_String(tr, "P_NAME", name, false);
-                n = name;
-                if (n.empty()) {
-                    char fallback[8];
-                    std::snprintf(fallback, sizeof(fallback), "CH %d", realSlot + 1);
-                    n = fallback;
-                }
+                char fallback[8];
+                std::snprintf(fallback, sizeof(fallback), "CH %d", realSlot + 1);
+                n = fallback;
             }
             if (n.size() > 7) n.resize(7);
             if (n != g_lastTrackName[s]) {
@@ -3587,11 +3652,28 @@ void pushZonesForVisibleSlots()
         if (!g_touchReported[s].load()) {
             uint16_t pb;
             if (routedFader) {
-                // routedFader → motor parks at the routed level. volLin
-                // was already overridden above to the send/receive volume
-                // (or 0.0 for an invalid route), so the same conversion
-                // works as the normal track-volume path.
-                pb = linearVolumeToPb(volLin);
+                if (g_flip.load() && faderRoute.valid) {
+                    // FLIP+route: fader carries the send's D_PAN. Map
+                    // pan -1..+1 → 0..kUf8FaderPbMax so the motor parks
+                    // at full-left / centre / full-right cleanly.
+                    const double pan = GetTrackSendInfo_Value(
+                        faderRoute.track, faderRoute.sendCategory,
+                        faderRoute.sendIndex, "D_PAN");
+                    double n = (pan + 1.0) * 0.5;
+                    if (n < 0.0) n = 0.0;
+                    if (n > 1.0) n = 1.0;
+                    int p14 = static_cast<int>(std::round(
+                        n * static_cast<double>(kUf8FaderPbMax)));
+                    if (p14 < 0)              p14 = 0;
+                    if (p14 > kUf8FaderPbMax) p14 = kUf8FaderPbMax;
+                    pb = static_cast<uint16_t>(p14);
+                } else {
+                    // routedFader → motor parks at the routed level.
+                    // volLin was already overridden above to the send/
+                    // receive volume (or 0.0 for an invalid route), so
+                    // the same conversion works as track-volume.
+                    pb = linearVolumeToPb(volLin);
+                }
             } else if (flipActive || csFaderActive) {
                 const int useFx = flipActive ? fxIdx : cs.fxIndex;
                 const int useParam = flipActive ? slot->vst3Param : cs.vst3Param;
@@ -3627,17 +3709,21 @@ void pushZonesForVisibleSlots()
              || focused.slotIdx == uf8::ext::PluginAB
              || focused.slotIdx == uf8::ext::PluginHQ);
         if (routedFader || routedVpot) {
-            // Routing mode: each strip represents a send/receive. The
-            // dB readout already shows the routed volume, so the value
-            // line shows the routed entity's PAN — gives the user a
-            // per-strip pan readout next to the volume. Fader-routed
-            // strips use that route; V-Pot-routed strips fall back to
-            // the V-Pot's route. Empty/invalid routes blank the line.
+            // Routing mode: the value line shows the route's NAME (send
+            // or receive label) so each strip is self-identifying. A
+            // recent pan tweak overlays the formatted pan readout for
+            // kPanOverlayMs before the name returns. Empty/invalid
+            // routes blank the line.
             const StripRoute& r = routedFader ? faderRoute : vpotRoute;
             if (r.valid) {
-                const double pan = GetTrackSendInfo_Value(
-                    r.track, r.sendCategory, r.sendIndex, "D_PAN");
-                valLine = composeValueLine("Pan", formatPanReadout(pan));
+                if (g_panOverlayUntilMs[s] > nowMs_()) {
+                    valLine = g_panOverlayText[s];
+                } else {
+                    std::string n = routeName_(r);
+                    if (n.size() > 19) n.resize(19);
+                    valLine = std::move(n);
+                    valLine.resize(19, ' ');
+                }
             } else {
                 valLine = std::string(19, ' ');
             }
@@ -3786,7 +3872,15 @@ void pushZonesForVisibleSlots()
             const StripRoute fRoute = resolveFaderRoute_(
                 static_cast<int>(s), bankOffset, trackCount);
             if (fRoute.active()) {
-                vpotMode[s] = fRoute.valid ? 0x08 : 0x03;
+                if (!fRoute.valid) {
+                    vpotMode[s] = 0x03;
+                } else if (g_flip.load() && g_forcePan.load()) {
+                    vpotMode[s] = 0x08;       // FLIP+PAN held → track pan
+                } else if (g_flip.load()) {
+                    vpotMode[s] = 0x01;       // FLIP → V-Pot = volume
+                } else {
+                    vpotMode[s] = 0x08;       // default → V-Pot = send pan
+                }
                 continue;
             }
             const StripRoute vRoute = resolveVpotRoute_(
