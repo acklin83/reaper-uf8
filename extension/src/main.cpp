@@ -46,6 +46,7 @@
 #include "PluginMap.h"
 #include "Protocol.h"
 #include "UC1Device.h"
+#include "UC1PluginMap.h"
 #include "UC1Surface.h"
 #include "UF8Device.h"
 #include "UserPluginCatalog.h"
@@ -162,6 +163,109 @@ std::atomic<bool> g_pluginFaderMode{false};
 // Selection Set (8 slots, recalled via selset_recall param 1..8).
 std::atomic<bool> g_folderMode{false};
 std::atomic<bool> g_showOnlySelected{false};
+
+// Forward decl — defined further down with the other clock helpers.
+int64_t nowMs_();
+
+// Surface-visible track list — REAPER's full track set filtered by
+// g_folderMode (parents-only: only top-level / depth-0 tracks pass,
+// plus the children of g_spilledParent when one is held expanded) and
+// g_showOnlySelected (live "currently selected" filter, not a saved
+// selection set). Independent of REAPER's MCP collapse state — folder
+// mode here is a pure surface filter. Rebuilt once per onTimer tick
+// before strip rendering and input handling. ALL "bank index → track"
+// lookups in surface contexts read from this list; non-surface callers
+// (e.g. scanning all tracks for any-armed status) keep using REAPER's
+// full track set via CountTracks/GetTrack.
+std::vector<MediaTrack*> g_visibleTracks;
+
+// Long-press SEL on a parent (folder-start) track temporarily exposes
+// its direct children on the strips immediately to the right, until the
+// user long-presses SEL on the same parent again or on a different
+// parent. Only meaningful when g_folderMode is on. Stored as raw
+// MediaTrack*; revalidated against ValidatePtr2 every rebuild because
+// REAPER may free the track behind our back when the user reorders.
+std::atomic<MediaTrack*> g_spilledParent{nullptr};
+
+// Per-strip SEL press state for long-press detection. press_ms = epoch
+// millis at the press edge (0 = not currently held). spill_fired = true
+// once the long-press threshold elapsed and the spill toggle ran (so
+// the held button doesn't keep firing every tick). Cleared on release.
+std::array<std::atomic<int64_t>, 8> g_selPressMs{};
+std::array<std::atomic<bool>, 8>    g_selSpillFired{};
+
+constexpr int64_t kSelLongPressMs = 500;
+
+inline int visibleTrackCount() {
+    return static_cast<int>(g_visibleTracks.size());
+}
+inline MediaTrack* visibleTrackAt(int idx) {
+    if (idx < 0 || idx >= static_cast<int>(g_visibleTracks.size())) return nullptr;
+    return g_visibleTracks[idx];
+}
+
+void rebuildVisibleTrackList() {
+    const bool folderMode = g_folderMode.load();
+    const bool selOnly    = g_showOnlySelected.load();
+    MediaTrack* spilled   = g_spilledParent.load();
+    if (spilled && !ValidatePtr2(nullptr, spilled, "MediaTrack*")) {
+        spilled = nullptr;
+        g_spilledParent.store(nullptr);
+    }
+    const int  n = CountTracks(nullptr);
+    g_visibleTracks.clear();
+    g_visibleTracks.reserve(static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i) {
+        MediaTrack* tr = GetTrack(nullptr, i);
+        if (!tr) continue;
+        if (folderMode) {
+            // Parents-only: a track passes when it's at top level
+            // (GetTrackDepth == 0) — covers folder-start tracks AND
+            // non-folder root tracks alike. Children pass only if they
+            // are DIRECT children of the currently-spilled parent
+            // (long-press SEL on that parent flipped the spill on).
+            // Independent of REAPER's MCP collapse state — the user
+            // wanted a hardware-only filter, not a mirror.
+            const int depth = GetTrackDepth(tr);
+            if (depth != 0) {
+                if (!spilled) continue;
+                if (GetParentTrack(tr) != spilled) continue;
+            }
+        }
+        // Show-only-selected: live filter against current selection (not
+        // a saved selection set). Each tick reflects the latest
+        // I_SELECTED state so toggling track selection adds/removes
+        // strips immediately.
+        if (selOnly && !(GetMediaTrackInfo_Value(tr, "I_SELECTED") > 0.5))
+            continue;
+        g_visibleTracks.push_back(tr);
+    }
+}
+
+// Long-press SEL → folder spill toggle. Polled at the start of onTimer
+// (before rebuildVisibleTrackList) so the rebuilt list immediately
+// reflects spill changes. Skips silently when folder_mode is off — no
+// visible effect even if user happens to long-press SEL.
+void checkSelLongPressSpill() {
+    if (!g_folderMode.load()) return;
+    const int64_t now = nowMs_();
+    for (int s = 0; s < 8; ++s) {
+        const int64_t pressMs = g_selPressMs[s].load();
+        if (pressMs == 0) continue;
+        if (g_selSpillFired[s].load()) continue;
+        if (now - pressMs < kSelLongPressMs) continue;
+        g_selSpillFired[s].store(true);
+        MediaTrack* tr = g_slotTrack[s];
+        if (!tr || !ValidatePtr2(nullptr, tr, "MediaTrack*")) continue;
+        // Only folder-start tracks (I_FOLDERDEPTH == 1) carry children
+        // worth spilling. Non-folder top-level tracks fail this gate
+        // and the long-press is a no-op for them.
+        if (GetMediaTrackInfo_Value(tr, "I_FOLDERDEPTH") < 0.5) continue;
+        MediaTrack* cur = g_spilledParent.load();
+        g_spilledParent.store(cur == tr ? nullptr : tr);
+        g_bankDirty.store(true);
+    }
+}
 
 // Active Selection-Set slot (1..8); 0 = none. selset_recall sets this,
 // LED feedback uses it so the bound button lights for the live slot.
@@ -541,6 +645,14 @@ struct PendingInput {
         SelectRelative,  // value = signed track-index delta (channel encoder, Nav mode)
         PlayheadNudge,   // value = signed seconds delta (channel encoder, Nudge mode)
         MouseScroll,     // value = signed scroll delta (channel encoder, Focus mode)
+        InstanceCycle,   // value = signed delta; Shift+channel-encoder cycles
+                         // the active CS/BC instance on the focused (or
+                         // BC-anchor) track regardless of encoder mode.
+        EncoderRotation, // value = signed6 raw delta from the channel
+                         // encoder. drainInputQueue accumulates and
+                         // dispatches via bindings::dispatchEncoder so
+                         // the user can rebind Plain / Shift / Cmd / Ctrl
+                         // slots on ButtonId::ChannelEncoder.
         MainAction,      // value = REAPER action ID (Main_OnCommand)
         AutomationMode,  // value = REAPER automation mode (0..4) on selected track
         FocusSelected,   // re-scroll REAPER MCP + UF8 bank to currently selected track
@@ -553,7 +665,11 @@ struct PendingInput {
 // Encoder-mode state. Default = Nav (= track select) matching the UF8's
 // out-of-box feel. Toggled by the NAV (0x73), NUDGE (0x74), FOCUS (0x75)
 // buttons and pushed back to Nav by the channel-encoder push (0x76).
-enum class EncoderMode : uint8_t { Nav, Nudge, Focus };
+// Instance mode is bindable via the `encoder_instance` builtin — no
+// dedicated UF8 cell, the user picks any button. Plain rotation in
+// Instance mode cycles the focused-domain plug-in instance (same logic
+// as the Shift+Channel-Encoder shortcut, just without the modifier).
+enum class EncoderMode : uint8_t { Nav, Nudge, Focus, Instance };
 std::atomic<EncoderMode> g_encoderMode{EncoderMode::Nav};
 
 // Send/Receive-routing modes for the V-Pots and faders. Four
@@ -631,20 +747,38 @@ struct StripRoute {
     bool        active() const { return sendCategory != kRouteNone; }
 };
 
-StripRoute makeRoute_(int strip, int bankOffset, int trackCount,
+StripRoute makeRoute_(int strip, int bankOffset, int /*trackCount*/,
                       int allIdx, bool thisTrack, int category)
 {
     StripRoute r;
     if (allIdx >= 0) {
         const int rs = strip + bankOffset;
-        r.track        = (rs < trackCount) ? GetTrack(nullptr, rs) : nullptr;
+        // Surface-aware lookup: in folder_mode / show_only_selected the
+        // strip→track mapping is filtered, so a literal GetTrack(nullptr,
+        // rs) would point at the wrong track. visibleTrackAt does the
+        // bounds check internally and returns null past the end.
+        r.track        = visibleTrackAt(rs);
         r.sendCategory = category;
         r.sendIndex    = allIdx;
     } else if (thisTrack) {
         // Focused track for the strip-as-send-list mode. GetLastTouchedTrack
-        // is a stable choice that survives mixer-scroll: SetSurfaceSelected
-        // keeps it pointing at whatever the user last clicked.
-        r.track        = GetLastTouchedTrack();
+        // usually survives mixer-scroll, but it can briefly return null
+        // mid-edit (e.g. during a SetSurfaceSelected re-broadcast triggered
+        // by SetTrackSendInfo_Value). When that happens the route invalidates
+        // for every strip and the fader display snaps to -inf dB. Sticky
+        // cache: remember the last non-null result and reuse it after
+        // validating against REAPER's pointer table.
+        static MediaTrack* s_lastTouchedCache = nullptr;
+        MediaTrack* lt = GetLastTouchedTrack();
+        if (lt) {
+            s_lastTouchedCache = lt;
+        } else if (s_lastTouchedCache
+                   && ValidatePtr2(nullptr, s_lastTouchedCache, "MediaTrack*")) {
+            lt = s_lastTouchedCache;
+        } else {
+            s_lastTouchedCache = nullptr;
+        }
+        r.track        = lt;
         r.sendCategory = category;
         r.sendIndex    = strip;
     } else {
@@ -757,8 +891,97 @@ std::atomic<bool> g_shiftHeld{false};
 // divide by the scale and only consume whole integer steps. Separate
 // accumulators per mode so mode switches don't bleed fractional state
 // across. Main-thread only.
-double g_selectAccum = 0.0;
-double g_nudgeAccum  = 0.0;
+double g_selectAccum   = 0.0;
+double g_nudgeAccum    = 0.0;
+double g_instanceAccum = 0.0;
+double g_encoderAccum  = 0.0;   // unified accumulator for the bindings-routed
+                                // EncoderRotation pipeline (Plain / Shift / Cmd /
+                                // Ctrl all share so the user can change
+                                // modifier mid-rotation without losing detents).
+
+// Forward decls — implementations live further down (followSelectedInMixer
+// after the encoder mode toggles, emitMouseScroll near the input dispatch).
+void followSelectedInMixer(MediaTrack* tr);
+void emitMouseScroll(int32_t delta);
+
+// Encoder-action helpers — extracted so both the legacy per-mode drain
+// handlers (kept for backward-compat) AND the bindings-routed dispatch
+// (EncoderRotation → bindings::dispatchEncoder → builtins) end up
+// running the same logic for each step. All three run on the main
+// thread (drainInputQueue caller).
+void applySelectRelative_(int step)
+{
+    if (step == 0) return;
+    const int trackCount = CountTracks(nullptr);
+    if (trackCount == 0) return;
+    int cur = -1;
+    for (int t = 0; t < trackCount; ++t) {
+        if (GetMediaTrackInfo_Value(GetTrack(nullptr, t), "I_SELECTED") > 0.5) {
+            cur = t;
+            break;
+        }
+    }
+    int next = (cur >= 0 ? cur : 0) + step;
+    if (next < 0) next = 0;
+    if (next > trackCount - 1) next = trackCount - 1;
+    if (MediaTrack* tr = GetTrack(nullptr, next)) {
+        SetOnlyTrackSelected(tr);
+        followSelectedInMixer(tr);
+    }
+}
+void applyPlayheadNudge_(int step)
+{
+    if (step == 0) return;
+    const double cur = GetCursorPosition();
+    SetEditCurPos(cur + step * kNudgeSecondsPerStep, true, false);
+}
+void applyMouseScroll_(int delta)
+{
+    if (delta == 0) return;
+    emitMouseScroll(static_cast<int32_t>(delta));
+}
+
+// Cycle the active CS or BC plug-in instance by `step` slots. Shared
+// between the Shift+Channel-Encoder dispatch (drainInputQueue) and the
+// bindable instance_next / instance_prev builtins so the same wraparound
+// + repaint logic runs from either entry point. Domain follows the
+// focused-param domain (Quick1 = CS, Quick2 = BC).
+//
+// BC gate: cycling targets the BC anchor (because UC1 BC controls read
+// from the anchor, so the user expects the visible result of cycling to
+// hit the same plug-in the knobs already drive). But it ONLY fires when
+// focused track == BC anchor — i.e. the user has explicitly selected the
+// channel UC1 currently shows in its BC module. Encoder 2 alone (which
+// only shifts the BC module's view) is NOT enough to enable cycling;
+// the user must Channel-1 (selection encoder) onto that track first.
+// Without this gate the encoder would silently cycle a track UC1 isn't
+// even displaying — confusing, no visible feedback.
+//
+// CS has no anchor concept, so it always targets the focused track.
+void applyInstanceCycle_(int step)
+{
+    if (step == 0) return;
+    if (!g_uc1_surface) return;
+    const auto focused = uf8::getFocusedParam();
+    const auto domain  = (focused.domain == uf8::Domain::BusComp)
+        ? uc1::ControlDomain::BusComp
+        : uc1::ControlDomain::ChannelStrip;
+    void* targetTrack = nullptr;
+    if (domain == uc1::ControlDomain::BusComp) {
+        void* anchor  = g_uc1_surface->bcAnchorTrackPublic();
+        void* focused = g_uc1_surface->focusedTrack();
+        if (!anchor || anchor != focused) return;   // gate
+        targetTrack = anchor;
+    } else {
+        targetTrack = g_uc1_surface->focusedTrack();
+    }
+    if (!targetTrack) return;
+    uc1::cycleInstance(targetTrack, domain, step);
+    g_uc1_surface->invalidateCache();
+    g_uc1_surface->refresh();
+    g_pageDirty.store(true);
+    g_bankDirty.store(true);
+}
 constexpr double kChannelEncoderScale = 4.0;
 
 // When set, the Channel-Encoder Select also shifts the UF8 bank and the
@@ -776,10 +999,15 @@ void followSelectedInMixer(MediaTrack* tr)
     // stays within the visible range if REAPER decides to keep context).
     SetMixerScroll(tr);
 
-    const int trackCount = CountTracks(nullptr);
+    // Bank-snap operates in surface-visible space — under folder_mode /
+    // show_only_selected the bank coordinates are filtered indices, not
+    // raw REAPER track indices. If the selected track happens to be
+    // filtered out (e.g. show-only-selected was just toggled), the
+    // followSelectedInMixer call exits without scrolling.
+    const int trackCount = visibleTrackCount();
     int idx = -1;
     for (int t = 0; t < trackCount; ++t) {
-        if (GetTrack(nullptr, t) == tr) { idx = t; break; }
+        if (visibleTrackAt(t) == tr) { idx = t; break; }
     }
     if (idx < 0) return;
 
@@ -886,8 +1114,14 @@ void drainInputQueue()
         std::lock_guard<std::mutex> lk(g_inQueueMutex);
         local.swap(g_inQueue);
     }
-    const int trackCount = CountTracks(nullptr);
-    const int bankOffset = g_bankOffset.load();
+    // Two counts: trackCount = REAPER's full track set (used by global
+    // navigation like SelectRelative, which operates on the project, not
+    // the filtered surface). surfaceCount = visibleTrackCount() which
+    // honours folder_mode + show_only_selected — used to map strip index
+    // to track for fader / V-Pot / button events.
+    const int trackCount    = CountTracks(nullptr);
+    const int surfaceCount  = visibleTrackCount();
+    const int bankOffset    = g_bankOffset.load();
     for (const auto& e : local) {
         // Global-scope events (no strip) are dispatched before the
         // per-strip track resolution below.
@@ -924,6 +1158,31 @@ void drainInputQueue()
             emitMouseScroll(static_cast<int32_t>(e.value));
             continue;
         }
+        if (e.kind == PendingInput::InstanceCycle) {
+            g_instanceAccum += e.value / kChannelEncoderScale;
+            int step = 0;
+            if (g_instanceAccum >=  1.0) { step = static_cast<int>(g_instanceAccum); g_instanceAccum -= step; }
+            if (g_instanceAccum <= -1.0) { step = static_cast<int>(g_instanceAccum); g_instanceAccum -= step; }
+            applyInstanceCycle_(step);
+            continue;
+        }
+        if (e.kind == PendingInput::EncoderRotation) {
+            // Bindings-routed encoder dispatch. Accumulate raw signed6
+            // detents into integer steps, then hand off to the
+            // ChannelEncoder binding so the active modifier slot's
+            // builtin runs. Builtin gets `param = step` (signed) so
+            // delta-aware actions (cycle, scroll) can react in
+            // proportion to user input.
+            g_encoderAccum += e.value / kChannelEncoderScale;
+            int step = 0;
+            if (g_encoderAccum >=  1.0) { step = static_cast<int>(g_encoderAccum); g_encoderAccum -= step; }
+            if (g_encoderAccum <= -1.0) { step = static_cast<int>(g_encoderAccum); g_encoderAccum -= step; }
+            if (step != 0) {
+                uf8::bindings::dispatchEncoder(
+                    uf8::bindings::ButtonId::ChannelEncoder, step);
+            }
+            continue;
+        }
         if (e.kind == PendingInput::SelectRelative) {
             if (trackCount == 0) continue;
             // Accumulate scaled fractional deltas — the UF8 emits
@@ -953,12 +1212,32 @@ void drainInputQueue()
         }
 
         const int slot = e.strip + bankOffset;
-        if (slot >= trackCount) continue;
-        MediaTrack* tr = GetTrack(nullptr, slot);
+        if (slot >= surfaceCount) continue;
+        MediaTrack* tr = visibleTrackAt(slot);
         if (!tr) continue;
         switch (e.kind) {
             case PendingInput::SoloToggle:     CSurf_OnSoloChange(tr, -1); break;
-            case PendingInput::MuteToggle:     CSurf_OnMuteChange(tr, -1); break;
+            case PendingInput::MuteToggle: {
+                // Routing mode: when the strip represents a send/receive
+                // (V-Pot or fader routing active), the CUT button toggles
+                // the routed entity's mute, not the bank track's. Prefer
+                // fader route if both are active — fader is the "primary"
+                // routing context for the CUT-fader region.
+                StripRoute mr = resolveFaderRoute_(e.strip, bankOffset, surfaceCount);
+                if (!mr.active())
+                    mr = resolveVpotRoute_(e.strip, bankOffset, surfaceCount);
+                if (mr.active() && mr.valid) {
+                    const double cur = GetTrackSendInfo_Value(
+                        mr.track, mr.sendCategory, mr.sendIndex, "B_MUTE");
+                    SetTrackSendInfo_Value(mr.track, mr.sendCategory,
+                                           mr.sendIndex, "B_MUTE",
+                                           cur > 0.5 ? 0.0 : 1.0);
+                    break;
+                }
+                if (mr.active()) break;     // routed but slot empty — eat the press
+                CSurf_OnMuteChange(tr, -1);
+                break;
+            }
             case PendingInput::SelectToggle:   CSurf_OnSelectedChange(tr, -1); break;
             case PendingInput::SelectExclusive:
                 SetOnlyTrackSelected(tr);
@@ -1044,24 +1323,59 @@ void drainInputQueue()
                 // so a single detent moves about 1/128 of the full sweep
                 // (with shift = quarter-fine).
                 {
+                    // Pan routing decision tree:
+                    //   1. Fader has the route (default mode) → V-Pot is
+                    //      free, so pan ALWAYS writes the route's D_PAN
+                    //      (PAN button irrelevant — fader+vpot already
+                    //      naturally split into vol+pan).
+                    //   2. V-Pot has the route → V-Pot defaults to D_VOL;
+                    //      PAN button switches it to D_PAN.
+                    //   3. No routing — fall through to plug-in param /
+                    //      track pan logic below.
+                    const StripRoute fr = resolveFaderRoute_(
+                        e.strip, bankOffset, trackCount);
                     const StripRoute vr = resolveVpotRoute_(
                         e.strip, bankOffset, trackCount);
-                    if (vr.active() && vr.valid) {
-                        const double curLin = readRouteVolumeLinear_(vr, tr);
-                        const uint16_t curPb = linearVolumeToPb(curLin);
-                        double dPb = e.value * 16383.0;
-                        if (g_shiftHeld.load()) dPb *= 0.25;
-                        int newPb = static_cast<int>(std::round(
-                            static_cast<double>(curPb) + dPb));
-                        if (newPb < 0)     newPb = 0;
-                        if (newPb > 16383) newPb = 16383;
-                        const double newLin = pbToLinearVolume(
-                            static_cast<uint16_t>(newPb));
-                        SetTrackSendInfo_Value(vr.track, vr.sendCategory,
-                                               vr.sendIndex, "D_VOL", newLin);
+                    auto writePan = [](const StripRoute& r, double dv) {
+                        const double cur = GetTrackSendInfo_Value(
+                            r.track, r.sendCategory, r.sendIndex, "D_PAN");
+                        double next = cur + dv;
+                        if (next >  1.0) next =  1.0;
+                        if (next < -1.0) next = -1.0;
+                        SetTrackSendInfo_Value(r.track, r.sendCategory,
+                                               r.sendIndex, "D_PAN", next);
+                    };
+                    if (fr.active()) {
+                        if (fr.valid) {
+                            double delta = e.value;
+                            if (g_shiftHeld.load()) delta *= 0.25;
+                            writePan(fr, delta);
+                        }
+                        break;   // active route consumes the event either way
+                    }
+                    if (vr.active()) {
+                        if (vr.valid) {
+                            if (g_forcePan.load()) {
+                                double delta = e.value;
+                                if (g_shiftHeld.load()) delta *= 0.25;
+                                writePan(vr, delta);
+                            } else {
+                                const double curLin = readRouteVolumeLinear_(vr, tr);
+                                const uint16_t curPb = linearVolumeToPb(curLin);
+                                double dPb = e.value * 16383.0;
+                                if (g_shiftHeld.load()) dPb *= 0.25;
+                                int newPb = static_cast<int>(std::round(
+                                    static_cast<double>(curPb) + dPb));
+                                if (newPb < 0)     newPb = 0;
+                                if (newPb > 16383) newPb = 16383;
+                                const double newLin = pbToLinearVolume(
+                                    static_cast<uint16_t>(newPb));
+                                SetTrackSendInfo_Value(vr.track, vr.sendCategory,
+                                                       vr.sendIndex, "D_VOL", newLin);
+                            }
+                        }
                         break;
                     }
-                    if (vr.active()) break;   // routed but slot missing — eat the event
                 }
                 // V-pot rotation: if the strip's track hosts a plug-in of
                 // the focused domain (CS / BC) AND we're not in global Pan
@@ -1161,6 +1475,35 @@ void drainInputQueue()
                 // FLIP exception: with a slot present, the V-Pot push
                 // resets track volume to 0 dB (linear 1.0) — the V-Pot
                 // is driving volume.
+                {
+                    // Push semantics mirror the rotate semantics:
+                    //   * Fader has route → V-Pot push centers route pan.
+                    //   * V-Pot has route + PAN → center route pan.
+                    //   * V-Pot has route + no PAN → reset route vol to 0 dB.
+                    const StripRoute fr = resolveFaderRoute_(
+                        e.strip, bankOffset, trackCount);
+                    const StripRoute vr = resolveVpotRoute_(
+                        e.strip, bankOffset, trackCount);
+                    if (fr.active()) {
+                        if (fr.valid) {
+                            SetTrackSendInfo_Value(fr.track, fr.sendCategory,
+                                                   fr.sendIndex, "D_PAN", 0.0);
+                        }
+                        break;
+                    }
+                    if (vr.active()) {
+                        if (vr.valid) {
+                            if (g_forcePan.load()) {
+                                SetTrackSendInfo_Value(vr.track, vr.sendCategory,
+                                                       vr.sendIndex, "D_PAN", 0.0);
+                            } else {
+                                SetTrackSendInfo_Value(vr.track, vr.sendCategory,
+                                                       vr.sendIndex, "D_VOL", 1.0);
+                            }
+                        }
+                        break;
+                    }
+                }
                 const auto focused = uf8::getFocusedParam();
                 // Synthetic toggles (Phase / A/B / HQ) are not VST3 params
                 // — handled directly here on the strip's track. Push
@@ -1848,6 +2191,15 @@ void onUf8Input(const uint8_t* data, size_t len)
             // (coalesced by strip) — the timer will apply it to the track.
             // We only queue while the user is actively touching the fader,
             // so REAPER's motor echo doesn't feed back.
+            //
+            // ASYMMETRY: TOUCH opcode (FF 20 02) uses 1-indexed rawStrip
+            // and we shift by -1 in the touch handler. POSITION opcode
+            // (FF 21 03) uses 0-indexed rawStrip directly. Verified by
+            // the long-running edb1121 build; combining the two opcodes
+            // under a single shift convention breaks REAPER updates and
+            // the bit-7 echo for all faders. If you "fix" this asymmetry
+            // without a fresh capture proving symmetric indexing, you
+            // will reproduce the 2026-05-05 morning regression.
             const uint8_t strip   = data[i + 3];
             const uint8_t rawA    = data[i + 4];
             const uint8_t rawHigh = data[i + 4] & 0x80;     // diag: was bit 7 set?
@@ -1878,7 +2230,17 @@ void onUf8Input(const uint8_t* data, size_t len)
                 // authoritative bit-7-set stream.
                 if (!rawHigh) {
                     faderInputLog_("POS", strip, pb14, 0, 0, "DROP_NOHI");
-                    i += 6;
+                    i += frameSize;   // cmd 0x21 = 7 bytes; was hardcoded
+                                      // 6 → parser slid 1 byte into the
+                                      // checksum on every drop. The
+                                      // skip-byte recovery at the top of
+                                      // the loop usually masked this, but
+                                      // when the lone checksum happened
+                                      // to be 0xFF the next iteration
+                                      // misparsed it as a frame start —
+                                      // most visibly affecting fader 8
+                                      // (last-pushed-byte position in
+                                      // typical bundle layouts).
                     continue;
                 }
                 // Always record the raw position so the touch-release
@@ -1998,8 +2360,22 @@ void onUf8Input(const uint8_t* data, size_t len)
                         } else if (which == 2) {
                             k = g_shiftHeld.load() ? PendingInput::SelectToggle
                                                    : PendingInput::SelectExclusive;
+                            // Arm long-press detection. The press still
+                            // fires SelectExclusive immediately so a
+                            // quick tap selects without delay; if the
+                            // user keeps holding past kSelLongPressMs,
+                            // checkSelLongPressSpill on the next tick
+                            // toggles g_spilledParent.
+                            g_selPressMs[strip].store(nowMs_());
+                            g_selSpillFired[strip].store(false);
                         }
                         queueInput({k, strip, 0.0});
+                    } else if (which == 2) {
+                        // SEL release — clear long-press timer so onTimer
+                        // stops checking. spill_fired stays as a record
+                        // of whether the spill ran during this hold (not
+                        // re-read after release, but cheap to leave).
+                        g_selPressMs[strip].store(0);
                     }
                     handledNatively = true;
                 }
@@ -2021,25 +2397,27 @@ void onUf8Input(const uint8_t* data, size_t len)
             // (kills the motor-echo feedback loop), and release the motor
             // so the user's hand isn't fighting it.
             //
-            // **CRITICAL** strip-byte indexing: the firmware reports touch
-            // events 1-indexed (strip 1 = leftmost fader, ..., strip 8 =
-            // rightmost). Position events (FF 21 03), V-Pot rotation
-            // (FF 24 02), and motor commands (FF 1D / FF 1E) all use
-            // 0-indexed (strip 0 = leftmost). Discovered 2026-04-30 from
-            // the Mac trace: touching PS1 produced touch=02 + position=01
-            // and our LIMP command went to PS2, leaving PS1 motor engaged
-            // — the "fader sperrt" symptom + the two-finger trick directly
-            // explained. Subtract 1 here so all internal state and outbound
-            // motor commands stay in 0-indexed land.
+            // Strip indexing: 0-indexed end-to-end, matches cap51
+            // (SSL 360° on Windows) and confirmed on user's macOS by
+            // a controlled left-to-right sweep 2026-05-05. User
+            // touched 8 faders in sequence; log showed rawStrip 1..7
+            // (only 7 distinct values) — Fader 1 emits rawStrip=0
+            // which we were silently rejecting. cap51 LIMP/touch
+            // wire-bytes also match 0..7. Don't shift, don't reject 0.
+            //
+            // Failure mode of an erroneous `-1` shift: Fader 1's
+            // rawStrip=0 gets dropped (no LIMP, motor fights), and
+            // Fader 8's rawStrip=7 gets mapped to internal strip=6,
+            // which limps the wrong physical fader (Fader 7) — leaving
+            // Fader 8 motor engaged. Both symptoms observed during
+            // 2026-05-04/05 thrashing.
             const uint8_t rawStrip = data[i + 3];
             const uint8_t state    = data[i + 4];
-            // Out-of-range guard: rawStrip should be 1..8. Anything else
-            // is a malformed frame; skip it.
-            if (rawStrip == 0 || rawStrip > 8) {
+            if (rawStrip > 7) {
                 i += frameSize;
                 continue;
             }
-            const uint8_t strip = static_cast<uint8_t>(rawStrip - 1);
+            const uint8_t strip = rawStrip;
             if (strip < 8) {
                 // Diag log — same path as f73201c. Append-mode, one line
                 // per touch event so we can correlate with FF 1B keepalive
@@ -2047,8 +2425,8 @@ void onUf8Input(const uint8_t* data, size_t len)
                 if (FILE* lg = std::fopen("/tmp/reaper_uf8_motor.log", "a")) {
                     const auto t = std::chrono::system_clock::now().time_since_epoch();
                     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t).count();
-                    std::fprintf(lg, "[%lld] TOUCH strip=%u state=%u\n",
-                                 static_cast<long long>(ms), strip, state);
+                    std::fprintf(lg, "[%lld] TOUCH rawStrip=%u strip=%u state=%u\n",
+                                 static_cast<long long>(ms), rawStrip, strip, state);
                     std::fclose(lg);
                 }
                 faderInputLog_("TOUCH", strip, state, 0, 0,
@@ -2065,12 +2443,13 @@ void onUf8Input(const uint8_t* data, size_t len)
                 if (state != 0) {
                     g_touchLastPress[strip] = std::chrono::steady_clock::now();
                     g_touchReleasePending[strip].store(false);
-                    if (!g_touchReported[strip].exchange(true)) {
-                        // Priority-send so motor-limp jumps any LED /
-                        // value-line bursts in the queue. Same path as
-                        // f73201c — single FF 1D 02 strip 00.
-                        if (g_dev) g_dev->sendPriority(uf8::buildMotorEnable(strip, false));
-                    }
+                    g_touchReported[strip].store(true);
+                    // Send LIMP unconditionally on every touch-ON edge —
+                    // a previously-lost OFF event would otherwise pin
+                    // touchReported true and skip the LIMP. Re-sending
+                    // on every ON is cheap (one 6-byte frame) and
+                    // idempotent.
+                    if (g_dev) g_dev->sendPriority(uf8::buildMotorEnable(strip, false));
                 } else {
                     g_touchReleasePending[strip].store(true);
                 }
@@ -2094,24 +2473,16 @@ void onUf8Input(const uint8_t* data, size_t len)
                 const double delta = static_cast<double>(signed6) / 128.0;
                 queueInput({PendingInput::PanDelta, strip, delta});
             } else if (strip == 0x08) {
-                // Channel encoder — behaviour depends on the current
-                // encoder mode. In all modes we pass the raw signed6
-                // value; the drain accumulates fractional progress so
-                // multi-event physical detents collapse to one step.
-                switch (g_encoderMode.load()) {
-                    case EncoderMode::Nav:
-                        queueInput({PendingInput::SelectRelative, 0,
-                                    static_cast<double>(signed6)});
-                        break;
-                    case EncoderMode::Nudge:
-                        queueInput({PendingInput::PlayheadNudge, 0,
-                                    static_cast<double>(signed6)});
-                        break;
-                    case EncoderMode::Focus:
-                        queueInput({PendingInput::MouseScroll, 0,
-                                    static_cast<double>(signed6)});
-                        break;
-                }
+                // Channel encoder — dispatched through the bindings
+                // system (ButtonId::ChannelEncoder) from the drain
+                // handler. The active-modifier slot's builtin decides
+                // what each detent does. Default Plain =
+                // encoder_mode_dispatch (legacy Nav/Nudge/Focus/Instance
+                // mode system). Default Shift = instance_cycle. Cmd /
+                // Ctrl unbound until the user picks an action in
+                // Settings → Bindings → Channel Encoder.
+                queueInput({PendingInput::EncoderRotation, 0,
+                            static_cast<double>(signed6)});
             }
         }
         // cmd 0x33 (v-pot push?) skipped — need more samples to verify
@@ -2218,10 +2589,43 @@ void onMidiFromReaper(std::span<const uint8_t> bytes)
 
 uint32_t reaperColorForVisibleSlot(int slot)
 {
-    const int trackCount = CountTracks(nullptr);
-    const int realSlot = slot + g_bankOffset.load();
+    const int trackCount = visibleTrackCount();
+    const int bankOffset = g_bankOffset.load();
+    const int realSlot   = slot + bankOffset;
+
+    // Routing modes (Send/Receive on V-Pot or fader): the strip represents
+    // a send/receive, not a track. Colour the strip with the OTHER end of
+    // the route — destination track for a send, source track for a receive
+    // — so the user can see at a glance which bus / aux each strip points
+    // at. V-Pot routing wins over fader routing if both are somehow active
+    // (clearVpotRouting_ / clearFaderRouting_ keep them mutually exclusive
+    // by design, but match the per-strip rendering precedence here).
+    StripRoute r = resolveVpotRoute_(slot, bankOffset, trackCount);
+    if (!r.active()) r = resolveFaderRoute_(slot, bankOffset, trackCount);
+    if (r.active()) {
+        if (!r.valid) {
+            // Routing mode active but the send/receive slot doesn't exist
+            // on the source track (e.g. focused track has 4 sends, strip
+            // 5..8 in "Sends of Focused" mode). Strip should be visually
+            // empty — return 0 so ColorSync paints OFF.
+            return 0;
+        }
+        if (r.track) {
+            const char* tag = (r.sendCategory == 0) ? "P_DESTTRACK" : "P_SRCTRACK";
+            MediaTrack* other = static_cast<MediaTrack*>(GetSetTrackSendInfo(
+                r.track, r.sendCategory, r.sendIndex, tag, nullptr));
+            if (other && ValidatePtr2(nullptr, other, "MediaTrack*")) {
+                const int oc = GetTrackColor(other);
+                return static_cast<uint32_t>(oc) & 0x00FFFFFFu;
+            }
+            // Hardware-output sends (no destination track): fall through to
+            // bank-track colour so the strip stays coloured rather than
+            // going dark.
+        }
+    }
+
     if (realSlot >= trackCount) return 0;
-    MediaTrack* tr = GetTrack(nullptr, realSlot);
+    MediaTrack* tr = visibleTrackAt(realSlot);
     if (!tr) return 0;
     // REAPER returns native color as int. Bit 0x1000000 is "color set";
     // low 24 bits are 0xBBGGRR on Windows, 0xRRGGBB on mac/Linux via the
@@ -2272,14 +2676,14 @@ std::string sslPluginShortName(MediaTrack* tr)
 //     "CH N" fallback so the slot still reads as populated.
 std::string slotLabelForVisibleSlot(int slot)
 {
-    const int trackCount = CountTracks(nullptr);
+    const int trackCount = visibleTrackCount();
     const int realSlot   = slot + g_bankOffset.load();
     if (realSlot >= trackCount) {
         char fallback[8];
         std::snprintf(fallback, sizeof(fallback), "CH %d", realSlot + 1);
         return fallback;
     }
-    MediaTrack* tr = GetTrack(nullptr, realSlot);
+    MediaTrack* tr = visibleTrackAt(realSlot);
     if (!tr) return "";
 
     if (auto ssl = sslPluginShortName(tr); !ssl.empty()) return ssl;
@@ -2399,6 +2803,14 @@ std::array<std::string, 8> g_lastFaderDb{};
 std::array<std::string, 8> g_lastChanNum{};
 std::array<uint16_t, 8>    g_lastVPotBar{};      // 16-bit LE per strip
 std::array<uint8_t, 8>     g_lastVPotMode{};     // FF 66 09 0D mode byte per strip
+
+// CUT LED last-pushed state per strip — int8_t with -1 = unknown / force
+// re-push, 0/1 = effective mute state. Effective mute follows routing:
+// in Send/Receive routing mode the LED reflects the routed entity's
+// B_MUTE, otherwise the bank track's B_MUTE. REAPER's SetSurfaceMute
+// callback only fires for track mute changes, so a per-tick poll is the
+// only way to keep the LED in sync with send-mute toggles.
+std::array<int8_t, 8>      g_lastCutLed{-1, -1, -1, -1, -1, -1, -1, -1};
 bool                       g_vpotBarInit{false};
 
 // Resolve the LinkSlot for one visible strip at the current page index.
@@ -2481,7 +2893,7 @@ void pushZonesForVisibleSlots()
 {
     if (!g_dev || !g_dev->isOpen()) return;
 
-    const int trackCount = CountTracks(nullptr);
+    const int trackCount = visibleTrackCount();
     const int bankOffset = g_bankOffset.load();
     const auto focused   = uf8::getFocusedParam();
 
@@ -2560,12 +2972,13 @@ void pushZonesForVisibleSlots()
         g_lastChanNum.fill({});
         g_lastFaderPb.fill(0xFFFF);
         g_lastTopSoftKey.fill(-1);
+        g_lastCutLed.fill(-1);
         g_vpotBarInit = false;
         if (g_sync) g_sync->invalidate();
 
         for (int s = 0; s < 8; ++s) {
             const int rs = s + bankOffset;
-            MediaTrack* t = (rs < trackCount) ? GetTrack(nullptr, rs) : nullptr;
+            MediaTrack* t = visibleTrackAt(rs);
             const bool solo = t && GetMediaTrackInfo_Value(t, "I_SOLO")     > 0.5;
             const bool mute = t && GetMediaTrackInfo_Value(t, "B_MUTE")     > 0.5;
             const bool sel  = t && GetMediaTrackInfo_Value(t, "I_SELECTED") > 0.5;
@@ -2591,7 +3004,7 @@ void pushZonesForVisibleSlots()
             uint16_t mask = 0;
             for (int s = 0; s < 8; ++s) {
                 const int rs = s + bankOffset;
-                MediaTrack* t = (rs < trackCount) ? GetTrack(nullptr, rs) : nullptr;
+                MediaTrack* t = visibleTrackAt(rs);
                 if (t && GetMediaTrackInfo_Value(t, "I_SELECTED") > 0.5) {
                     mask |= static_cast<uint16_t>(1u << s);
                 }
@@ -2602,7 +3015,7 @@ void pushZonesForVisibleSlots()
 
     for (int s = 0; s < 8; ++s) {
         const int realSlot = s + bankOffset;
-        MediaTrack* tr = (realSlot < trackCount) ? GetTrack(nullptr, realSlot) : nullptr;
+        MediaTrack* tr = visibleTrackAt(realSlot);
 
         // Keep the slot→track mapping fresh so GetTouchState can map
         // REAPER's track pointer back to a strip index.
@@ -2616,79 +3029,46 @@ void pushZonesForVisibleSlots()
         const bool routedVpot  = vpotRoute.active();
         const bool routedFader = faderRoute.active();
 
-        // Empty strip (bank window extends past the last track): blank
-        // every zone so the last bucket's residue doesn't linger. Without
-        // this, shifting from e.g. tracks 1–8 to 9–12 leaves strips 5–8
-        // displaying whatever tracks 13–16 showed the session before.
-        //
-        // Dedup subtlety: the bankChanged branch above clears every
-        // g_last* cache to "". That means after a bank shift, "cache ==
-        // target" is indistinguishable between "display is already
-        // blank" and "display state unknown, need to push". Force the
-        // first-tick push via bankChanged so the blanks actually reach
-        // the device; subsequent ticks dedup normally.
-        if (!tr) {
-            const std::string blankCs   = "    ";
-            const std::string blankDb   = "    ";
-            const std::string empty{};
-            if (bankChanged || g_lastCsType[s] != blankCs) {
-                g_lastCsType[s] = blankCs;
-                g_dev->send(uf8::buildChannelStripType(static_cast<uint8_t>(s), blankCs));
+        // CUT LED — effective mute follows routing. Send/Receive mute
+        // changes don't fire SetSurfaceMute, so we poll once per tick
+        // and dedup against g_lastCutLed[s]. Empty strips (no track or
+        // routed-but-invalid) render off.
+        {
+            bool effMute = false;
+            if (tr) {
+                if (routedFader && faderRoute.valid) {
+                    effMute = GetTrackSendInfo_Value(
+                        faderRoute.track, faderRoute.sendCategory,
+                        faderRoute.sendIndex, "B_MUTE") > 0.5;
+                } else if (routedVpot && vpotRoute.valid) {
+                    effMute = GetTrackSendInfo_Value(
+                        vpotRoute.track, vpotRoute.sendCategory,
+                        vpotRoute.sendIndex, "B_MUTE") > 0.5;
+                } else if (!routedFader && !routedVpot) {
+                    effMute = GetMediaTrackInfo_Value(tr, "B_MUTE") > 0.5;
+                }
+                // routedFader/routedVpot active but invalid → effMute stays
+                // false (empty send slot, nothing to mute).
             }
-            if (bankChanged || !g_lastSlotLabel[s].empty()) {
-                g_lastSlotLabel[s].clear();
-                g_dev->send(uf8::buildPluginSlotName(static_cast<uint8_t>(s), empty));
+            const int8_t cutKey = effMute ? 1 : 0;
+            if (cutKey != g_lastCutLed[s]) {
+                g_lastCutLed[s] = cutKey;
+                sendLedFrames(uf8::buildLedColourPair(
+                    static_cast<uint8_t>(s), uf8::LedClass::Cut, effMute,
+                    ledColourFor(LedClass::Mute, tr)));
             }
-            if (bankChanged || !g_lastChanNum[s].empty()) {
-                g_lastChanNum[s].clear();
-                g_dev->send(uf8::buildChannelNumber(static_cast<uint8_t>(s), empty));
-            }
-            if (bankChanged || !g_lastTrackName[s].empty()) {
-                g_lastTrackName[s].clear();
-                g_dev->send(uf8::buildStripTextUpper(static_cast<uint8_t>(s), empty));
-            }
-            if (bankChanged || g_lastFaderDb[s] != blankDb) {
-                g_lastFaderDb[s] = blankDb;
-                g_dev->send(uf8::buildFaderDbReadout(static_cast<uint8_t>(s), blankDb));
-            }
-            if (bankChanged || !g_lastValueLine[s].empty()) {
-                g_lastValueLine[s].clear();
-                g_dev->send(uf8::buildValueLine(static_cast<uint8_t>(s), empty));
-            }
-            vpotBar[s] = 0;
-            continue;
-        }
-
-        // Resolve the SSL plug-in (if any) and the currently-paged slot
-        // for this strip. `slot == nullptr` means "no SSL plug-in on
-        // this track" OR "plug-in has fewer slots than the current page
-        // demands" (e.g. BC2 on page 8 — only 7 slots exist). In both
-        // cases we fall back to the REAPER-native display (track name +
-        // volume).
-        int fxIdx = -1;
-        const uf8::LinkSlot* slot = slotForStrip(tr, focused, &fxIdx);
-        const uf8::PluginMap* map = nullptr;
-        if (slot) {
-            auto mm = uf8::lookupPluginOnTrack(tr);
-            map = mm.map;
-        }
-
-        // Channel Strip Type zone: the plug-in's short name if recognised,
-        // else a 4-char REAPER mnemonic ("RPR ").
-        std::string csType = map ? std::string(map->displayShort)
-                                 : std::string{};
-        if (csType.empty()) csType = "RPR ";
-        csType.resize(std::min<size_t>(csType.size(), 4), ' ');
-        while (csType.size() < 4) csType += ' ';
-        if (csType != g_lastCsType[s]) {
-            g_lastCsType[s] = csType;
-            g_dev->send(uf8::buildChannelStripType(static_cast<uint8_t>(s), csType));
         }
 
         // Top-zone label + LED (FF 66 .. 04 + cells 0x18..0x1F).
         // Label = soft-key bank's row N. LED = bright when this strip's
         // bank position holds the currently-focused param, dim otherwise.
         // (UF8 manual p.174 "soft-key label" + cap41 LED decode.)
+        //
+        // Runs BEFORE the empty-strip branch so soft-key labels still
+        // appear above strips whose bank position is past the last track
+        // — labels are bank-global, not per-track. Synthetic toggles read
+        // tr only inside `if (tr)` guards, so this block is safe when
+        // tr == nullptr.
         {
             const auto domSk = (focused.domain == uf8::Domain::BusComp)
                 ? uf8::Domain::BusComp : uf8::Domain::ChannelStrip;
@@ -2846,6 +3226,129 @@ void pushZonesForVisibleSlots()
             }
         }
 
+        // Empty strip — either the bank window extends past the last
+        // track (no `tr`) OR a routing mode is active and this strip's
+        // send/receive slot doesn't exist on the source track (e.g. in
+        // "Sends of Focused Track" mode, focused track has only 4 sends
+        // → strips 5..8 are empty send slots). In both cases blank every
+        // per-track zone so the last bucket's residue doesn't linger;
+        // without this, the strip continues to show the bank track's
+        // name + colour with a -inf fader.
+        //
+        // Dedup subtlety: the bankChanged branch above clears every
+        // g_last* cache to "". That means after a bank shift, "cache ==
+        // target" is indistinguishable between "display is already
+        // blank" and "display state unknown, need to push". Force the
+        // first-tick push via bankChanged so the blanks actually reach
+        // the device; subsequent ticks dedup normally.
+        //
+        // Slot-label is NOT cleared here — the soft-key block above
+        // already pushed the bank's label for this strip. Empty strips
+        // must keep the label visible (labels are bank-global).
+        const bool routedButInvalid =
+            (routedFader && !faderRoute.valid)
+         || (routedVpot  && !vpotRoute.valid);
+        if (!tr || routedButInvalid) {
+            const std::string blankCs   = "    ";
+            const std::string blankDb   = "    ";
+            const std::string blankName = "       ";   // 7 spaces — overwrites any
+                                                        // residual text. Empty payload
+                                                        // doesn't reliably clear the
+                                                        // StripTextUpper zone (the
+                                                        // firmware retains last text);
+                                                        // a space-pad always wins.
+            const std::string blankVal  = std::string(19, ' ');
+            const std::string blankCh   = "  ";
+            if (bankChanged || g_lastCsType[s] != blankCs) {
+                g_lastCsType[s] = blankCs;
+                g_dev->send(uf8::buildChannelStripType(static_cast<uint8_t>(s), blankCs));
+            }
+            if (bankChanged || g_lastChanNum[s] != blankCh) {
+                g_lastChanNum[s] = blankCh;
+                g_dev->send(uf8::buildChannelNumber(static_cast<uint8_t>(s), blankCh));
+            }
+            if (bankChanged || g_lastTrackName[s] != blankName) {
+                g_lastTrackName[s] = blankName;
+                g_dev->send(uf8::buildStripTextUpper(static_cast<uint8_t>(s), blankName));
+            }
+            if (bankChanged || g_lastFaderDb[s] != blankDb) {
+                g_lastFaderDb[s] = blankDb;
+                g_dev->send(uf8::buildFaderDbReadout(static_cast<uint8_t>(s), blankDb));
+            }
+            if (bankChanged || g_lastValueLine[s] != blankVal) {
+                g_lastValueLine[s] = blankVal;
+                g_dev->send(uf8::buildValueLine(static_cast<uint8_t>(s), blankVal));
+            }
+
+            // Routing-mode-active + invalid slot → park the motor at
+            // -INF (pb14 = 0) for the duration of the mode. The fader
+            // physically moves to the bottom so the user sees at a
+            // glance that this strip's send/receive doesn't exist.
+            // Skipped while the user is touching the fader (so a
+            // simultaneous touch isn't fought by the motor); next
+            // render tick after release re-pushes 0. When the routing
+            // mode exits, the regular render path takes over and
+            // drives the fader to the track's actual volume.
+            if (routedButInvalid && !g_touchReported[s].load()) {
+                if (!g_faderPbInit || g_lastFaderPb[s] != 0) {
+                    g_lastFaderPb[s] = 0;
+                    g_dev->send(uf8::buildFaderPosition(
+                        static_cast<uint8_t>(s), 0, 0));
+                }
+            }
+
+            vpotBar[s] = 0;
+            continue;
+        }
+
+        // Resolve the SSL plug-in (if any) and the currently-paged slot
+        // for this strip. `slot == nullptr` means "no SSL plug-in on
+        // this track" OR "plug-in has fewer slots than the current page
+        // demands" (e.g. BC2 on page 8 — only 7 slots exist). In both
+        // cases we fall back to the REAPER-native display (track name +
+        // volume).
+        int fxIdx = -1;
+        const uf8::LinkSlot* slot = slotForStrip(tr, focused, &fxIdx);
+        // Plug-in map for the CS Type zone — derived from track presence
+        // alone (NOT gated on `slot`). The Type zone should reflect what
+        // SSL plug-in is on the strip's track regardless of whether a
+        // specific slot is currently focused. Without this decoupling,
+        // a fresh-load focused.slotIdx=-1 collapses the lookup and
+        // every strip reads "RPR" until the user toggles Q1→Q2→Q1 to
+        // bump slotIdx to 0.
+        const uf8::PluginMap* map = nullptr;
+        {
+            auto mm = uf8::lookupPluginOnTrack(tr, focused.domain);
+            map = mm.map;
+            // Fallback: focused-domain has no plug-in on this track,
+            // but the OTHER domain does → show that one's short name
+            // so the user still sees what's loaded. Avoids "RPR" on a
+            // CS-only track while in BC focus.
+            if (!map) {
+                const auto otherDom = (focused.domain == uf8::Domain::BusComp)
+                    ? uf8::Domain::ChannelStrip
+                    : uf8::Domain::BusComp;
+                auto mm2 = uf8::lookupPluginOnTrack(tr, otherDom);
+                map = mm2.map;
+            }
+        }
+
+        // Channel Strip Type zone: the plug-in's short name if recognised,
+        // else a 4-char REAPER mnemonic ("RPR ").
+        std::string csType = map ? std::string(map->displayShort)
+                                 : std::string{};
+        if (csType.empty()) csType = "RPR ";
+        csType.resize(std::min<size_t>(csType.size(), 4), ' ');
+        while (csType.size() < 4) csType += ' ';
+        if (csType != g_lastCsType[s]) {
+            g_lastCsType[s] = csType;
+            g_dev->send(uf8::buildChannelStripType(static_cast<uint8_t>(s), csType));
+        }
+
+        // (Top-zone soft-key label + LED block lives BEFORE the empty-strip
+        // branch above — it must run for every strip in the bank, not just
+        // strips that map to a track.)
+
         // Channel Number Zone — the tiny digit top-left of each strip's
         // color bar. REAPER track index is 0-based; UF8 expects 1-based
         // ASCII.
@@ -2888,12 +3391,35 @@ void pushZonesForVisibleSlots()
         //   4. focused but unavailable here → blank (collapsed bar).
         //   5. Plugin mode → SSL strip Pan (linkIdx 3).
         //   6. default     → REAPER track pan.
-        if (routedVpot) {
+        if (routedFader) {
+            // Fader carries the route's volume → V-Pot is free for pan
+            // ALWAYS (no PAN-button gate). Bar = bipolar centre-out
+            // showing route's D_PAN. Empty slot collapses.
+            if (faderRoute.valid) {
+                const double pan = GetTrackSendInfo_Value(
+                    faderRoute.track, faderRoute.sendCategory,
+                    faderRoute.sendIndex, "D_PAN");
+                vpotBar[s] = vpotPosFromPan(pan);
+            } else {
+                vpotBar[s] = (uint16_t{0x00} | (uint16_t{0x80} << 8));
+            }
+        } else if (routedVpot) {
             if (vpotRoute.valid) {
-                const double volLin = readRouteVolumeLinear_(vpotRoute, tr);
-                const uint16_t pbVol = linearVolumeToPb(volLin);
-                vpotBar[s] = vpotPosFromUnipolar(
-                    static_cast<double>(pbVol) / 16383.0);
+                if (g_forcePan.load()) {
+                    // PAN held in routing mode → V-Pot bar shows the
+                    // routed entity's D_PAN as a bipolar centre-out
+                    // sweep (matches the input handler that writes
+                    // D_PAN instead of D_VOL when PAN is held).
+                    const double pan = GetTrackSendInfo_Value(
+                        vpotRoute.track, vpotRoute.sendCategory,
+                        vpotRoute.sendIndex, "D_PAN");
+                    vpotBar[s] = vpotPosFromPan(pan);
+                } else {
+                    const double volLin = readRouteVolumeLinear_(vpotRoute, tr);
+                    const uint16_t pbVol = linearVolumeToPb(volLin);
+                    vpotBar[s] = vpotPosFromUnipolar(
+                        static_cast<double>(pbVol) / 16383.0);
+                }
             } else {
                 // Routed but the send/receive doesn't exist on this track —
                 // collapsed bar so the user sees the slot is empty.
@@ -3100,7 +3626,22 @@ void pushZonesForVisibleSlots()
             && (focused.slotIdx == uf8::ext::TrackPhase
              || focused.slotIdx == uf8::ext::PluginAB
              || focused.slotIdx == uf8::ext::PluginHQ);
-        if (flipActive) {
+        if (routedFader || routedVpot) {
+            // Routing mode: each strip represents a send/receive. The
+            // dB readout already shows the routed volume, so the value
+            // line shows the routed entity's PAN — gives the user a
+            // per-strip pan readout next to the volume. Fader-routed
+            // strips use that route; V-Pot-routed strips fall back to
+            // the V-Pot's route. Empty/invalid routes blank the line.
+            const StripRoute& r = routedFader ? faderRoute : vpotRoute;
+            if (r.valid) {
+                const double pan = GetTrackSendInfo_Value(
+                    r.track, r.sendCategory, r.sendIndex, "D_PAN");
+                valLine = composeValueLine("Pan", formatPanReadout(pan));
+            } else {
+                valLine = std::string(19, ' ');
+            }
+        } else if (flipActive) {
             valLine = composeValueLine("Vol", formatDbReadout(volLin));
         } else if (g_forcePan.load()) {
             // forcePan overrides Plugin mode + focus. Pure REAPER pan.
@@ -3226,15 +3767,37 @@ void pushZonesForVisibleSlots()
     //   0x03 = empty / disabled (no track in bank, or binary toggle)
     std::array<uint8_t, 8> vpotMode{};
     {
-        const int trackCount = CountTracks(nullptr);
+        const int trackCount = visibleTrackCount();
         const auto focused = uf8::getFocusedParam();
+        const int bankOffset = g_bankOffset.load();
         for (uint8_t s = 0; s < 8; ++s) {
-            const int realSlot = static_cast<int>(s) + g_bankOffset.load();
+            const int realSlot = static_cast<int>(s) + bankOffset;
             if (realSlot >= trackCount) {
                 vpotMode[s] = 0x03;
                 continue;
             }
-            MediaTrack* tr = GetTrack(nullptr, realSlot);
+            // Routing wins. Two flavours:
+            //   * Fader has the route → V-Pot is always pan (bipolar),
+            //     regardless of PAN button — fader carries vol, V-Pot
+            //     carries pan as the natural complement.
+            //   * V-Pot has the route → V-Pot defaults to vol (unipolar);
+            //     PAN button switches to pan (bipolar).
+            // Empty send slots collapse to the disabled mode.
+            const StripRoute fRoute = resolveFaderRoute_(
+                static_cast<int>(s), bankOffset, trackCount);
+            if (fRoute.active()) {
+                vpotMode[s] = fRoute.valid ? 0x08 : 0x03;
+                continue;
+            }
+            const StripRoute vRoute = resolveVpotRoute_(
+                static_cast<int>(s), bankOffset, trackCount);
+            if (vRoute.active()) {
+                if (!vRoute.valid)            vpotMode[s] = 0x03;
+                else if (g_forcePan.load())   vpotMode[s] = 0x08;
+                else                          vpotMode[s] = 0x01;
+                continue;
+            }
+            MediaTrack* tr = visibleTrackAt(realSlot);
             int fxIdx = -1;
             const uf8::LinkSlot* slot = slotForStrip(tr, focused, &fxIdx);
             // Pan-focus is treated as no-V-Pot-focus by the position +
@@ -3326,7 +3889,41 @@ void chaseLastTouchedFx()
     if (linkIdx < 0) return;
 
     uf8::setFocus({map->domain, linkIdx});
-    if (g_uc1_surface) g_uc1_surface->setFocusedTrack(tr);
+
+    // Multi-instance follow: a plug-in GUI click on a copy that isn't
+    // currently the active instance should snap UC1 to that copy. We
+    // map fxIdx → instance index within the domain on the touched
+    // track and update g_(bc|cs)InstanceMap. Works for both selected
+    // and non-selected tracks; UC1's own focus gate below decides
+    // whether the surface follows.
+    {
+        const int instIdx = uc1::instanceIndexForFx(tr, fxIdx);
+        if (instIdx >= 0) {
+            if (map->domain == uf8::Domain::BusComp) {
+                uc1::setBcInstanceIndex(tr, instIdx);
+            } else if (map->domain == uf8::Domain::ChannelStrip) {
+                uc1::setCsInstanceIndex(tr, instIdx);
+            }
+            // Force the next render tick to re-resolve bindings + push
+            // the new short-name letter, knob rings, etc.
+            if (g_uc1_surface) g_uc1_surface->invalidateCache();
+            g_pageDirty.store(true);
+            g_bankDirty.store(true);
+        }
+    }
+
+    // UC1 mirrors the SELECTED track. Without this gate, a UF8 V-Pot edit
+    // on a non-selected strip touches that track's plug-in param, which
+    // updates GetLastTouchedFX globally — chaseLastTouchedFx would then
+    // hijack UC1 to the non-selected track. UF8 V-Pots are explicit
+    // per-strip edits and shouldn't steal track focus from UC1; the
+    // focused-param/slot update above is enough to keep the soft-key
+    // bank in sync. Plugin-GUI clicks on a different track still need
+    // an explicit selection change to bring UC1 along.
+    if (g_uc1_surface
+        && GetMediaTrackInfo_Value(tr, "I_SELECTED") > 0.5) {
+        g_uc1_surface->setFocusedTrack(tr);
+    }
 }
 
 void commitDebouncedTouchReleases()
@@ -3348,37 +3945,58 @@ void commitDebouncedTouchReleases()
         // Snap REAPER (or the active plug-in target) to the user's last
         // raw fader position (regardless of the >=4-LSB deadband). The
         // fader drives:
-        //   - focused param  in FLIP mode (when the strip has a slot),
-        //   - SSL CS Fader   in Plugin-Fader mode,
-        //   - track volume   otherwise.
+        //   - routed send/recv level in Send/Receive mode,
+        //   - focused param          in FLIP mode (when the strip has a slot),
+        //   - SSL CS Fader           in Plugin-Fader mode,
+        //   - track volume           otherwise.
         if (g_lastTouchPbValid[s].load()) {
             const uint16_t touchPb = g_lastTouchPb[s].load();
-            const auto focusedT = uf8::getFocusedParam();
-            auto mmT = uf8::lookupPluginOnTrack(tr, focusedT.domain);
-            const uf8::LinkSlot* slT = (!g_forcePan.load() && mmT.map)
-                ? uf8::findSlotByLinkIdx(*mmT.map, focusedT.slotIdx)
-                : nullptr;
-            if (isVPotPanFocus(focusedT)) slT = nullptr;
-            const auto csT = csFaderForTrack(tr);
-            if (g_flip.load() && slT) {
-                double normT = static_cast<double>(touchPb) /
-                               static_cast<double>(kUf8FaderPbMax);
-                if (slT->inverted) normT = 1.0 - normT;
-                if (normT < 0.0) normT = 0.0;
-                if (normT > 1.0) normT = 1.0;
-                TrackFX_SetParamNormalized(tr, mmT.fxIndex,
-                    slT->vst3Param, normT);
-            } else if (g_pluginFaderMode.load() && csT.vst3Param >= 0) {
-                double n = static_cast<double>(touchPb) /
-                           static_cast<double>(kUf8FaderPbMax);
-                if (n < 0.0) n = 0.0;
-                if (n > 1.0) n = 1.0;
-                TrackFX_SetParamNormalized(tr, csT.fxIndex,
-                    csT.vst3Param, n);
-            } else {
-                CSurf_OnVolumeChange(tr, pbToLinearVolume(touchPb), false);
-            }
             g_lastTouchPbValid[s].store(false);
+
+            // Routing wins: the touch-release writeback must follow the
+            // same precedence as the live fader handler (drainInputQueue
+            // VolumeAbs case). Without this, releasing a fader in
+            // "Sends of Focused Track" mode wrote the touch position to
+            // the bank track's main volume — when the focused track's
+            // bank position coincided with the released strip, the
+            // selected channel's fader visibly jumped to the touch level.
+            const StripRoute fr = resolveFaderRoute_(
+                static_cast<int>(s), g_bankOffset.load(), visibleTrackCount());
+            if (fr.active()) {
+                if (fr.valid) {
+                    SetTrackSendInfo_Value(fr.track, fr.sendCategory,
+                                           fr.sendIndex, "D_VOL",
+                                           pbToLinearVolume(touchPb));
+                }
+                // active-but-invalid: eat the writeback, do NOT fall
+                // through to track-volume.
+            } else {
+                const auto focusedT = uf8::getFocusedParam();
+                auto mmT = uf8::lookupPluginOnTrack(tr, focusedT.domain);
+                const uf8::LinkSlot* slT = (!g_forcePan.load() && mmT.map)
+                    ? uf8::findSlotByLinkIdx(*mmT.map, focusedT.slotIdx)
+                    : nullptr;
+                if (isVPotPanFocus(focusedT)) slT = nullptr;
+                const auto csT = csFaderForTrack(tr);
+                if (g_flip.load() && slT) {
+                    double normT = static_cast<double>(touchPb) /
+                                   static_cast<double>(kUf8FaderPbMax);
+                    if (slT->inverted) normT = 1.0 - normT;
+                    if (normT < 0.0) normT = 0.0;
+                    if (normT > 1.0) normT = 1.0;
+                    TrackFX_SetParamNormalized(tr, mmT.fxIndex,
+                        slT->vst3Param, normT);
+                } else if (g_pluginFaderMode.load() && csT.vst3Param >= 0) {
+                    double n = static_cast<double>(touchPb) /
+                               static_cast<double>(kUf8FaderPbMax);
+                    if (n < 0.0) n = 0.0;
+                    if (n > 1.0) n = 1.0;
+                    TrackFX_SetParamNormalized(tr, csT.fxIndex,
+                        csT.vst3Param, n);
+                } else {
+                    CSurf_OnVolumeChange(tr, pbToLinearVolume(touchPb), false);
+                }
+            }
         }
 
         // Re-engage the motor. The firmware's target buffer is ALREADY
@@ -3483,7 +4101,7 @@ void pushVuMeter()
 {
     if (!g_dev || !g_dev->isOpen()) return;
 
-    const int trackCount = CountTracks(nullptr);
+    const int trackCount = visibleTrackCount();
     const int bankOffset = g_bankOffset.load();
     std::array<uint8_t, 16> levels{};
 
@@ -3520,7 +4138,7 @@ void pushVuMeter()
         const int idx = s + bankOffset;
         uint8_t rawL = 0, rawR = 0;
         if (idx < trackCount) {
-            if (MediaTrack* tr = GetTrack(nullptr, idx)) {
+            if (MediaTrack* tr = visibleTrackAt(idx)) {
                 // Left = channel 0, right = channel 1. REAPER's peak is
                 // the channel's post-fader tap; pre-fader VU isn't
                 // exposed via this call, so "in" and "out" end up
@@ -3570,7 +4188,7 @@ void pushSelColourBar()
 {
     if (!g_dev || !g_dev->isOpen()) return;
 
-    const int trackCount = CountTracks(nullptr);
+    const int trackCount = visibleTrackCount();
     const int bankOffset = g_bankOffset.load();
 
     // Determine each visible strip's selection state + compute the mask
@@ -3580,7 +4198,7 @@ void pushSelColourBar()
     uint16_t mask = 0;
     for (int s = 0; s < 8; ++s) {
         const int idx = s + bankOffset;
-        MediaTrack* tr = (idx < trackCount) ? GetTrack(nullptr, idx) : nullptr;
+        MediaTrack* tr = (idx < trackCount) ? visibleTrackAt(idx) : nullptr;
         const bool sel = tr && GetMediaTrackInfo_Value(tr, "I_SELECTED") > 0.5;
         const uint8_t target = sel ? 0xFF : 0x00;
         if (sel) mask |= static_cast<uint16_t>(1 << s);
@@ -3906,15 +4524,28 @@ void pushUf8GlobalLeds()
         g_lastPageRightLit = 0;
     }
 
-    // Channel-encoder mode LEDs — exactly one of Nav/Nudge/Focus is bright,
-    // matching the active EncoderMode. Encoder push (0x76) returns to Nav.
+    // Channel-encoder mode LEDs. Driven by the binding actually wired to
+    // each cell, NOT by a hardcoded mode comparison — so when the user
+    // remaps e.g. the FOCUS button to `encoder_instance`, its LED lights
+    // bright in Instance mode instead of Focus mode. Each mode builtin
+    // (encoder_nav/nudge/focus/instance) exposes a stateOf that returns
+    // true when its mode is active; we look up the bound builtin name
+    // for each cell's ButtonId and ask its stateOf.
     if (encMode != g_lastEncoderMode || !g_globalLedsInit) {
+        const int activeLayer = uf8::bindings::getActiveLayer();
+        auto cellActive = [&](uf8::bindings::ButtonId id) -> bool {
+            const auto bd = uf8::bindings::getBinding(activeLayer, id);
+            const auto& sp = bd.shortPress[
+                static_cast<int>(uf8::bindings::Modifier::Plain)];
+            if (sp.type != uf8::bindings::ActionType::Builtin) return false;
+            return uf8::bindings::builtinStateOf(sp.action, sp.param);
+        };
         sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Nav,
-                                             encMode == EncoderMode::Nav));
+            cellActive(uf8::bindings::ButtonId::Nav)));
         sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Nudge,
-                                             encMode == EncoderMode::Nudge));
+            cellActive(uf8::bindings::ButtonId::Nudge)));
         sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Focus,
-                                             encMode == EncoderMode::Focus));
+            cellActive(uf8::bindings::ButtonId::EncFocus)));
         g_lastEncoderMode = encMode;
     }
 
@@ -3932,6 +4563,16 @@ int g_tickCounter = 0;
 void onTimer()
 {
     ++g_tickCounter;
+    // Long-press SEL → folder-spill toggle BEFORE rebuilding the visible
+    // list, so a just-fired spill flips the list this tick rather than
+    // next.
+    checkSelLongPressSpill();
+    // Rebuild the filtered surface track list FIRST so drainInputQueue
+    // and every render helper sees a consistent snapshot for this tick.
+    // Without this, the input queue could resolve a strip's track via
+    // an unfiltered REAPER lookup while the renderer expected a filtered
+    // mapping (Bug 2 fix: Folder Collapse / Show Only Selected).
+    rebuildVisibleTrackList();
     if (g_tickCounter == g_uc1RefireAtTick && g_uc1_surface) {
         // Force a full LED re-push once the device + REAPER project
         // are settled. Without this, the first refresh races with
@@ -3956,6 +4597,17 @@ void onTimer()
         currentTrackCount > 0 && g_lastTrackCountForReinit == 0) {
         g_bankDirty.store(true);
         g_globalLedsInit = false;
+        // Re-apply persisted encoder mode after project load. Without
+        // this, a phantom ChannelPush-on-init or stray binding
+        // dispatch can clobber Instance/Nudge/Focus back to Nav,
+        // forcing the user to manually re-toggle the mode after each
+        // project open. Reading from ExtState is the source of truth.
+        if (const char* m = GetExtState("ReaSixty", "encoderMode"); m && *m) {
+            if      (std::strcmp(m, "Instance") == 0) g_encoderMode.store(EncoderMode::Instance);
+            else if (std::strcmp(m, "Nudge")    == 0) g_encoderMode.store(EncoderMode::Nudge);
+            else if (std::strcmp(m, "Focus")    == 0) g_encoderMode.store(EncoderMode::Focus);
+            else                                      g_encoderMode.store(EncoderMode::Nav);
+        }
     }
     g_lastTrackCountForReinit = currentTrackCount;
     chaseLastTouchedFx();
@@ -4041,7 +4693,14 @@ void onTimer()
 
             float dbInL = -120.f;
             float dbInR = -120.f;
-            if (s_vuAccessor) {
+            // Gate on transport playing/recording. AudioAccessor returns
+            // valid samples at the project playhead even when stopped, so
+            // without this gate the input meter freezes at the audio level
+            // present at the stop position — instead of decaying silently.
+            // GetPlayState bits: 1 = playing, 2 = paused, 4 = recording.
+            const int playState = GetPlayState();
+            const bool transportLive = (playState & 1) || (playState & 4);
+            if (s_vuAccessor && transportLive) {
                 AudioAccessorValidateState(s_vuAccessor);
                 constexpr int kBlock  = 512;
                 constexpr int kNchans = 2;
@@ -4058,6 +4717,13 @@ void onTimer()
                         if (sL > pL) pL = sL;
                         if (sR > pR) pR = sR;
                     }
+                    // Pre-FX raw input level — fader / pan stay out. With
+                    // no plug-in on the track, the input meter shows
+                    // unprocessed level entering the FX chain; the
+                    // output meter (Track_GetPeakInfo, post-FX-post-fader)
+                    // shows what the user hears after fader. The two are
+                    // expected to differ unless fader is at unity AND no
+                    // FX is loaded — that's the SSL I/O-meter convention.
                     dbInL = peakToDb(pL);
                     dbInR = peakToDb(pR);
                 }
@@ -4089,25 +4755,43 @@ void onTimer()
         if (g_uc1_surface) {
             if (auto* tr = static_cast<MediaTrack*>(g_uc1_surface->focusedTrack())) {
                 if (!ValidatePtr2(nullptr, tr, "MediaTrack*")) tr = nullptr;
-                const int trackCount = CountTracks(nullptr);
+                const int trackCount = visibleTrackCount();
                 const int bankOffset = g_bankOffset.load();
                 int focIdx = -1;
                 if (tr) for (int i = 0; i < trackCount; ++i) {
-                    if (GetTrack(nullptr, i) == tr) { focIdx = i; break; }
+                    if (visibleTrackAt(i) == tr) { focIdx = i; break; }
                 }
                 if (focIdx >= bankOffset && focIdx < bankOffset + 8) {
                     focStrip = focIdx - bankOffset;
                     uc1::UC1Bindings b = uc1::lookupBindingsOnTrack(tr);
                     if (b.channelMap && b.channelFxIdx >= 0) {
-                        char buf[64];
-                        if (TrackFX_GetNamedConfigParm(tr, b.channelFxIdx,
-                                                       "GainReduction_dB",
-                                                       buf, sizeof(buf))) {
-                            float gr = static_cast<float>(std::atof(buf));
+                        // GR readback mirrors UC1Surface::readGr: raw
+                        // TrackFX_GetParam for user-picked GR params
+                        // (most VST3 meter outputs are exposed there
+                        // directly), GainReduction_dB named-config-parm
+                        // as the built-in fallback.
+                        bool gotIt = false;
+                        double gr = 0.0;
+                        if (b.channelGrParam >= 0) {
+                            double mn = 0.0, mx = 0.0;
+                            gr = TrackFX_GetParam(tr, b.channelFxIdx,
+                                                  b.channelGrParam, &mn, &mx);
+                            gotIt = true;
+                        } else {
+                            char buf[64] = {0};
+                            if (TrackFX_GetNamedConfigParm(
+                                    tr, b.channelFxIdx, "GainReduction_dB",
+                                    buf, sizeof(buf))) {
+                                gr = std::atof(buf);
+                                gotIt = true;
+                            }
+                        }
+                        if (gotIt) {
+                            gr += b.channelGrOffsetDb;
                             if (gr < 0) gr = -gr;
-                            if (gr > 10.f) gr = 10.f;
+                            if (gr > 10.0) gr = 10.0;
                             const uint8_t newByte = static_cast<uint8_t>(
-                                std::lround(gr * (0x18 / 10.0f)));
+                                std::lround(gr * (0x18 / 10.0)));
                             uint8_t& held = g_uf8GrBytes[focStrip];
                             if (newByte > held) held = newByte;
                             else if (held > newByte) --held;
@@ -5185,7 +5869,15 @@ void registerBindingHandlers()
             if (!firing) return;
             const bool next = !g_folderMode.load();
             g_folderMode.store(next);
+            // Spilled parent is meaningless without folder mode — drop
+            // the reference so toggling folder mode back on starts
+            // collapsed (long-press SEL re-spills as needed).
+            if (!next) g_spilledParent.store(nullptr);
             g_pageDirty.store(true);
+            // Bank-dirty re-renders every strip from the new filtered
+            // list — without this, dedup pins each strip to its previous
+            // (unfiltered) track until something else changes.
+            g_bankDirty.store(true);
             SetExtState("ReaSixty", "folderMode", next ? "1" : "0", true);
         },
         [](int) { return g_folderMode.load(); },
@@ -5198,6 +5890,7 @@ void registerBindingHandlers()
             const bool next = !g_showOnlySelected.load();
             g_showOnlySelected.store(next);
             g_pageDirty.store(true);
+            g_bankDirty.store(true);
             SetExtState("ReaSixty", "showOnlySelected",
                         next ? "1" : "0", true);
         },
@@ -5266,7 +5959,8 @@ void registerBindingHandlers()
             g_encoderMode.store(EncoderMode::Nav);
             SetExtState("ReaSixty", "encoderMode", "Nav", true);
         },
-        nullptr, "Encoder → Nav", false
+        [](int) { return g_encoderMode.load() == EncoderMode::Nav; },
+        "Encoder → Nav", false
     });
     registerBuiltin("encoder_nudge", DescBuilder{
         [](bool firing, bool /*pressed*/, int /*param*/) {
@@ -5274,7 +5968,8 @@ void registerBindingHandlers()
             g_encoderMode.store(EncoderMode::Nudge);
             SetExtState("ReaSixty", "encoderMode", "Nudge", true);
         },
-        nullptr, "Encoder → Nudge", false
+        [](int) { return g_encoderMode.load() == EncoderMode::Nudge; },
+        "Encoder → Nudge", false
     });
     registerBuiltin("encoder_focus", DescBuilder{
         [](bool firing, bool /*pressed*/, int /*param*/) {
@@ -5282,7 +5977,65 @@ void registerBindingHandlers()
             g_encoderMode.store(EncoderMode::Focus);
             SetExtState("ReaSixty", "encoderMode", "Focus", true);
         },
-        nullptr, "Encoder → Focus", false
+        [](int) { return g_encoderMode.load() == EncoderMode::Focus; },
+        "Encoder → Focus", false
+    });
+    registerBuiltin("encoder_instance", DescBuilder{
+        [](bool firing, bool /*pressed*/, int /*param*/) {
+            if (!firing) return;
+            g_encoderMode.store(EncoderMode::Instance);
+            SetExtState("ReaSixty", "encoderMode", "Instance", true);
+        },
+        [](int) { return g_encoderMode.load() == EncoderMode::Instance; },
+        "Encoder → Instance cycle", false
+    });
+
+    // ---- Channel-encoder rotation builtins ------------------------------
+    // Bindable to ChannelEncoder.shortPress[modifier]. dispatchEncoder
+    // calls run() with `param = stepDelta` (signed integer detents) —
+    // these builtins all consume that.
+    registerBuiltin("encoder_mode_dispatch", DescBuilder{
+        [](bool firing, bool /*pressed*/, int param) {
+            if (!firing) return;
+            const int step = param;
+            switch (g_encoderMode.load()) {
+                case EncoderMode::Nav:      applySelectRelative_(step); break;
+                case EncoderMode::Nudge:    applyPlayheadNudge_(step);  break;
+                case EncoderMode::Focus:    applyMouseScroll_(step);    break;
+                case EncoderMode::Instance: applyInstanceCycle_(step);  break;
+            }
+        },
+        nullptr,
+        "Encoder: dispatch by current mode (Nav/Nudge/Focus/Instance)",
+        false
+    });
+    registerBuiltin("instance_cycle", DescBuilder{
+        [](bool firing, bool /*pressed*/, int param) {
+            if (!firing) return;
+            applyInstanceCycle_(param);
+        },
+        nullptr, "Encoder: cycle plug-in instance", false
+    });
+    registerBuiltin("select_relative", DescBuilder{
+        [](bool firing, bool /*pressed*/, int param) {
+            if (!firing) return;
+            applySelectRelative_(param);
+        },
+        nullptr, "Encoder: select prev/next track", false
+    });
+    registerBuiltin("playhead_nudge", DescBuilder{
+        [](bool firing, bool /*pressed*/, int param) {
+            if (!firing) return;
+            applyPlayheadNudge_(param);
+        },
+        nullptr, "Encoder: nudge playhead", false
+    });
+    registerBuiltin("mouse_scroll", DescBuilder{
+        [](bool firing, bool /*pressed*/, int param) {
+            if (!firing) return;
+            applyMouseScroll_(param);
+        },
+        nullptr, "Encoder: scroll mouse-wheel under cursor", false
     });
 
     registerBuiltin("domain_cs", DescBuilder{
@@ -5304,6 +6057,25 @@ void registerBindingHandlers()
             }
         },
         nullptr, "Focus → Bus Comp", false
+    });
+
+    // Multi-instance picker — bindable equivalents of Shift+Channel-Encoder.
+    // Domain follows the focused-param domain (Quick1 → CS, Quick2 → BC),
+    // same convention as the encoder cycle. cycleInstance wraps modulo
+    // count, so repeated presses walk the ring without stopping at the end.
+    registerBuiltin("instance_next", DescBuilder{
+        [](bool firing, bool /*pressed*/, int /*param*/) {
+            if (!firing) return;
+            applyInstanceCycle_(+1);
+        },
+        nullptr, "Instance: next (focused domain)", false
+    });
+    registerBuiltin("instance_prev", DescBuilder{
+        [](bool firing, bool /*pressed*/, int /*param*/) {
+            if (!firing) return;
+            applyInstanceCycle_(-1);
+        },
+        nullptr, "Instance: previous (focused domain)", false
     });
 
     // Layer select — one builtin per layer so the picker shows
@@ -5377,7 +6149,7 @@ void registerBindingHandlers()
             sendLedFrames(uf8::buildUf8GlobalLed(
                 uf8::Uf8GlobalLed::BankLeft, pressed));
             if (!firing) return;
-            const int trackCount = CountTracks(nullptr);
+            const int trackCount = visibleTrackCount();
             const int maxStart   = trackCount > 1 ? trackCount - 1 : 0;
             int next = g_bankOffset.load() - 8;
             if (next < 0)        next = 0;
@@ -5391,7 +6163,7 @@ void registerBindingHandlers()
             sendLedFrames(uf8::buildUf8GlobalLed(
                 uf8::Uf8GlobalLed::BankRight, pressed));
             if (!firing) return;
-            const int trackCount = CountTracks(nullptr);
+            const int trackCount = visibleTrackCount();
             const int maxStart   = trackCount > 1 ? trackCount - 1 : 0;
             int next = g_bankOffset.load() + 8;
             if (next < 0)        next = 0;
@@ -5706,6 +6478,22 @@ extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(
     if (rec->caller_version != REAPER_PLUGIN_VERSION) return 0;
     if (REAPERAPI_LoadAPI(rec->GetFunc) != 0) return 0;
 
+    // Multi-instance picker glue: wire the active-instance lookup so
+    // uf8::lookupPluginOnTrack(tr, domain) returns the Nth matching FX
+    // instead of always the first. Without this, when the user picks
+    // a non-default BC instance via the cycle encoder, UF8 V-Pot
+    // rendering AND UC1's chase-back-to-UF8 mapping (UC1Surface.cpp
+    // ~line 750) would still resolve against the FIRST BC's vst3 →
+    // linkIdx mapping — producing visibly wrong slot names (e.g.
+    // turning Townhouse's Threshold showed BC2's "Attack" because
+    // BC2's slot at vst3=4 has linkIdx=3=Attack while Townhouse's
+    // vst3=4 was bound to linkIdx=1=Threshold).
+    uf8::setInstanceIdxProvider([](void* tr, uf8::Domain d) -> int {
+        if (d == uf8::Domain::BusComp)      return uc1::bcInstanceIndex(tr);
+        if (d == uf8::Domain::ChannelStrip) return uc1::csInstanceIndex(tr);
+        return 0;
+    });
+
     // Restore persisted UI mode flags (Pan override, encoder mode) so
     // they survive REAPER restarts. ExtState is global per-extension —
     // persistAcrossSessions=true writes through to reaper-extstate.ini.
@@ -5726,9 +6514,10 @@ extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(
     // paths are fully de-risked.
     SetExtState("ReaSixty", "flip", "0", true);
     if (const char* m = GetExtState("ReaSixty", "encoderMode"); m && *m) {
-        if (std::strcmp(m, "Nudge") == 0)      g_encoderMode.store(EncoderMode::Nudge);
-        else if (std::strcmp(m, "Focus") == 0) g_encoderMode.store(EncoderMode::Focus);
-        else                                   g_encoderMode.store(EncoderMode::Nav);
+        if (std::strcmp(m, "Nudge") == 0)         g_encoderMode.store(EncoderMode::Nudge);
+        else if (std::strcmp(m, "Focus") == 0)    g_encoderMode.store(EncoderMode::Focus);
+        else if (std::strcmp(m, "Instance") == 0) g_encoderMode.store(EncoderMode::Instance);
+        else                                      g_encoderMode.store(EncoderMode::Nav);
     }
     // softKeyBank intentionally NOT restored from ExtState — every
     // REAPER load starts on V-POT (bank 0) so the row matches what

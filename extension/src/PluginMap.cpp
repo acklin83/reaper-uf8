@@ -366,16 +366,16 @@ constexpr LinkSlot kBusComp2Slots[] = {
 // against these `match` strings.
 
 constexpr PluginMap kMaps[] = {
-    { "Channel Strip 2",        "CS 2",  Domain::ChannelStrip, kCs2Slots          },
-    { "4K G",                   "4K G",  Domain::ChannelStrip, k4kGSlots          },
-    { "4K E",                   "4K E",  Domain::ChannelStrip, k4kESlots          },
-    { "4K B",                   "4K B",  Domain::ChannelStrip, k4kBSlots          },
-    { "Bus Compressor 2",       "BC 2",  Domain::BusComp,      kBusComp2Slots     },
+    { "Channel Strip 2",        "CS 2",  Domain::ChannelStrip, kCs2Slots,          "CHANNEL STRIP 2" },
+    { "4K G",                   "4K G",  Domain::ChannelStrip, k4kGSlots,          "4K G CHANNEL"    },
+    { "4K E",                   "4K E",  Domain::ChannelStrip, k4kESlots,          "4K E CHANNEL"    },
+    { "4K B",                   "4K B",  Domain::ChannelStrip, k4kBSlots,          "4K B CHANNEL"    },
+    { "Bus Compressor 2",       "BC 2",  Domain::BusComp,      kBusComp2Slots,     "BUS COMP 2"      },
     // Order: BC variant must come BEFORE the CS variant — first-hit
     // substring matching means "SSL 360 Link" alone would otherwise
     // claim the BC plug-in name "SSL 360 Link Bus Compressor".
-    { "SSL 360 Link Bus Compressor", "L-BC", Domain::BusComp,  kSsl360LinkBcSlots },
-    { "SSL 360 Link",           "Link",  Domain::ChannelStrip, kSsl360LinkSlots   },
+    { "SSL 360 Link Bus Compressor", "L-BC", Domain::BusComp,  kSsl360LinkBcSlots, "LINK BUS COMP"   },
+    { "SSL 360 Link",           "Link",  Domain::ChannelStrip, kSsl360LinkSlots,   "LINK CS"         },
 };
 
 } // namespace
@@ -430,21 +430,39 @@ PluginMatch lookupPluginOnTrack(void* trackOpaque)
     return { nullptr, -1 };
 }
 
+namespace {
+InstanceIdxFn g_instanceIdxFn = nullptr;
+} // anonymous
+
+void setInstanceIdxProvider(InstanceIdxFn fn) { g_instanceIdxFn = fn; }
+
 PluginMatch lookupPluginOnTrack(void* trackOpaque, Domain domain)
 {
     if (domain == Domain::None) return { nullptr, -1 };
     auto* tr = static_cast<MediaTrack*>(trackOpaque);
     if (!tr) return { nullptr, -1 };
     const int n = TrackFX_GetCount(tr);
+    // Multi-instance: walk all matches in this domain and return the
+    // one at the user's active instance index. Falls back to first hit
+    // when no provider is installed (legacy behaviour). Clamps past-end
+    // to the last-seen match so a deleted instance doesn't strand the
+    // surface on a dangling pointer.
+    const int wantIdx = g_instanceIdxFn
+        ? g_instanceIdxFn(trackOpaque, domain) : 0;
+    int seen = 0;
+    PluginMatch lastSeen{nullptr, -1};
     char buf[512];
     for (int fx = 0; fx < n; ++fx) {
         buf[0] = 0;
         TrackFX_GetFXName(tr, fx, buf, sizeof(buf));
         if (buf[0] == 0) continue;
         const PluginMap* m = lookupPluginMapByName(buf);
-        if (m && m->domain == domain) return { m, fx };
+        if (!m || m->domain != domain) continue;
+        if (seen == wantIdx) return { m, fx };
+        lastSeen = { m, fx };
+        ++seen;
     }
-    return { nullptr, -1 };
+    return lastSeen;
 }
 
 } // namespace uf8

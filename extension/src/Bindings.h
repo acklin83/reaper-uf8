@@ -82,6 +82,15 @@ enum class ButtonId : uint16_t {
     // action, etc.).
     VPotBank,
     SoftKey1Bank, SoftKey2Bank, SoftKey3Bank, SoftKey4Bank, SoftKey5Bank,
+
+    // Channel encoder rotation — not a press-event button; dispatched
+    // via dispatchEncoder(stepDelta). Carries 4 modifier slots like any
+    // ButtonId, so Plain (default) / Shift / Cmd / Ctrl can each map to
+    // a different action. Plain defaults to `encoder_mode_dispatch`
+    // (preserves the legacy Nav/Nudge/Focus/Instance mode system);
+    // Shift defaults to `instance_cycle`. Cmd/Ctrl empty until user
+    // binds them in Settings.
+    ChannelEncoder,
 };
 
 // Map UF8 device byte (FF 22 03 <id> 00 <s>) to ButtonId. Returns None
@@ -246,6 +255,13 @@ std::string builtinDisplayName(const std::string& name);
 // param column for buttons whose action is param-less.
 bool builtinUsesParam(const std::string& name);
 
+// Resolve a builtin's "is currently active?" state — used by the LED
+// pusher so a button bound to e.g. `encoder_instance` lights bright
+// when the encoder is actually in Instance mode. Returns false when
+// the builtin doesn't expose a stateOf (one-shot actions) or when the
+// name isn't registered.
+bool builtinStateOf(const std::string& name, int param);
+
 // ---- lifecycle / API -------------------------------------------------------
 
 // Load JSON from disk; on missing/corrupt file seed factory defaults and
@@ -294,6 +310,16 @@ void setActiveLayer(int layer);
 // layer (caller marks event as handled); false if no binding (caller
 // falls through to legacy paths).
 bool dispatch(ButtonId id, bool pressed);
+
+// Dispatch a hardware encoder rotation event — fires the bound
+// builtin's run() with `param = stepDelta` (signed integer detents).
+// Reads currentModifierSnapshot() to pick the modifier slot. Returns
+// true if `id` is bound and a builtin was fired; false otherwise.
+// Encoder-aware builtins consume stepDelta as their effective param;
+// trigger-only builtins (toggle/etc.) ignore it and just fire on each
+// detent. Cmd / Ctrl modifier slots empty by default — user-bindable
+// in Settings → Bindings → Channel Encoder.
+bool dispatchEncoder(ButtonId id, int stepDelta);
 
 // Mixer-window visibility change hook. Walks Layers 2/3 looking for
 // `auto_when_mixer_visible=true`; on first match saves the current

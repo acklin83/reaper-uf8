@@ -171,6 +171,13 @@ void UC1Surface::setFocusedTrack(void* track)
 {
     if (focusedTrack_ == track) return;
     focusedTrack_ = track;
+    // Skip GR pushes for a short window so the BC mechanical needle
+    // doesn't twitch toward the outgoing track's last-read value
+    // before the new track's GR settles in REAPER. ~250 ms is below
+    // human-perceptible meter latency for typical compressor envelopes
+    // but above the cross-tick jitter window.
+    grSettleUntil_ = std::chrono::steady_clock::now()
+                   + std::chrono::milliseconds(250);
     // Invalidate the ring-cell cache so refresh()'s eager ring loops
     // re-write every cell on the new focus, not just the ones whose
     // target state differs from our last-known state. Without this, a
@@ -314,6 +321,20 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
             SetOnlyTrackSelected(tr);
             reasixty_followSelectedInMixer(tr);
             setFocusedTrack(tr);
+            // Channel encoder = "selected channel" navigator. Force CS
+            // focus so the central LCD + UF8 scribble strips switch to
+            // CS info (per user intent: channel-encoder = CS, BC-encoder
+            // = BC). Preserve slotIdx if already in CS focus so an
+            // ongoing param edit doesn't lose its selection. refresh()
+            // re-renders the LCD with the new domain — without it the
+            // central label stays on the previous BC plug-in name even
+            // after the focus shift, since setFocusedTrack already ran
+            // refresh() with the OLD domain.
+            const auto fp = uf8::getFocusedParam();
+            if (fp.domain != uf8::Domain::ChannelStrip) {
+                uf8::setFocus({uf8::Domain::ChannelStrip, 0});
+                refresh();
+            }
         }
         if (logThis) {
             char line[96];
@@ -620,9 +641,22 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
             bcScrollOverlayUntil_ =
                 std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
             bcAnchorTrack_ = tr;
+            // Anchor change also drives the GR readback source — apply
+            // the same settle window as a focus change so the needle
+            // doesn't briefly read the outgoing anchor's GR value.
+            grSettleUntil_ = std::chrono::steady_clock::now()
+                           + std::chrono::milliseconds(250);
             SetOnlyTrackSelected(tr);
             reasixty_followSelectedInMixer(tr);
             setFocusedTrack(tr);
+            // BC encoder navigates the BC anchor; force BC focus so
+            // central LCD + UF8 strips show BC info (matches user
+            // expectation: BC-encoder controls visible BC state).
+            const auto fp = uf8::getFocusedParam();
+            if (fp.domain != uf8::Domain::BusComp) {
+                uf8::setFocus({uf8::Domain::BusComp, 0});
+                // (refresh() runs below — picks up the new domain.)
+            }
             // Explicit refresh — setFocusedTrack early-exits when
             // focusedTrack_ already == tr (e.g. SetSurfaceSelected
             // callback raced ahead), so the BC carousel triple
@@ -2171,24 +2205,47 @@ void UC1Surface::pollBcBypassState_()
 void UC1Surface::pollGainReduction_()
 {
     if (!device_) return;
+    // Settle gate: skip pushing GR within the brief window after a focus
+    // / anchor change so the mechanical needle doesn't twitch toward a
+    // stale or transient reading. The needle naturally holds its last
+    // commanded position; pollGainReduction is called every tick, so
+    // skipping for ~250 ms just delays the first new-track push.
+    if (std::chrono::steady_clock::now() < grSettleUntil_) return;
     // PreSonus VST3 GR-meter standard, exposed by REAPER as a named
     // config parm. Returns a string with the dB value (e.g. "12.345").
     // Documented as "ReaComp + other supported compressors" — SSL Native
     // BC2 / CS2 expose the same readback (verified by user; SSL360
     // itself uses the same host-side mechanism to drive the UC1's
     // mechanical needle in MCU mode). One read per FX present.
-    auto readGr = [](MediaTrack* tr, int fxIdx) -> float {
+    // Read order: when the user-mapped plug-in carries an explicit GR
+    // param (Settings → FX Learn → Metering picker), read the raw
+    // parameter value via TrackFX_GetParam — that's what most VST3
+    // plug-ins expose for meter outputs (often the value displayed in
+    // their own UI). FormattedParamValue is unreliable for meter params
+    // that lack a string formatter. Otherwise fall back to the PreSonus
+    // GainReduction_dB named-config-parm, which built-in SSL CS2/BC2
+    // implement. Sign is normalised to |value| so pushGainReduction's
+    // clamp-positive contract holds; offsetDb shifts the raw reading
+    // before abs(), letting the user calibrate against plug-ins whose
+    // meter reads e.g. negative-going dB.
+    auto readGr = [](MediaTrack* tr, int fxIdx, int grParam,
+                     double offsetDb) -> float {
         if (!tr || fxIdx < 0) return 0.0f;
-        char buf[64];
-        if (!TrackFX_GetNamedConfigParm(tr, fxIdx, "GainReduction_dB",
-                                        buf, sizeof(buf))) {
-            return 0.0f;  // plug-in doesn't implement the standard
+        double v = 0.0;
+        if (grParam >= 0) {
+            double mn = 0.0, mx = 0.0;
+            v = TrackFX_GetParam(tr, fxIdx, grParam, &mn, &mx);
+        } else {
+            char buf[64] = {0};
+            if (!TrackFX_GetNamedConfigParm(tr, fxIdx, "GainReduction_dB",
+                                            buf, sizeof(buf))) {
+                return 0.0f;
+            }
+            v = std::atof(buf);
         }
-        // String parses as float ("12.345" or similar). Sign convention
-        // varies — some plug-ins report negative dB for reduction. Take
-        // |value| so pushGainReduction's clamp-positive contract holds.
-        const float v = static_cast<float>(std::atof(buf));
-        return v < 0 ? -v : v;
+        v += offsetDb;
+        if (v < 0) v = -v;
+        return static_cast<float>(v);
     };
 
     // BC: drives the mechanical analog needle. Source is the BC-anchor
@@ -2197,7 +2254,10 @@ void UC1Surface::pollGainReduction_()
     MediaTrack* bcTr = static_cast<MediaTrack*>(effectiveBcTrack_());
     if (bcTr) {
         UC1Bindings b = lookupBindingsOnTrack(bcTr);
-        if (b.busCompMap) bcGr = readGr(bcTr, b.busCompFxIdx);
+        if (b.busCompMap) {
+            bcGr = readGr(bcTr, b.busCompFxIdx,
+                          b.busCompGrParam, b.busCompGrOffsetDb);
+        }
     }
 
     // CS Comp GR: drives the 5-LED Comp strip. Source is the focused
@@ -2209,7 +2269,10 @@ void UC1Surface::pollGainReduction_()
     MediaTrack* csTr = static_cast<MediaTrack*>(focusedTrack_);
     if (csTr) {
         UC1Bindings b = lookupBindingsOnTrack(csTr);
-        if (b.channelMap) csCompGr = readGr(csTr, b.channelFxIdx);
+        if (b.channelMap) {
+            csCompGr = readGr(csTr, b.channelFxIdx,
+                              b.channelGrParam, b.channelGrOffsetDb);
+        }
     }
 
     // CS Gate GR: TODO. SSL CS2 doesn't expose a Gate-only readout via
@@ -2450,11 +2513,104 @@ void UC1Surface::refresh()
         device_->send(buildCentralMode(CentralMode::Main, 0x02));
         device_->send(buildLcdHeader("BUS COMP 2"));
     } else {
-        const char* label =
-            bindings.channelMap   ? bindings.channelMap->shortName :
-            bcBindings_.busCompMap ? bcBindings_.busCompMap->shortName :
-            "MAIN";
-        device_->send(buildCentralLabel(label));
+        // Central label resolution — strict domain mapping. The user
+        // controls which domain the LCD shows by picking the matching
+        // encoder/Quick button:
+        //   * Channel encoder + Q1 → CS focus → CS label or MAIN.
+        //   * BC encoder      + Q2 → BC focus → BC label or MAIN.
+        // No cross-domain fallback: if you're in CS focus and the
+        // focused track has no CS, the LCD reads "MAIN" — it does NOT
+        // fall through to the anchor's BC name (which would be visible
+        // even after the user moved to a different track via the
+        // channel encoder, defeating "moved to channel X" feedback).
+        const auto fp = uf8::getFocusedParam();
+        const bool wantBc = (fp.domain == uf8::Domain::BusComp);
+
+        const char* baseLabel = "MAIN";
+        void*       instanceTrack = nullptr;
+        bool        useBc        = false;
+        if (wantBc) {
+            if (bcBindings_.busCompMap) {
+                baseLabel    = bcBindings_.busCompMap->shortName;
+                instanceTrack = effectiveBcTrack_();
+                useBc        = true;
+            }
+            // else: "MAIN" — no BC on anchor, don't fall back to CS.
+        } else {
+            if (bindings.channelMap) {
+                baseLabel    = bindings.channelMap->shortName;
+                instanceTrack = focusedTrack_;
+                useBc        = false;
+            }
+            // else: "MAIN" — no CS on focused track, don't fall back
+            // to BC anchor.
+        }
+
+        char labelBuf[8] = {0};
+        std::strncpy(labelBuf, baseLabel, sizeof(labelBuf) - 1);
+
+        const int total = !instanceTrack ? 0
+            : useBc ? bcInstanceCount(instanceTrack)
+                    : csInstanceCount(instanceTrack);
+        const int idx = (total > 1 && instanceTrack)
+            ? (useBc ? bcInstanceIndex(instanceTrack)
+                     : csInstanceIndex(instanceTrack))
+            : 0;
+        if (total > 1 && instanceTrack) {
+            // Drop spaces, cap at 3 chars, append letter — keeps the
+            // total within the central-label's 4-char zone.
+            std::string compact;
+            for (const char* p = labelBuf; *p; ++p) {
+                if (*p != ' ') compact.push_back(*p);
+            }
+            if (compact.size() > 3) compact.resize(3);
+            compact.push_back(static_cast<char>('A' + (idx % 26)));
+            std::strncpy(labelBuf, compact.c_str(), sizeof(labelBuf) - 1);
+            labelBuf[sizeof(labelBuf) - 1] = 0;
+        }
+        device_->send(buildCentralLabel(labelBuf));
+
+        // Longer plug-in name in the LCD header zone (the same one the
+        // BC-scroll overlay uses for "BUS COMP 2"). Uses the PluginMap's
+        // `match` string — typically the descriptive name ("Bus
+        // Compressor 2", "Channel Strip 2", or the user's match string
+        // for learned plug-ins like "bx_townhouse Buss Compressor").
+        // With multi-instance, append " A"/" B"/etc. Trims to 16 chars.
+        // Sub-mode 0x02 makes the header visible (default 0x00 hides
+        // it); applied only when there's a name to show, falls back to
+        // 0x00 otherwise so the regular Main layout returns.
+        // Resolve via uf8::lookupPluginOnTrack so we get the uf8::PluginMap
+        // (which carries `displayLong` — the UPPERCASE abbreviated name
+        // like "BUS COMP 2" / "CHANNEL STRIP 2"). Falls back to the
+        // built-in `match` string when displayLong is null (covers user-
+        // mapped plug-ins until they get a Settings-side displayLong
+        // editor). uc1::PluginBindings doesn't carry displayLong, so we
+        // can't use bcBindings_/bindings directly here.
+        std::string longName;
+        void* longTrack = wantBc ? effectiveBcTrack_() : focusedTrack_;
+        if (longTrack) {
+            const auto domain = wantBc
+                ? uf8::Domain::BusComp : uf8::Domain::ChannelStrip;
+            auto pm = uf8::lookupPluginOnTrack(longTrack, domain);
+            if (pm.map) {
+                if (pm.map->displayLong && *pm.map->displayLong) {
+                    longName = pm.map->displayLong;
+                } else if (pm.map->match && *pm.map->match) {
+                    longName = pm.map->match;
+                }
+                if (total > 1 && !longName.empty()) {
+                    longName += " ";
+                    longName.push_back(static_cast<char>('A' + (idx % 26)));
+                }
+                if (longName.size() > 16) longName.resize(16);
+            }
+        }
+        if (!longName.empty()) {
+            device_->send(buildCentralMode(CentralMode::Main, 0x02));
+            device_->send(buildLcdHeader(longName));
+        } else {
+            device_->send(buildCentralMode(CentralMode::Main, 0x00));
+        }
     }
 
     // Focused-track colour bar — single palette byte. Uses the same

@@ -64,10 +64,25 @@ struct UC1Bindings {
     int                   busCompFxIdx  = -1;
     const PluginBindings* channelMap    = nullptr;  // Channel Strip plugin on track (or null)
     int                   channelFxIdx  = -1;
+    // GR-meter override per slot — populated only when the binding came
+    // from a learned (user-mapped) plugin AND the user designated a
+    // VST3 parameter as the gain-reduction readout in Settings → FX
+    // Learn. -1 means "fall back to TrackFX_GetNamedConfigParm
+    // (GainReduction_dB)" (built-in plug-ins, or learned plug-ins with
+    // no GR pick yet). Offset is added to the formatted-value parse so
+    // a plug-in that reports negative-going GR can be shifted into
+    // positive dB for the 0..max display.
+    int                   busCompGrParam   = -1;
+    double                busCompGrOffsetDb = 0.0;
+    int                   channelGrParam   = -1;
+    double                channelGrOffsetDb = 0.0;
 };
 
 // Walk TrackFX_GetCount on a track and return both the Bus Comp and
-// Channel Strip bindings (if any). First-hit per category.
+// Channel Strip bindings (if any). The Nth-match per category is
+// determined by bcInstanceIndex / csInstanceIndex — default 0 picks
+// the first match, the Shift+Channel-Encoder cycle bumps it for the
+// next render.
 UC1Bindings lookupBindingsOnTrack(void* track /*MediaTrack**/);
 
 // Lookup by raw FX name (substring). Exposed for tests.
@@ -87,5 +102,26 @@ ControlDomain classifyKnob(uint8_t knobId);
 // Classify a button — Bus Comp IN (0x0C) is the sole Bus Comp button,
 // everything else belongs to Channel Strip.
 ControlDomain classifyButton(uint8_t buttonId);
+
+// ---- Multi-instance picker -----------------------------------------------
+// A track may host more than one BC and/or CS plug-in (e.g. built-in
+// BC 2 followed by a user-learned BC). Each domain has its own active
+// instance index; default 0 picks the first match in track-FX order.
+// State is GUID-keyed and in-memory only — reset per session, not
+// persisted.
+int  bcInstanceIndex(void* track);
+int  csInstanceIndex(void* track);
+void setBcInstanceIndex(void* track, int idx);
+void setCsInstanceIndex(void* track, int idx);
+int  bcInstanceCount(void* track);
+int  csInstanceCount(void* track);
+// Step the active instance by `delta`, wrapping around the count.
+// no-op when count <= 1.
+void cycleInstance(void* track, ControlDomain dom, int delta);
+// Map an FX index on a track back to its instance position within the
+// domain. Returns -1 when the FX isn't a recognised CS/BC binding.
+// Used by chaseLastTouchedFx so a click in REAPER's plug-in GUI
+// snaps the active instance to whichever copy the user just touched.
+int instanceIndexForFx(void* track, int fxIdx);
 
 } // namespace uc1

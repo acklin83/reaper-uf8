@@ -278,6 +278,7 @@ const char* hwFaceLabel(ButtonId id)
         case ButtonId::SoftKey3Bank: return "BANK 3";
         case ButtonId::SoftKey4Bank: return "BANK 4";
         case ButtonId::SoftKey5Bank: return "BANK 5";
+        case ButtonId::ChannelEncoder: return "Channel Encoder";
         default:                     return uf8::bindings::toName(id);
     }
 }
@@ -645,7 +646,11 @@ void drawUf8Vector(ImGui_Context* ctx, ButtonId& sel)
     drawHwBtn(898, 244, 44, 22, ButtonId::Nudge,    "NUDGE");
     drawHwBtn(944, 244, 41, 22, ButtonId::EncFocus, "FOCUS");
 
-    drawHwBtn(852, 270, 133, 18, ButtonId::ChannelPush, "ENCODER PUSH");
+    // Channel-encoder bindings split into push (left) + rotate (right).
+    // Rotate is the new bindable surface for the rotation gesture —
+    // Plain / Shift / Cmd / Ctrl modifier slots each map to a builtin.
+    drawHwBtn(852, 270, 65, 18, ButtonId::ChannelPush,    "PUSH");
+    drawHwBtn(919, 270, 66, 18, ButtonId::ChannelEncoder, "ROTATE");
 
     drawGroupLabel(902, 298, "BANK");
     drawHwBtn(870, 314, 42, 22, ButtonId::BankLeft,  "\xE2\x97\x82");
@@ -2323,6 +2328,8 @@ std::string g_editingMatch;
 int         g_listeningLinkIdx = -1;
 char        g_paramFilter[64]  = {};
 
+// (GR-meter picker uses an inline combo dropdown; no listening flag.)
+
 // Click-and-turn state: when a slot is in listening mode we poll
 // REAPER's GetLastTouchedFX every frame so wiggling the actual
 // plugin-GUI control binds the touched param to the listening slot.
@@ -2497,6 +2504,50 @@ void bindSlot_(int linkIdx, int vst3Param)
         break;
     }
     if (changed) persistAndReport_();
+}
+
+// Bind / clear / re-offset the GR-meter VST3 param on the editing map.
+// Independent of regular slot bindings — the metering struct is its own
+// field on UserPluginMap. All three persist via upsert + persistAndReport_.
+void bindGrMeter_(int vst3Param)
+{
+    if (g_editingMatch.empty() || vst3Param < 0) return;
+    auto cat = uf8::user_plugins::get();
+    for (auto& m : cat.maps) {
+        if (m.match != g_editingMatch) continue;
+        m.metering.grVst3Param = vst3Param;
+        uf8::user_plugins::upsert(m);
+        persistAndReport_();
+        break;
+    }
+}
+
+void clearGrMeter_()
+{
+    if (g_editingMatch.empty()) return;
+    auto cat = uf8::user_plugins::get();
+    for (auto& m : cat.maps) {
+        if (m.match != g_editingMatch) continue;
+        if (m.metering.grVst3Param < 0) return;   // nothing to clear
+        m.metering.grVst3Param = -1;
+        uf8::user_plugins::upsert(m);
+        persistAndReport_();
+        break;
+    }
+}
+
+void setGrOffset_(double offsetDb)
+{
+    if (g_editingMatch.empty()) return;
+    auto cat = uf8::user_plugins::get();
+    for (auto& m : cat.maps) {
+        if (m.match != g_editingMatch) continue;
+        if (m.metering.grOffsetDb == offsetDb) return;  // no-op
+        m.metering.grOffsetDb = offsetDb;
+        uf8::user_plugins::upsert(m);
+        persistAndReport_();
+        break;
+    }
 }
 
 // Remove a slot binding from the editing map.
@@ -3076,6 +3127,114 @@ void drawFxLearnEditor_(ImGui_Context* ctx)
     ImGui_Spacing(ctx);
     ImGui_Separator(ctx);
     ImGui_Spacing(ctx);
+
+    // ---- GR-meter picker -------------------------------------------------
+    // Lets the user designate which VST3 parameter on this learned plug-in
+    // represents the gain-reduction readout for the UC1 needle / Comp
+    // strip / UF8 GR row. When unset (-1), the GR poll falls back to the
+    // PreSonus GainReduction_dB named-config-parm. The combo lists every
+    // param on the active FX so the user picks once — no listening, no
+    // wiggling (a meter output isn't user-adjustable, the click-to-wiggle
+    // listen flow makes no sense for it). The live raw value next to the
+    // combo lets the user verify they picked the right param.
+    {
+        const int curParam = editing->metering.grVst3Param;
+
+        char preview[160];
+        if (curParam < 0) {
+            std::snprintf(preview, sizeof(preview),
+                "(none — fall back to GainReduction_dB)");
+        } else if (fx.ok) {
+            char pname[128] = {0};
+            TrackFX_GetParamName(fx.tr, fx.fxIdx, curParam,
+                                 pname, sizeof(pname));
+            std::snprintf(preview, sizeof(preview),
+                "[%d] %s", curParam, pname);
+        } else {
+            std::snprintf(preview, sizeof(preview),
+                "[%d] (insert a matching FX to see name)", curParam);
+        }
+
+        ImGui_Text(ctx, "GR Meter param:");
+        ImGui_SameLine(ctx, nullptr, nullptr);
+
+        if (ImGui_BeginCombo(ctx, "##fxl_gr_combo", preview, 0)) {
+            // None entry first — selects the GainReduction_dB fallback.
+            {
+                bool sel = (curParam < 0);
+                int  sf  = 0;
+                if (ImGui_Selectable(ctx,
+                        "(none — fall back to GainReduction_dB)##fxl_gr_none",
+                        &sel, &sf, nullptr, nullptr)) {
+                    clearGrMeter_();
+                }
+            }
+            if (fx.ok) {
+                const int paramCount = TrackFX_GetNumParams(fx.tr, fx.fxIdx);
+                const int kMaxParams = 1024;
+                const int n = (paramCount < kMaxParams) ? paramCount : kMaxParams;
+                for (int p = 0; p < n; ++p) {
+                    char pname[128] = {0};
+                    TrackFX_GetParamName(fx.tr, fx.fxIdx, p,
+                                         pname, sizeof(pname));
+                    char rowLbl[200];
+                    std::snprintf(rowLbl, sizeof(rowLbl),
+                        "[%4d] %s##fxl_gr_p_%d", p, pname, p);
+                    bool sel = (p == curParam);
+                    int  sf  = 0;
+                    if (ImGui_Selectable(ctx, rowLbl, &sel, &sf,
+                                         nullptr, nullptr)) {
+                        bindGrMeter_(p);
+                    }
+                }
+            }
+            ImGui_EndCombo(ctx);
+        }
+
+        // Live raw value of the picked param + computed GR-after-offset.
+        // Lets the user sanity-check the pick: hit the plug-in with audio
+        // and watch this value tick. If it doesn't move, it's the wrong
+        // param. If it moves but the on-device meter doesn't, the offset
+        // / sign is wrong.
+        if (curParam >= 0 && fx.ok) {
+            ImGui_SameLine(ctx, nullptr, nullptr);
+            double mn = 0.0, mx = 0.0;
+            const double raw = TrackFX_GetParam(fx.tr, fx.fxIdx,
+                                                curParam, &mn, &mx);
+            const double offsetDb = editing->metering.grOffsetDb;
+            double shown = raw + offsetDb;
+            if (shown < 0) shown = -shown;
+            char liveBuf[96];
+            std::snprintf(liveBuf, sizeof(liveBuf),
+                "  raw: %+.2f  → GR: %.2f dB", raw, shown);
+            ImGui_TextColored(ctx, 0xFFC080FF, liveBuf);
+        }
+
+        // Offset (dB) — numeric input. Sticky between renders via a
+        // local-static scratch buffer keyed by the editing map's match,
+        // so switching maps doesn't smear another plug-in's offset
+        // over this one.
+        ImGui_Spacing(ctx);
+        static std::string s_offsetScope;
+        static char        s_offsetBuf[32] = {0};
+        if (s_offsetScope != editing->match) {
+            s_offsetScope = editing->match;
+            std::snprintf(s_offsetBuf, sizeof(s_offsetBuf),
+                          "%.2f", editing->metering.grOffsetDb);
+        }
+        ImGui_Text(ctx, "GR Offset (dB):");
+        ImGui_SameLine(ctx, nullptr, nullptr);
+        if (ImGui_InputTextWithHint(ctx, "##fxl_gr_offset",
+                                    "0.0", s_offsetBuf,
+                                    static_cast<int>(sizeof(s_offsetBuf)),
+                                    nullptr, nullptr)) {
+            setGrOffset_(std::atof(s_offsetBuf));
+        }
+
+        ImGui_Spacing(ctx);
+        ImGui_Separator(ctx);
+        ImGui_Spacing(ctx);
+    }
 
     // ---- Two-column body ------------------------------------------------
     const PluginMap* topo = canonicalTopology_(editing->domain);

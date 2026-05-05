@@ -6,6 +6,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "reaper_plugin_functions.h"
@@ -474,6 +475,11 @@ struct UserBindingEntry {
     std::string    shortNameOwned;
     PluginBindings bindings{};
     uf8::Domain    domain = uf8::Domain::None;
+    // Metering passthrough — copied from the source UserPluginMap so the
+    // GR poll can read an explicit VST3 param when the plug-in doesn't
+    // implement the PreSonus GainReduction_dB hook.
+    int            grVst3Param = -1;
+    double         grOffsetDb  = 0.0;
 };
 
 std::mutex                                       g_userCacheMutex;
@@ -499,6 +505,8 @@ void rebuildUserCache_locked_()
             ? std::string("USR")
             : um.displayShort;
         e->domain         = um.domain;
+        e->grVst3Param    = um.metering.grVst3Param;
+        e->grOffsetDb     = um.metering.grOffsetDb;
         e->bindings.match     = e->matchOwned.c_str();
         e->bindings.shortName = e->shortNameOwned.c_str();
         synthesizeUserBinding_(um, e->bindings);
@@ -581,6 +589,24 @@ ControlDomain classifyButton(uint8_t buttonId)
     return ControlDomain::ChannelStrip;
 }
 
+// Track-GUID → active instance index. In-memory only, no persistence.
+// Default missing-key = 0 = first match. Cleared lazily as we resolve
+// (clamping to current count on each lookup so deletions don't pin
+// the index past the end).
+std::mutex                                  g_instanceMutex;
+std::unordered_map<std::string, int>        g_bcInstanceMap;
+std::unordered_map<std::string, int>        g_csInstanceMap;
+
+std::string trackGuid_(void* trackRaw)
+{
+    if (!trackRaw) return {};
+    MediaTrack* tr = static_cast<MediaTrack*>(trackRaw);
+    if (!ValidatePtr2(nullptr, tr, "MediaTrack*")) return {};
+    char buf[64] = {0};
+    GetSetMediaTrackInfo_String(tr, "GUID", buf, false);
+    return std::string{buf};
+}
+
 UC1Bindings lookupBindingsOnTrack(void* trackRaw)
 {
     UC1Bindings result;
@@ -593,6 +619,22 @@ UC1Bindings lookupBindingsOnTrack(void* trackRaw)
     // returns false for freed tracks; bail out instead of crashing in
     // TrackFX_GetCount.
     if (!ValidatePtr2(nullptr, tr, "MediaTrack*")) return result;
+
+    // Active instance index per domain. Defaults to 0 if unset; clamped
+    // below to the actual match count. The encoder cycle (Shift+Channel
+    // encoder) bumps these.
+    const std::string g = trackGuid_(tr);
+    int wantBc = 0;
+    int wantCs = 0;
+    if (!g.empty()) {
+        std::lock_guard<std::mutex> lk(g_instanceMutex);
+        if (auto it = g_bcInstanceMap.find(g); it != g_bcInstanceMap.end())
+            wantBc = it->second;
+        if (auto it = g_csInstanceMap.find(g); it != g_csInstanceMap.end())
+            wantCs = it->second;
+    }
+    int seenBc = 0;
+    int seenCs = 0;
 
     const int n = TrackFX_GetCount(tr);
     char buf[256];
@@ -608,22 +650,195 @@ UC1Bindings lookupBindingsOnTrack(void* trackRaw)
         // Compressor wrapper which carries shortName "L-BC".
         const bool isBusComp = isBusCompBinding(b);
 
-        if (isBusComp) {
-            if (!result.busCompMap) {
-                result.busCompMap   = b;
-                result.busCompFxIdx = i;
-            }
-        } else {
-            if (!result.channelMap) {
-                result.channelMap   = b;
-                result.channelFxIdx = i;
+        // Look up the user-cache entry that owns `b` so we can pull the
+        // metering override (grVst3Param + grOffsetDb) into the result.
+        // Built-in bindings have no entry → grVst3Param stays -1 and the
+        // GR poll falls back to GainReduction_dB.
+        int    grParam = -1;
+        double grOff   = 0.0;
+        {
+            std::lock_guard<std::mutex> lk(g_userCacheMutex);
+            for (const auto& e : g_userCache) {
+                if (&e->bindings == b) {
+                    grParam = e->grVst3Param;
+                    grOff   = e->grOffsetDb;
+                    break;
+                }
             }
         }
 
-        // Bail when both slots found.
-        if (result.busCompMap && result.channelMap) break;
+        if (isBusComp) {
+            if (!result.busCompMap) {
+                if (seenBc == wantBc) {
+                    result.busCompMap        = b;
+                    result.busCompFxIdx      = i;
+                    result.busCompGrParam    = grParam;
+                    result.busCompGrOffsetDb = grOff;
+                }
+                ++seenBc;
+            }
+        } else {
+            if (!result.channelMap) {
+                if (seenCs == wantCs) {
+                    result.channelMap        = b;
+                    result.channelFxIdx      = i;
+                    result.channelGrParam    = grParam;
+                    result.channelGrOffsetDb = grOff;
+                }
+                ++seenCs;
+            }
+        }
+        // Don't break early here — we need the full counts to know
+        // whether to clamp the index after the loop.
     }
+    // Clamp: if the active index landed past the end (deletion / not
+    // yet enough instances), fall back to the last available match by
+    // re-walking with index = max-1. Cheap; happens at most once per
+    // tick + only when stale.
+    auto reseat = [&](bool bc, int total) {
+        if (total <= 0) return;
+        const int last = total - 1;
+        int seen = 0;
+        for (int i = 0; i < n; ++i) {
+            if (!TrackFX_GetFXName(tr, i, buf, sizeof(buf))) continue;
+            const PluginBindings* bb = lookupBindingsByName(std::string_view{buf});
+            if (!bb) continue;
+            const bool isBc = isBusCompBinding(bb);
+            if (isBc != bc) continue;
+            if (seen == last) {
+                // Look up GR override for this entry.
+                int    grParam = -1;
+                double grOff   = 0.0;
+                {
+                    std::lock_guard<std::mutex> lk(g_userCacheMutex);
+                    for (const auto& e : g_userCache) {
+                        if (&e->bindings == bb) {
+                            grParam = e->grVst3Param;
+                            grOff   = e->grOffsetDb;
+                            break;
+                        }
+                    }
+                }
+                if (bc) {
+                    result.busCompMap        = bb;
+                    result.busCompFxIdx      = i;
+                    result.busCompGrParam    = grParam;
+                    result.busCompGrOffsetDb = grOff;
+                } else {
+                    result.channelMap        = bb;
+                    result.channelFxIdx      = i;
+                    result.channelGrParam    = grParam;
+                    result.channelGrOffsetDb = grOff;
+                }
+                return;
+            }
+            ++seen;
+        }
+    };
+    if (!result.busCompMap && seenBc > 0) reseat(true,  seenBc);
+    if (!result.channelMap && seenCs > 0) reseat(false, seenCs);
     return result;
+}
+
+// ---- Public multi-instance API -------------------------------------------
+
+namespace {
+int instanceCountFor_(MediaTrack* tr, bool bc)
+{
+    if (!tr || !ValidatePtr2(nullptr, tr, "MediaTrack*")) return 0;
+    const int n = TrackFX_GetCount(tr);
+    char buf[256];
+    int count = 0;
+    for (int i = 0; i < n; ++i) {
+        if (!TrackFX_GetFXName(tr, i, buf, sizeof(buf))) continue;
+        const PluginBindings* b = lookupBindingsByName(std::string_view{buf});
+        if (!b) continue;
+        if (isBusCompBinding(b) == bc) ++count;
+    }
+    return count;
+}
+} // namespace
+
+int bcInstanceCount(void* trackRaw)
+{
+    return instanceCountFor_(static_cast<MediaTrack*>(trackRaw), true);
+}
+int csInstanceCount(void* trackRaw)
+{
+    return instanceCountFor_(static_cast<MediaTrack*>(trackRaw), false);
+}
+
+int bcInstanceIndex(void* trackRaw)
+{
+    const std::string g = trackGuid_(trackRaw);
+    if (g.empty()) return 0;
+    std::lock_guard<std::mutex> lk(g_instanceMutex);
+    auto it = g_bcInstanceMap.find(g);
+    return it == g_bcInstanceMap.end() ? 0 : it->second;
+}
+int csInstanceIndex(void* trackRaw)
+{
+    const std::string g = trackGuid_(trackRaw);
+    if (g.empty()) return 0;
+    std::lock_guard<std::mutex> lk(g_instanceMutex);
+    auto it = g_csInstanceMap.find(g);
+    return it == g_csInstanceMap.end() ? 0 : it->second;
+}
+
+void setBcInstanceIndex(void* trackRaw, int idx)
+{
+    const std::string g = trackGuid_(trackRaw);
+    if (g.empty()) return;
+    if (idx < 0) idx = 0;
+    std::lock_guard<std::mutex> lk(g_instanceMutex);
+    g_bcInstanceMap[g] = idx;
+}
+void setCsInstanceIndex(void* trackRaw, int idx)
+{
+    const std::string g = trackGuid_(trackRaw);
+    if (g.empty()) return;
+    if (idx < 0) idx = 0;
+    std::lock_guard<std::mutex> lk(g_instanceMutex);
+    g_csInstanceMap[g] = idx;
+}
+
+void cycleInstance(void* trackRaw, ControlDomain dom, int delta)
+{
+    const bool bc = (dom == ControlDomain::BusComp);
+    const int total = bc ? bcInstanceCount(trackRaw) : csInstanceCount(trackRaw);
+    if (total <= 1) return;   // nothing to cycle
+    int cur = bc ? bcInstanceIndex(trackRaw) : csInstanceIndex(trackRaw);
+    // Modular wraparound — works for any signed delta.
+    int next = ((cur + delta) % total + total) % total;
+    if (bc) setBcInstanceIndex(trackRaw, next);
+    else    setCsInstanceIndex(trackRaw, next);
+}
+
+int instanceIndexForFx(void* trackRaw, int fxIdx)
+{
+    MediaTrack* tr = static_cast<MediaTrack*>(trackRaw);
+    if (!tr || fxIdx < 0) return -1;
+    if (!ValidatePtr2(nullptr, tr, "MediaTrack*")) return -1;
+    const int n = TrackFX_GetCount(tr);
+    if (fxIdx >= n) return -1;
+
+    char nameTarget[256] = {0};
+    if (!TrackFX_GetFXName(tr, fxIdx, nameTarget, sizeof(nameTarget))) return -1;
+    const PluginBindings* bTarget = lookupBindingsByName(std::string_view{nameTarget});
+    if (!bTarget) return -1;
+    const bool isBc = isBusCompBinding(bTarget);
+
+    int seen = 0;
+    char buf[256];
+    for (int i = 0; i < n; ++i) {
+        if (!TrackFX_GetFXName(tr, i, buf, sizeof(buf))) continue;
+        const PluginBindings* b = lookupBindingsByName(std::string_view{buf});
+        if (!b) continue;
+        if (isBusCompBinding(b) != isBc) continue;
+        if (i == fxIdx) return seen;
+        ++seen;
+    }
+    return -1;
 }
 
 } // namespace uc1

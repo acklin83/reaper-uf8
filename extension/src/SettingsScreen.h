@@ -27,6 +27,13 @@ public:
     static void drawModes(ImGui_Context* ctx);
     static void drawSelectionSets(ImGui_Context* ctx);
     static void drawAbout(ImGui_Context* ctx);
+
+    // Hardware mockups — same vector schematics used by the Bindings
+    // editor as a button picker, but in passive mode (no click-to-bind,
+    // no selection highlight). MixerLayout uses them as the live
+    // visual mirror of UF8 + UC1 face state.
+    static void drawUf8Mockup(ImGui_Context* ctx);
+    static void drawUc1Mockup(ImGui_Context* ctx);
 };
 
 } // namespace uf8

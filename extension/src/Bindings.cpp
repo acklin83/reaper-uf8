@@ -93,6 +93,7 @@ constexpr NameEntry kNames[] = {
     { ButtonId::SoftKey3Bank,  "softkey_bank_3" },
     { ButtonId::SoftKey4Bank,  "softkey_bank_4" },
     { ButtonId::SoftKey5Bank,  "softkey_bank_5" },
+    { ButtonId::ChannelEncoder, "channel_encoder" },
 };
 
 } // namespace
@@ -329,6 +330,22 @@ void seedFactoryDefaults_(Config& c)
     L1[ButtonId::Nudge]       = mkBuiltin("encoder_nudge", Behavior::Momentary, "NUDGE");
     L1[ButtonId::EncFocus]    = mkBuiltin("encoder_focus", Behavior::Momentary, "FOCUS");
     L1[ButtonId::ChannelPush] = mkBuiltin("encoder_nav",   Behavior::Momentary, "");
+
+    // Channel encoder rotation. Plain = mode-dispatch (preserves the
+    // legacy Nav/Nudge/Focus/Instance mode system). Shift = direct
+    // instance cycle (was hardcoded). Cmd / Ctrl = unbound, user picks
+    // any builtin in Settings → Bindings → Channel Encoder.
+    {
+        auto& ce = L1[ButtonId::ChannelEncoder];
+        ce.behavior = Behavior::Momentary;
+        ce.label    = "Encoder";
+        auto& spPlain = ce.shortPress[static_cast<int>(Modifier::Plain)];
+        spPlain.type   = ActionType::Builtin;
+        spPlain.action = "encoder_mode_dispatch";
+        auto& spShift = ce.shortPress[static_cast<int>(Modifier::Shift)];
+        spShift.type   = ActionType::Builtin;
+        spShift.action = "instance_cycle";
+    }
 
     // Automation row — one builtin per mode (no magic params in JSON).
     // Colours mirror the hardware LED table (Protocol.cpp kUf8GlobalLedTable)
@@ -1434,6 +1451,38 @@ void setUserBank(int bankIdx, const UserBank& bank)
     persistLocked_();
 }
 
+bool dispatchEncoder(ButtonId id, int stepDelta)
+{
+    if (id == ButtonId::None || stepDelta == 0) return false;
+    Binding bd;
+    int layer;
+    {
+        std::lock_guard<std::mutex> lk(g_cfgMutex);
+        layer = g_cfg.activeLayer;
+        if (layer < 0 || layer > 2) layer = 0;
+        auto it = g_cfg.layers[layer].bindings.find(id);
+        if (it == g_cfg.layers[layer].bindings.end()) return false;
+        bd = it->second;
+    }
+    const int slotIdx = static_cast<int>(currentModifierSnapshot());
+    if (slotIdx < 0 || slotIdx >= kModifierCount) return false;
+    const ActionSlot& slot = bd.shortPress[slotIdx];
+    if (slot.type == ActionType::Noop || slot.action.empty()) return false;
+    if (slot.type != ActionType::Builtin) {
+        // REAPER actions / keyboard / MIDI: fire once per detent. Not
+        // step-aware. Acceptable trade-off — for delta-aware behaviour
+        // the user picks an encoder-aware builtin.
+        runAction_(slot, /*firing*/ true, /*pressed*/ false);
+        return true;
+    }
+    auto bit = g_builtins.find(slot.action);
+    if (bit == g_builtins.end() || !bit->second.run) return false;
+    // Delta-aware builtins read `param` as the signed step. Trigger-only
+    // builtins (toggles etc.) ignore it and fire once per detent.
+    bit->second.run(/*firing*/ true, /*pressed*/ false, /*param*/ stepDelta);
+    return true;
+}
+
 Binding getUserBankSlot(int bankIdx, int slotIdx)
 {
     std::lock_guard<std::mutex> lk(g_cfgMutex);
@@ -1587,6 +1636,13 @@ bool builtinUsesParam(const std::string& name)
     auto it = g_builtins.find(name);
     if (it == g_builtins.end()) return false;
     return it->second.usesParam;
+}
+
+bool builtinStateOf(const std::string& name, int param)
+{
+    auto it = g_builtins.find(name);
+    if (it == g_builtins.end() || !it->second.stateOf) return false;
+    return it->second.stateOf(param);
 }
 
 void setActiveLayer(int layer)

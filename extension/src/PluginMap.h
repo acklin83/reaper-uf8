@@ -94,6 +94,12 @@ struct PluginMap {
     const char*               displayShort;  // 4-char Channel Strip Type zone label ("CS 2", …)
     Domain                    domain;        // family classification — drives focused-param routing
     std::span<const LinkSlot> slots;         // ordered — focused.slotIdx indexes into this directly
+    const char*               displayLong = nullptr;  // longer label (UPPERCASE abbreviated)
+                                                      // for the UC1 LCD header, e.g. "BUS COMP 2",
+                                                      // "CHANNEL STRIP 2". Falls back to `match`
+                                                      // when null (suitable default for learned
+                                                      // plug-ins where the user-configured match
+                                                      // string is the descriptive name).
 };
 
 // Lookup the first matching plugin map on a track. Walks TrackFX_GetCount
@@ -116,6 +122,18 @@ PluginMatch lookupPluginOnTrack(void* track, Domain domain);
 
 // Lookup by raw FX name (substring match). Exposed for tests.
 const PluginMap* lookupPluginMapByName(std::string_view fxName);
+
+// Multi-instance picker hook. When the user has more than one
+// CS-family or BC plug-in on a track, lookupPluginOnTrack(tr, domain)
+// needs to know which copy is currently the "active" instance. This
+// callback returns 0..N-1 for the active position within `domain` on
+// `track`. If left null, lookupPluginOnTrack falls back to first-hit
+// behaviour (legacy). The cyclical state lives in UC1PluginMap.cpp;
+// main.cpp wires the callback at startup so lookupPluginOnTrack and
+// every caller (UF8 V-Pot rendering, UC1 chase-back-to-UF8) stay in
+// sync.
+using InstanceIdxFn = int (*)(void* /*track*/, Domain /*domain*/);
+void setInstanceIdxProvider(InstanceIdxFn fn);
 
 // All compiled-in maps — for debugging / tests.
 std::span<const PluginMap> allPluginMaps();

@@ -74,6 +74,10 @@ public:
     // Accessor so REAPER callbacks (e.g. SetSurfaceMute) can gate their
     // UC1 refreshes on whether the event concerns the focused track.
     void* focusedTrack() const { return focusedTrack_; }
+    // Public version of the BC-anchor resolver — used by the
+    // multi-instance picker dispatch to know which track to cycle
+    // BC instances on (independent of focused track).
+    void* bcAnchorTrackPublic() const { return effectiveBcTrack_(); }
 
     // Drain queued hardware events. Call from REAPER's main thread on a
     // timer (Run() or a deferred action). Returns the number of events
@@ -301,6 +305,14 @@ private:
     // BC mechanical needle (via the 50 Hz FF 5B stream) and the CS Comp
     // GR LED strip.
     void pollGainReduction_();
+
+    // Settle window after focus or anchor change — during this brief
+    // interval the GR poll skips its push so the BC mechanical needle
+    // doesn't visibly twitch toward a stale/transient reading from the
+    // outgoing track. setFocusedTrack and the BC-encoder anchor switch
+    // both stamp this. ~250 ms covers REAPER's plug-in-state settle on
+    // selection change without holding the meter visibly stale.
+    std::chrono::steady_clock::time_point grSettleUntil_;
 
     // Per-knob LED-ring cell state cache. Each entry packs the last-
     // sent (selection_state | brightness_state << 8) so dedup catches

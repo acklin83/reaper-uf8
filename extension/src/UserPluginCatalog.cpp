@@ -349,11 +349,23 @@ bool parse_(const std::string& json, UserPluginCatalog& out)
 // ---- View-cache rebuild ----------------------------------------------------
 
 // Find canonical id/name/legend strings (static-storage const char*) for a
-// linkIdx by walking built-in maps. Falls back to empty strings when no
-// built-in slot uses that linkIdx (e.g. a learned param the user pinned to
-// linkIdx 200 — unusual but legal).
-const LinkSlot* canonicalSlot_(int linkIdx)
+// linkIdx, preferring built-in maps whose `domain` matches `preferred`.
+// Without the domain hint, BC linkIdxes 2..7 (Makeup/Attack/Release/
+// Ratio/SidechainHPF/DryWetMix) collide with CS linkIdxes 2..7
+// (Width/Pan/InputTrim/Phase/LowPassFreq/HighPassFreq) — and CS maps
+// come first in kMaps order, so a user-mapped BC plug-in would inherit
+// "Width"/"Pan"/etc. as its slot names. Walks domain-matched maps
+// first; falls back to any-domain match (covers ext::* shared linkIdx
+// ranges + any user pinning a slot to an unusual idx). Returns nullptr
+// when no built-in slot uses that linkIdx.
+const LinkSlot* canonicalSlot_(int linkIdx, Domain preferred = Domain::None)
 {
+    if (preferred != Domain::None) {
+        for (const auto& m : allPluginMaps()) {
+            if (m.domain != preferred) continue;
+            if (const auto* s = findSlotByLinkIdx(m, linkIdx)) return s;
+        }
+    }
     for (const auto& m : allPluginMaps()) {
         if (const auto* s = findSlotByLinkIdx(m, linkIdx)) return s;
     }
@@ -370,7 +382,7 @@ void rebuildViewCache_()
         e.displayShort = m.displayShort.empty() ? std::string("USR") : m.displayShort;
         e.slotsBuf.reserve(m.slots.size());
         for (const auto& us : m.slots) {
-            const LinkSlot* canon = canonicalSlot_(us.linkIdx);
+            const LinkSlot* canon = canonicalSlot_(us.linkIdx, m.domain);
             LinkSlot ls{
                 us.linkIdx,
                 canon ? canon->id     : "",
