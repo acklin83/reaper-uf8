@@ -813,23 +813,18 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
     double cur = TrackFX_GetParamNormalized(tr, fxIdx, vst3Param);
     double delta = clickToDelta_(ev.delta) * (map->inverted[ev.id] ? -1.0 : 1.0);
 
-    // Virtual notch on the four CS EQ-gain knobs — bipolar params with
-    // 0 dB at normalized 0.5. Snaps to centre on entry, accumulates
-    // rotation while snapped, releases at the same radius. Per-knob
-    // state lives on the surface; idle reset (300 ms) handles the
-    // "user lifted off, came back" case naturally. SSL-360 parity.
+    // Magnet at 0 dB on the four CS EQ-gain knobs (bipolar, centre at
+    // normalized 0.5). Snaps when the rotation crosses or enters the
+    // zone; once on the notch the next click moves freely so 0.1 dB
+    // nudges off-centre still work. Stateless — no sticky exit.
     const bool isEqGain = (ev.id == knob::kCSHfGain
                         || ev.id == knob::kCSHmfGain
                         || ev.id == knob::kCSLmfGain
                         || ev.id == knob::kCSLfGain);
-    double next;
-    if (isEqGain) {
-        next = uf8::applyVirtualNotch(cur, delta, /*center*/0.5,
-                                      /*zone*/0.025,
-                                      eqGainNotch_[ev.id], 0.0, 1.0);
-    } else {
-        next = std::clamp(cur + delta, 0.0, 1.0);
-    }
+    const double next = isEqGain
+        ? uf8::applyVirtualNotch(cur, delta, /*center*/0.5,
+                                 /*zone*/0.015, 0.0, 1.0)
+        : std::clamp(cur + delta, 0.0, 1.0);
     TrackFX_SetParamNormalized(tr, fxIdx, vst3Param, next);
 
     // Project the focused-param onto UF8: turning a UC1 knob makes the
