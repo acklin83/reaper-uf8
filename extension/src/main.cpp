@@ -4611,6 +4611,7 @@ void onTimer()
     }
     g_lastTrackCountForReinit = currentTrackCount;
     chaseLastTouchedFx();
+    uf8::bindings::tickPending();
     drainInputQueue();
     commitDebouncedTouchReleases();
     if (g_sync) g_sync->refresh(reaperColorForVisibleSlot);

@@ -123,17 +123,16 @@ enum class MidiMsgType : uint8_t {
     ProgramChange,
 };
 
-// One actionable cell of a binding. Captures every field needed to
-// describe a single action — used 8x per Binding (4 modifier rows ×
-// 2 press kinds). Default-constructed = "do nothing for this combo".
-struct ActionSlot {
+// One step of an action chain. `wait_ms` is the gap AFTER this step
+// before the next step fires (ignored on the chain's last step).
+struct ActionStep {
     ActionType  type     = ActionType::Noop;
     std::string action;        // builtin name / REAPER action id / keyboard chord
     int         param    = 0;
-    // Per-slot scribble label. Shown on the UF8 LCD when this slot is
-    // the one a press will fire (e.g. user soft-key bank slot, or
-    // the focused modifier overlay). Empty = fall back to the
-    // binding's top-level Binding::label.
+    // Per-step scribble label. Step 0 doubles as the slot's label (the
+    // legacy single-action case): shown on the UF8 LCD when this slot is
+    // the one a press will fire. Empty = fall back to the binding's
+    // top-level Binding::label.
     std::string label;
     // MIDI command fields — read only when `type == Midi`.
     //   midiDevice  output device name (REAPER GetMIDIOutputName, "" = all)
@@ -146,7 +145,52 @@ struct ActionSlot {
     int         midiMsgType = 0;
     int         midiData1   = 60;
     int         midiData2   = 127;
+    // Delay BEFORE the next step in the chain fires. 0 = back-to-back.
+    int         wait_ms     = 0;
 };
+
+// Optional per-slot LED override. Each (color, brightness) pair is
+// independently opt-in; when unset the slot inherits the Binding's
+// top-level LED config. Lets the editor surface distinct LEDs for
+// e.g. base / longpress / modifier+long without needing four full
+// Binding entries.
+struct LedOverride {
+    bool        hasActive            = false;
+    uint8_t     color[3]             = {0xFF, 0xFF, 0xFF};
+    Brightness  brightness           = Brightness::Bright;
+    bool        hasInactive          = false;
+    uint8_t     inactiveColor[3]     = {0xFF, 0xFF, 0xFF};
+    Brightness  inactiveBrightness   = Brightness::Dim;
+};
+
+// One actionable cell of a binding. Holds an ordered list of steps —
+// chain length 1 (the default) reproduces the legacy "fires one action"
+// semantics; longer chains run sequentially with optional waits.
+//
+// Inherits from ActionStep so existing call-sites that read `slot.type`,
+// `slot.action`, `slot.param`, `slot.label`, `slot.midi*` keep working
+// — those fields ARE the chain's step 0. Additional steps live in
+// `extraSteps`. The LED override is per-slot (per modifier × press
+// combo), not per chain step.
+struct ActionSlot : ActionStep {
+    std::vector<ActionStep> extraSteps;
+    LedOverride             led;
+};
+
+// Chain helpers — treat the slot as a contiguous N-step list. stepCount
+// is always >= 1; stepAt(0) is the slot's inline step, stepAt(i>0) walks
+// extraSteps. Used by dispatch and by the editor.
+inline int stepCount(const ActionSlot& s) {
+    return 1 + static_cast<int>(s.extraSteps.size());
+}
+inline const ActionStep& stepAt(const ActionSlot& s, int i) {
+    return (i <= 0) ? static_cast<const ActionStep&>(s)
+                    : s.extraSteps[static_cast<size_t>(i - 1)];
+}
+inline ActionStep& stepAt(ActionSlot& s, int i) {
+    return (i <= 0) ? static_cast<ActionStep&>(s)
+                    : s.extraSteps[static_cast<size_t>(i - 1)];
+}
 
 // Modifier-prefix index into Binding::shortPress / Binding::longPress.
 // Plain slot = no modifier held at press-time. Order matches a fixed
@@ -375,5 +419,18 @@ void resetLayerToDefaults(int layer);
 // the action-picker combo. Internal sentinel names (anything starting
 // with `__`) are filtered out.
 std::vector<std::string> builtinNames();
+
+// LED resolution helpers — slot's override wins, else falls back to
+// the binding's top-level LED config. Out-params are written
+// unconditionally so callers don't need to branch.
+void effectiveLedActive(const Binding& bd, const ActionSlot& slot,
+                        uint8_t (&rgb)[3], Brightness& bri);
+void effectiveLedInactive(const Binding& bd, const ActionSlot& slot,
+                          uint8_t (&rgb)[3], Brightness& bri);
+
+// Drain pending multi-action chains. Called from main.cpp's onTimer at
+// ~30 Hz — fires any chain step whose `fireAt` has elapsed. Single-step
+// chains never sit in the queue (they run synchronously in dispatch).
+void tickPending();
 
 } // namespace uf8::bindings

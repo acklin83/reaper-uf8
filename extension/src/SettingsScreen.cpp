@@ -1530,18 +1530,192 @@ bool drawActionPicker(ImGui_Context* ctx, const char* prefix,
     return dirty;
 }
 
-// Helper: render an ActionSlot's picker. `prefix` must be unique within
-// the editor (the picker uses it for ImGui IDs).
+bool drawStepPicker_(ImGui_Context* ctx, const char* prefix,
+                     int layer, ButtonId id,
+                     uf8::bindings::ActionStep& st,
+                     bool isLongPress)
+{
+    ActionFieldsRef ref{
+        &st.type, &st.action, &st.param, &st.label,
+        &st.midiDevice, &st.midiChannel, &st.midiMsgType,
+        &st.midiData1, &st.midiData2,
+    };
+    return drawActionPicker(ctx, prefix, ref, layer, id, isLongPress);
+}
+
+// Helper: render an ActionSlot as an ordered chain of steps. Each step
+// row gets its own action picker plus a "wait ms after" int input;
+// + / – buttons add or remove steps. Single-step chains read identically
+// to the legacy single-action editor (the +/wait controls are below the
+// inline picker).
 bool drawSlotPicker(ImGui_Context* ctx, const char* prefix,
                     int layer, ButtonId id, uf8::bindings::ActionSlot& s,
                     bool isLongPress)
 {
-    ActionFieldsRef ref{
-        &s.type, &s.action, &s.param, &s.label,
-        &s.midiDevice, &s.midiChannel, &s.midiMsgType,
-        &s.midiData1, &s.midiData2,
-    };
-    return drawActionPicker(ctx, prefix, ref, layer, id, isLongPress);
+    using namespace uf8::bindings;
+    bool dirty = false;
+    char idbuf[80];
+    const int n = stepCount(s);
+    int removeIdx = -1;
+    for (int i = 0; i < n; ++i) {
+        ActionStep& st = stepAt(s, i);
+        if (n > 1) {
+            char header[80];
+            std::snprintf(header, sizeof(header), "Step %d", i + 1);
+            ImGui_Text(ctx, header);
+            ImGui_SameLine(ctx, nullptr, nullptr);
+            std::snprintf(idbuf, sizeof(idbuf), "Remove##%s_rm_%d", prefix, i);
+            if (ImGui_Button(ctx, idbuf, nullptr, nullptr)) {
+                removeIdx = i;
+            }
+        }
+        char stepPrefix[80];
+        std::snprintf(stepPrefix, sizeof(stepPrefix), "%s_st%d", prefix, i);
+        if (drawStepPicker_(ctx, stepPrefix, layer, id, st, isLongPress)) {
+            dirty = true;
+        }
+        if (i < n - 1) {
+            std::snprintf(idbuf, sizeof(idbuf),
+                          "Wait ms after##%s_wait_%d", prefix, i);
+            double ww = 110;
+            ImGui_PushItemWidth(ctx, ww);
+            int w = st.wait_ms;
+            if (ImGui_InputInt(ctx, idbuf, &w, nullptr, nullptr, nullptr)) {
+                if (w < 0) w = 0;
+                if (w > 600000) w = 600000;
+                st.wait_ms = w;
+                dirty = true;
+            }
+            ImGui_PopItemWidth(ctx);
+        }
+        ImGui_Spacing(ctx);
+    }
+    if (removeIdx >= 0) {
+        if (removeIdx == 0) {
+            // Promote step 1 into the slot's inline step; if there was
+            // only step 0, fall back to a default Noop step.
+            if (!s.extraSteps.empty()) {
+                static_cast<ActionStep&>(s) = std::move(s.extraSteps.front());
+                s.extraSteps.erase(s.extraSteps.begin());
+            } else {
+                static_cast<ActionStep&>(s) = ActionStep{};
+            }
+        } else {
+            s.extraSteps.erase(s.extraSteps.begin() + (removeIdx - 1));
+        }
+        dirty = true;
+    }
+    std::snprintf(idbuf, sizeof(idbuf), "+ Add step##%s_add", prefix);
+    if (ImGui_Button(ctx, idbuf, nullptr, nullptr)) {
+        s.extraSteps.emplace_back();
+        dirty = true;
+    }
+
+    // Per-slot LED override. Collapsed by default. Active and inactive
+    // are independently opt-in; checkbox toggles the override and the
+    // colour swatch / brightness radios mutate the slot's LedOverride.
+    char ledHdr[80];
+    std::snprintf(ledHdr, sizeof(ledHdr), "LED override##%s_ledhdr", prefix);
+    if (ImGui_CollapsingHeader(ctx, ledHdr, nullptr, nullptr)) {
+        ImGui_Indent(ctx, nullptr);
+        auto drawOverrideRow = [&](const char* rowLabel,
+                                   bool& has,
+                                   uint8_t (&rgb)[3],
+                                   Brightness& bri,
+                                   const char* idTag) {
+            char cbId[64];
+            std::snprintf(cbId, sizeof(cbId),
+                          "Override %s##%s_ov_%s", rowLabel, prefix, idTag);
+            bool en = has;
+            if (ImGui_Checkbox(ctx, cbId, &en)) {
+                has = en;
+                dirty = true;
+            }
+            if (!has) return;
+            ImGui_Indent(ctx, nullptr);
+            const int curRgba =
+                (int(rgb[0]) << 24) |
+                (int(rgb[1]) << 16) |
+                (int(rgb[2]) <<  8) | 0xFF;
+            char btnId[64];
+            std::snprintf(btnId, sizeof(btnId),
+                          "##cur_%s_%s", prefix, idTag);
+            int btnFlags = 0;
+            double bw = 56.0, bh = 22.0;
+            if (ImGui_ColorButton(ctx, btnId, curRgba,
+                                  &btnFlags, &bw, &bh)) {
+                char popId[64];
+                std::snprintf(popId, sizeof(popId),
+                              "palette_%s_%s", prefix, idTag);
+                ImGui_OpenPopup(ctx, popId, nullptr);
+            }
+            char popId[64];
+            std::snprintf(popId, sizeof(popId),
+                          "palette_%s_%s", prefix, idTag);
+            if (ImGui_BeginPopup(ctx, popId, nullptr)) {
+                int paletteCount = 0;
+                const uf8::PaletteRgb* palette =
+                    uf8::selPaletteRgb(&paletteCount);
+                const double sw = 26.0;
+                const int perRow = 5;
+                for (int j = 0; j < paletteCount; ++j) {
+                    const auto& p = palette[j];
+                    const int packed =
+                        (int(p.r) << 24) |
+                        (int(p.g) << 16) |
+                        (int(p.b) <<  8) | 0xFF;
+                    char swId[64];
+                    std::snprintf(swId, sizeof(swId),
+                                  "##pp_%s_%s_%d", prefix, idTag, j);
+                    int swFlags = 0;
+                    double w = sw, h = sw;
+                    if (ImGui_ColorButton(ctx, swId, packed,
+                                          &swFlags, &w, &h)) {
+                        rgb[0] = p.r;
+                        rgb[1] = p.g;
+                        rgb[2] = p.b;
+                        dirty = true;
+                        ImGui_CloseCurrentPopup(ctx);
+                    }
+                    if ((j % perRow) != (perRow - 1)
+                        && j != paletteCount - 1) {
+                        ImGui_SameLine(ctx, nullptr, nullptr);
+                    }
+                }
+                ImGui_EndPopup(ctx);
+            }
+            ImGui_SameLine(ctx, nullptr, nullptr);
+            ImGui_Text(ctx, "  ");
+            ImGui_SameLine(ctx, nullptr, nullptr);
+            const char* names[] = {"Off", "Dim", "Bright"};
+            for (int j = 0; j < 3; ++j) {
+                char rId[64];
+                std::snprintf(rId, sizeof(rId),
+                              "%s##b_%s_%s_%d",
+                              names[j], prefix, idTag, j);
+                if (ImGui_RadioButton(ctx, rId,
+                                      static_cast<int>(bri) == j)) {
+                    bri = static_cast<Brightness>(j);
+                    dirty = true;
+                }
+                if (j < 2) ImGui_SameLine(ctx, nullptr, nullptr);
+            }
+            ImGui_Unindent(ctx, nullptr);
+        };
+        drawOverrideRow("Active",   s.led.hasActive,
+                        s.led.color,         s.led.brightness,         "act");
+        drawOverrideRow("Inactive", s.led.hasInactive,
+                        s.led.inactiveColor, s.led.inactiveBrightness, "ina");
+        char resetId[64];
+        std::snprintf(resetId, sizeof(resetId),
+                      "Reset to binding default##%s_ledreset", prefix);
+        if (ImGui_Button(ctx, resetId, nullptr, nullptr)) {
+            s.led = LedOverride{};
+            dirty = true;
+        }
+        ImGui_Unindent(ctx, nullptr);
+    }
+    return dirty;
 }
 
 // Editor panel — two-column matrix. Left: SHORT PRESS (Plain row + 3

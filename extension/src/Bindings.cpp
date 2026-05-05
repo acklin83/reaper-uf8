@@ -532,12 +532,17 @@ int modifierFromKey_(const char* s)
 
 bool slotIsEmpty_(const ActionSlot& s)
 {
-    return s.type == ActionType::Noop && s.action.empty();
+    if (s.type != ActionType::Noop || !s.action.empty()) return false;
+    for (const auto& st : s.extraSteps) {
+        if (st.type != ActionType::Noop || !st.action.empty()) return false;
+    }
+    return true;
 }
 
-// Emit a single ActionSlot's fields inline (no surrounding braces) —
-// caller owns the wrapping object.
-void serializeSlotFields_(const ActionSlot& s, std::ostringstream& os)
+// Emit a single step's flat fields inline (no surrounding braces) —
+// caller owns the wrapping object. Used by both the legacy single-step
+// slot writer and the new step-array writer.
+void serializeStepFields_(const ActionStep& s, std::ostringstream& os)
 {
     os << "\"type\": ";   appendEscaped(os, actionTypeName(s.type));
     os << ", \"action\": "; appendEscaped(os, s.action);
@@ -554,6 +559,66 @@ void serializeSlotFields_(const ActionSlot& s, std::ostringstream& os)
         os << ", \"d1\": "      << s.midiData1;
         os << ", \"d2\": "      << s.midiData2;
         os << "}";
+    }
+    if (s.wait_ms > 0) {
+        os << ", \"wait_ms\": " << s.wait_ms;
+    }
+}
+
+bool slotHasLedOverride_(const ActionSlot& s)
+{
+    return s.led.hasActive || s.led.hasInactive;
+}
+
+void serializeLedOverride_(const LedOverride& lo, std::ostringstream& os)
+{
+    os << "{";
+    bool first = true;
+    if (lo.hasActive) {
+        os << "\"color\": ["
+           << int(lo.color[0]) << ", "
+           << int(lo.color[1]) << ", "
+           << int(lo.color[2]) << "]";
+        os << ", \"brightness\": ";
+        appendEscaped(os, brightnessName(lo.brightness));
+        first = false;
+    }
+    if (lo.hasInactive) {
+        if (!first) os << ", ";
+        os << "\"inactive_color\": ["
+           << int(lo.inactiveColor[0]) << ", "
+           << int(lo.inactiveColor[1]) << ", "
+           << int(lo.inactiveColor[2]) << "]";
+        os << ", \"inactive_brightness\": ";
+        appendEscaped(os, brightnessName(lo.inactiveBrightness));
+    }
+    os << "}";
+}
+
+// Emit a slot's body. Single-step slot with no LED override and no
+// wait_ms collapses to the legacy flat shape (type/action/param/label/
+// midi at the slot level). Anything richer emits {steps:[...], led:{}}.
+void serializeSlotFields_(const ActionSlot& s, std::ostringstream& os)
+{
+    const bool useNew = !s.extraSteps.empty()
+                     || s.wait_ms > 0
+                     || slotHasLedOverride_(s);
+    if (!useNew) {
+        serializeStepFields_(static_cast<const ActionStep&>(s), os);
+        return;
+    }
+    os << "\"steps\": [";
+    const int n = stepCount(s);
+    for (int i = 0; i < n; ++i) {
+        if (i) os << ", ";
+        os << "{";
+        serializeStepFields_(stepAt(s, i), os);
+        os << "}";
+    }
+    os << "]";
+    if (slotHasLedOverride_(s)) {
+        os << ", \"led\": ";
+        serializeLedOverride_(s.led, os);
     }
 }
 
@@ -641,10 +706,13 @@ void serializeUserBanks_(const Config& c, std::ostringstream& os)
     for (const auto& b : c.userBanks) {
         if (!b.name.empty()) { anyData = true; break; }
         for (const auto& s : b.slots) {
-            if (s.shortPress[0].type != ActionType::Noop ||
-                !s.shortPress[0].action.empty()) {
-                anyData = true; break;
+            for (int m = 0; m < kModifierCount && !anyData; ++m) {
+                if (!slotIsEmpty_(s.shortPress[m]) ||
+                    !slotIsEmpty_(s.longPress[m])) {
+                    anyData = true;
+                }
             }
+            if (anyData) break;
         }
         if (anyData) break;
     }
@@ -707,10 +775,8 @@ std::string serializeOneLayer_(const Layer& L, int idx)
     return os.str();
 }
 
-// Read a single ActionSlot's fields from a JSON object. Returns false
-// if `obj` is null/non-object; otherwise fills `out` from whatever keys
-// are present (others stay at their default value).
-bool parseSlotFields_(wdl_json_element* obj, ActionSlot& out)
+// Read a single ActionStep's fields from a JSON object.
+bool parseStepFields_(wdl_json_element* obj, ActionStep& out)
 {
     if (!obj || !obj->is_object()) return false;
     if (auto* v = obj->get_item_by_name("type"))
@@ -721,6 +787,8 @@ bool parseSlotFields_(wdl_json_element* obj, ActionSlot& out)
         if (auto* s = v->get_string_value(true)) out.param = std::atoi(s);
     if (auto* v = obj->get_item_by_name("label"))
         if (auto* s = v->get_string_value()) out.label = s;
+    if (auto* v = obj->get_item_by_name("wait_ms"))
+        if (auto* s = v->get_string_value(true)) out.wait_ms = std::atoi(s);
     if (auto* mi = obj->get_item_by_name("midi"); mi && mi->is_object()) {
         if (auto* v = mi->get_item_by_name("device"))
             if (auto* s = v->get_string_value()) out.midiDevice = s;
@@ -732,6 +800,67 @@ bool parseSlotFields_(wdl_json_element* obj, ActionSlot& out)
             if (auto* s = v->get_string_value(true)) out.midiData1 = std::atoi(s);
         if (auto* v = mi->get_item_by_name("d2"))
             if (auto* s = v->get_string_value(true)) out.midiData2 = std::atoi(s);
+    }
+    return true;
+}
+
+void parseLedOverride_(wdl_json_element* obj, LedOverride& out)
+{
+    if (!obj || !obj->is_object()) return;
+    if (auto* v = obj->get_item_by_name("color"); v && v->is_array()) {
+        for (int k = 0; k < 3 && k < v->m_array->GetSize(); ++k) {
+            if (auto* s = v->enum_item(k)->get_string_value(true)) {
+                int x = std::atoi(s);
+                if (x < 0) x = 0; else if (x > 255) x = 255;
+                out.color[k] = static_cast<uint8_t>(x);
+            }
+        }
+        out.hasActive = true;
+    }
+    if (auto* v = obj->get_item_by_name("brightness")) {
+        out.brightness = brightnessFromName(v->get_string_value());
+        out.hasActive = true;
+    }
+    if (auto* v = obj->get_item_by_name("inactive_color"); v && v->is_array()) {
+        for (int k = 0; k < 3 && k < v->m_array->GetSize(); ++k) {
+            if (auto* s = v->enum_item(k)->get_string_value(true)) {
+                int x = std::atoi(s);
+                if (x < 0) x = 0; else if (x > 255) x = 255;
+                out.inactiveColor[k] = static_cast<uint8_t>(x);
+            }
+        }
+        out.hasInactive = true;
+    }
+    if (auto* v = obj->get_item_by_name("inactive_brightness")) {
+        out.inactiveBrightness = brightnessFromName(v->get_string_value());
+        out.hasInactive = true;
+    }
+}
+
+// Read a single ActionSlot's fields. Accepts both legacy single-action
+// shape (type/action/param/label/midi at the slot level) and the new
+// {steps:[...], led:{}} shape. Missing keys leave defaults intact.
+bool parseSlotFields_(wdl_json_element* obj, ActionSlot& out)
+{
+    if (!obj || !obj->is_object()) return false;
+    if (auto* steps = obj->get_item_by_name("steps");
+        steps && steps->is_array() && steps->m_array) {
+        const int n = steps->m_array->GetSize();
+        for (int i = 0; i < n; ++i) {
+            if (i == 0) {
+                parseStepFields_(steps->enum_item(0),
+                                 static_cast<ActionStep&>(out));
+            } else {
+                ActionStep st;
+                parseStepFields_(steps->enum_item(i), st);
+                out.extraSteps.push_back(std::move(st));
+            }
+        }
+    } else {
+        parseStepFields_(obj, static_cast<ActionStep&>(out));
+    }
+    if (auto* led = obj->get_item_by_name("led"); led && led->is_object()) {
+        parseLedOverride_(led, out.led);
     }
     return true;
 }
@@ -1232,7 +1361,7 @@ const Config& get()
 
 namespace {
 
-void runAction_(const ActionSlot& a, bool firing, bool pressed)
+void runStep_(const ActionStep& a, bool firing, bool pressed)
 {
     switch (a.type) {
         case ActionType::Noop:
@@ -1282,7 +1411,109 @@ void runAction_(const ActionSlot& a, bool firing, bool pressed)
     }
 }
 
+// Pending multi-step chain. Held in g_pendingChains until each step's
+// `fireAt` elapses on the main-thread timer drain. Single-step chains
+// short-circuit in runSlot_ and never sit on the queue.
+struct PendingChain {
+    ActionSlot                            snapshot;
+    int                                   nextStepIdx;
+    bool                                  firing;
+    bool                                  pressed;
+    std::chrono::steady_clock::time_point fireAt;
+};
+
+std::mutex                 g_pendingMutex;
+std::vector<PendingChain>  g_pendingChains;
+
+// Run a slot's chain. Single-step slots fire synchronously (preserving
+// the legacy zero-latency path); multi-step chains run step 0 inline
+// and queue the rest for tickPending_ to drain on the main thread.
+void runSlot_(const ActionSlot& slot, bool firing, bool pressed)
+{
+    const int n = stepCount(slot);
+    if (n <= 1) {
+        runStep_(static_cast<const ActionStep&>(slot), firing, pressed);
+        return;
+    }
+    runStep_(stepAt(slot, 0), firing, pressed);
+    if (!firing) return;
+    const int wait0 = slot.wait_ms < 0 ? 0 : slot.wait_ms;
+    PendingChain pc;
+    pc.snapshot    = slot;
+    pc.nextStepIdx = 1;
+    pc.firing      = firing;
+    pc.pressed     = pressed;
+    pc.fireAt      = std::chrono::steady_clock::now()
+                   + std::chrono::milliseconds(wait0);
+    std::lock_guard<std::mutex> lk(g_pendingMutex);
+    g_pendingChains.push_back(std::move(pc));
+}
+
 } // namespace
+
+void tickPending()
+{
+    const auto now = std::chrono::steady_clock::now();
+    std::vector<PendingChain> ready;
+    {
+        std::lock_guard<std::mutex> lk(g_pendingMutex);
+        for (auto it = g_pendingChains.begin(); it != g_pendingChains.end(); ) {
+            if (it->fireAt <= now) {
+                ready.push_back(std::move(*it));
+                it = g_pendingChains.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+    for (auto& pc : ready) {
+        const int n = stepCount(pc.snapshot);
+        if (pc.nextStepIdx < 0 || pc.nextStepIdx >= n) continue;
+        const ActionStep& st = stepAt(pc.snapshot, pc.nextStepIdx);
+        runStep_(st, pc.firing, pc.pressed);
+        const int next = pc.nextStepIdx + 1;
+        if (next < n) {
+            const int wait = st.wait_ms < 0 ? 0 : st.wait_ms;
+            pc.nextStepIdx = next;
+            pc.fireAt      = std::chrono::steady_clock::now()
+                           + std::chrono::milliseconds(wait);
+            std::lock_guard<std::mutex> lk(g_pendingMutex);
+            g_pendingChains.push_back(std::move(pc));
+        }
+    }
+}
+
+void effectiveLedActive(const Binding& bd, const ActionSlot& slot,
+                        uint8_t (&rgb)[3], Brightness& bri)
+{
+    if (slot.led.hasActive) {
+        rgb[0] = slot.led.color[0];
+        rgb[1] = slot.led.color[1];
+        rgb[2] = slot.led.color[2];
+        bri    = slot.led.brightness;
+    } else {
+        rgb[0] = bd.color[0];
+        rgb[1] = bd.color[1];
+        rgb[2] = bd.color[2];
+        bri    = bd.brightness;
+    }
+}
+
+void effectiveLedInactive(const Binding& bd, const ActionSlot& slot,
+                          uint8_t (&rgb)[3], Brightness& bri)
+{
+    if (slot.led.hasInactive) {
+        rgb[0] = slot.led.inactiveColor[0];
+        rgb[1] = slot.led.inactiveColor[1];
+        rgb[2] = slot.led.inactiveColor[2];
+        bri    = slot.led.inactiveBrightness;
+    } else {
+        rgb[0] = bd.inactiveColor[0];
+        rgb[1] = bd.inactiveColor[1];
+        rgb[2] = bd.inactiveColor[2];
+        bri    = bd.inactiveBrightness;
+    }
+}
 
 void setModifierHeld(Modifier m, bool held)
 {
@@ -1351,10 +1582,10 @@ bool dispatch(ButtonId id, bool pressed)
                 const int  m    = static_cast<int>(it->second.mod);
                 g_pressStart.erase(it);
                 if (held >= kLongPressThreshold) {
-                    runAction_(bd.longPress[m],
+                    runSlot_(bd.longPress[m],
                                /*firing*/ true, /*pressed*/ false);
                 } else {
-                    runAction_(bd.shortPress[m],
+                    runSlot_(bd.shortPress[m],
                                /*firing*/ true, /*pressed*/ false);
                 }
             }
@@ -1389,7 +1620,7 @@ bool dispatch(ButtonId id, bool pressed)
         case Behavior::Toggle:    firing = pressed; break;
         case Behavior::Hold:      firing = true;    break;
     }
-    runAction_(bd.shortPress[slotIdx], firing, pressed);
+    runSlot_(bd.shortPress[slotIdx], firing, pressed);
     return true;
 }
 
@@ -1472,7 +1703,7 @@ bool dispatchEncoder(ButtonId id, int stepDelta)
         // REAPER actions / keyboard / MIDI: fire once per detent. Not
         // step-aware. Acceptable trade-off — for delta-aware behaviour
         // the user picks an encoder-aware builtin.
-        runAction_(slot, /*firing*/ true, /*pressed*/ false);
+        runSlot_(slot, /*firing*/ true, /*pressed*/ false);
         return true;
     }
     auto bit = g_builtins.find(slot.action);
@@ -1536,9 +1767,9 @@ bool dispatchUserBankSlot(int bankIdx, int slotIdx, bool pressed)
                 const int  m    = static_cast<int>(it->second.mod);
                 g_pressStart.erase(it);
                 if (held >= kLongPressThreshold) {
-                    runAction_(longP[m], /*firing*/ true, /*pressed*/ false);
+                    runSlot_(longP[m], /*firing*/ true, /*pressed*/ false);
                 } else {
-                    runAction_(shortP[m], /*firing*/ true, /*pressed*/ false);
+                    runSlot_(shortP[m], /*firing*/ true, /*pressed*/ false);
                 }
             }
         }
@@ -1565,7 +1796,7 @@ bool dispatchUserBankSlot(int bankIdx, int slotIdx, bool pressed)
         case Behavior::Toggle:    firing = pressed; break;
         case Behavior::Hold:      firing = true;    break;
     }
-    runAction_(shortP[slotMod], firing, pressed);
+    runSlot_(shortP[slotMod], firing, pressed);
     return shortP[slotMod].type != ActionType::Noop
         || !shortP[slotMod].action.empty();
 }
