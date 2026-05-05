@@ -25,6 +25,7 @@
 #include "UC1Device.h"
 #include "UC1PluginMap.h"
 #include "UC1Protocol.h"
+#include "VirtualNotch.h"
 
 namespace uc1 {
 
@@ -278,6 +279,12 @@ private:
     // Cleared by setFocusedTrack/invalidateCache so a focus change or
     // explicit refresh re-pushes everything.
     std::array<int8_t, 0x20> lastButtonLed_;
+
+    // Virtual-notch state per knob ID — only the four EQ-gain knobs
+    // (HfGain/HmfGain/LmfGain/LfGain) actually use it; the rest of
+    // the array is unused but cheap. Each entry tracks the
+    // accumulator that lets the encoder "stick" at 0 dB once snapped.
+    std::array<uf8::NotchState, 0x20> eqGainNotch_{};
 
     // Push every mapped button's LED based on current plugin/track
     // state, deduped against lastButtonLed_. Cheap when nothing changed.

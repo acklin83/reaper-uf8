@@ -811,8 +811,25 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
 
     MediaTrack* tr = static_cast<MediaTrack*>(writeTrackRaw);
     double cur = TrackFX_GetParamNormalized(tr, fxIdx, vst3Param);
-    double next = cur + clickToDelta_(ev.delta) * (map->inverted[ev.id] ? -1.0 : 1.0);
-    next = std::clamp(next, 0.0, 1.0);
+    double delta = clickToDelta_(ev.delta) * (map->inverted[ev.id] ? -1.0 : 1.0);
+
+    // Virtual notch on the four CS EQ-gain knobs — bipolar params with
+    // 0 dB at normalized 0.5. Snaps to centre on entry, accumulates
+    // rotation while snapped, releases at the same radius. Per-knob
+    // state lives on the surface; idle reset (300 ms) handles the
+    // "user lifted off, came back" case naturally. SSL-360 parity.
+    const bool isEqGain = (ev.id == knob::kCSHfGain
+                        || ev.id == knob::kCSHmfGain
+                        || ev.id == knob::kCSLmfGain
+                        || ev.id == knob::kCSLfGain);
+    double next;
+    if (isEqGain) {
+        next = uf8::applyVirtualNotch(cur, delta, /*center*/0.5,
+                                      /*zone*/0.025,
+                                      eqGainNotch_[ev.id], 0.0, 1.0);
+    } else {
+        next = std::clamp(cur + delta, 0.0, 1.0);
+    }
     TrackFX_SetParamNormalized(tr, fxIdx, vst3Param, next);
 
     // Project the focused-param onto UF8: turning a UC1 knob makes the

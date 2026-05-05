@@ -76,6 +76,8 @@ add_library(reaper_uf8 MODULE
     src/Bindings.cpp
     # CSI configuration import (feature/csi-import)
     src/CsiImport.cpp
+    # Virtual notch / detent for relative-encoder writes
+    src/VirtualNotch.cpp
 )
 
 target_link_libraries(reaper_uf8 PRIVATE PkgConfig::HIDAPI)

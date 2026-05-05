@@ -50,6 +50,7 @@
 #include "UC1Surface.h"
 #include "UF8Device.h"
 #include "UserPluginCatalog.h"
+#include "VirtualNotch.h"
 
 // File-scope forward decl — onTimer (inside the anonymous namespace below)
 // drains this every tick. Definition lives further down with the other
@@ -1130,6 +1131,12 @@ void drainInputQueue()
     const int trackCount    = CountTracks(nullptr);
     const int surfaceCount  = visibleTrackCount();
     const int bankOffset    = g_bankOffset.load();
+
+    // Per-strip virtual-notch state for V-Pot pan writes — shared across
+    // every pan target the V-Pot can drive (route D_PAN, strip-track
+    // D_PAN, plug-in CS Pan param). One control = one accumulator; the
+    // 300 ms idle reset inside the helper handles target switches.
+    static std::array<uf8::NotchState, 8> g_vpotPanNotch{};
     for (const auto& e : local) {
         // Global-scope events (no strip) are dispatched before the
         // per-strip track resolution below.
@@ -1378,9 +1385,9 @@ void drainInputQueue()
                     auto writePan = [&](const StripRoute& r, double dv, int strip) -> double {
                         const double cur = GetTrackSendInfo_Value(
                             r.track, r.sendCategory, r.sendIndex, "D_PAN");
-                        double next = cur + dv;
-                        if (next >  1.0) next =  1.0;
-                        if (next < -1.0) next = -1.0;
+                        const double next = uf8::applyVirtualNotch(
+                            cur, dv, /*center*/0.0, /*zone*/0.04,
+                            g_vpotPanNotch[strip & 7], -1.0, 1.0);
                         SetTrackSendInfo_Value(r.track, r.sendCategory,
                                                r.sendIndex, "D_PAN", next);
                         g_panOverlayUntilMs[strip] = nowMs_() + kPanOverlayMs;
@@ -1410,9 +1417,9 @@ void drainInputQueue()
                                 // FLIP+PAN held → V-Pot drives the strip
                                 // track's own pan (P_PAN), not the send.
                                 const double cur = GetMediaTrackInfo_Value(tr, "D_PAN");
-                                double next = cur + delta;
-                                if (next >  1.0) next =  1.0;
-                                if (next < -1.0) next = -1.0;
+                                const double next = uf8::applyVirtualNotch(
+                                    cur, delta, /*center*/0.0, /*zone*/0.04,
+                                    g_vpotPanNotch[e.strip & 7], -1.0, 1.0);
                                 SetMediaTrackInfo_Value(tr, "D_PAN", next);
                             } else if (g_flip.load()) {
                                 writeRouteVolDelta(fr, delta);
@@ -1521,24 +1528,24 @@ void drainInputQueue()
                             tr, pn.fxIndex, pn.vst3Param);
                         double delta = e.value * 0.5;  // pan range 0..1, half-scale of REAPER's -1..+1
                         if (g_shiftHeld.load()) delta *= 0.25;
-                        double next = cur + delta;
-                        if (next < 0.0) next = 0.0;
-                        if (next > 1.0) next = 1.0;
+                        const double next = uf8::applyVirtualNotch(
+                            cur, delta, /*center*/0.5, /*zone*/0.02,
+                            g_vpotPanNotch[e.strip & 7], 0.0, 1.0);
                         TrackFX_SetParamNormalized(tr, pn.fxIndex,
                             pn.vst3Param, next);
                         break;
                     }
                     // Fall through to REAPER pan if no CS plug-in.
                     const double cur = GetMediaTrackInfo_Value(tr, "D_PAN");
-                    double next = cur + e.value;
-                    if (next >  1.0) next =  1.0;
-                    if (next < -1.0) next = -1.0;
+                    const double next = uf8::applyVirtualNotch(
+                        cur, e.value, /*center*/0.0, /*zone*/0.04,
+                        g_vpotPanNotch[e.strip & 7], -1.0, 1.0);
                     SetMediaTrackInfo_Value(tr, "D_PAN", next);
                 } else {
                     const double cur = GetMediaTrackInfo_Value(tr, "D_PAN");
-                    double next = cur + e.value;
-                    if (next >  1.0) next =  1.0;
-                    if (next < -1.0) next = -1.0;
+                    const double next = uf8::applyVirtualNotch(
+                        cur, e.value, /*center*/0.0, /*zone*/0.04,
+                        g_vpotPanNotch[e.strip & 7], -1.0, 1.0);
                     SetMediaTrackInfo_Value(tr, "D_PAN", next);
                 }
                 break;
