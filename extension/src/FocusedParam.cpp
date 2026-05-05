@@ -15,4 +15,6 @@ std::atomic<FocusedParam> g_focusedParam{
 
 std::atomic<bool> g_focusedDirty{false};
 
+std::atomic<void*> g_focusedFxTrack{nullptr};
+
 } // namespace uf8

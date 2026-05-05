@@ -61,6 +61,14 @@ extern std::atomic<FocusedParam> g_focusedParam;
 // re-push on the next tick.
 extern std::atomic<bool> g_focusedDirty;
 
+// Track that owns the focused FX (the one chaseLastTouchedFx resolved
+// against). UC1's param-value readout reads from THIS track, not from
+// UC1's general focusedTrack_ — they diverge when the user edits a
+// plug-in on a non-selected strip (UF8 V-Pot, plug-in GUI on another
+// track), which updates FocusedParam globally but is intentionally
+// kept from hijacking UC1's track focus.
+extern std::atomic<void*> g_focusedFxTrack;
+
 inline FocusedParam getFocusedParam() noexcept {
     return g_focusedParam.load(std::memory_order_relaxed);
 }

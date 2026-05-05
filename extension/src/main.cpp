@@ -3961,9 +3961,6 @@ void chaseLastTouchedFx()
 {
     int trWord = -1, fxWord = -1, paramIdx = -1;
     if (!GetLastTouchedFX(&trWord, &fxWord, &paramIdx)) return;
-    static int lastTr = -2, lastFx = -2, lastParam = -2;
-    if (trWord == lastTr && fxWord == lastFx && paramIdx == lastParam) return;
-    lastTr = trWord; lastFx = fxWord; lastParam = paramIdx;
 
     if ((trWord & 0xFFFF0000) != 0) return;        // take-FX
     const int trLow = trWord & 0xFFFF;
@@ -3982,7 +3979,24 @@ void chaseLastTouchedFx()
     const int linkIdx = uf8::slotIdxForVst3Param(*map, paramIdx);
     if (linkIdx < 0) return;
 
+    // Re-apply focus every tick the user has a touched-FX. The CHANNEL/BC
+    // encoders and domain_cs/domain_bc builtins all overwrite FocusedParam
+    // to {domain, 0} on a domain-switch — without this re-apply, a dedup
+    // on (tr, fx, param) leaves that {domain, 0} stuck even though the
+    // user is still editing the original linkIdx. Idempotent + cheap.
     uf8::setFocus({map->domain, linkIdx});
+    // Park the touched track so UC1's param-value readout looks up the
+    // plug-in on whichever track the user actually edited, even when
+    // UC1's general focusedTrack_ is gated to selection (see the
+    // I_SELECTED check below — that gate exists so non-selected V-Pot
+    // edits don't hijack UC1's track display, but the *param-value*
+    // readout should still follow the edit).
+    uf8::g_focusedFxTrack.store(static_cast<void*>(tr),
+                                std::memory_order_relaxed);
+
+    static int lastTr = -2, lastFx = -2, lastParam = -2;
+    if (trWord == lastTr && fxWord == lastFx && paramIdx == lastParam) return;
+    lastTr = trWord; lastFx = fxWord; lastParam = paramIdx;
 
     // Multi-instance follow: a plug-in GUI click on a copy that isn't
     // currently the active instance should snap UC1 to that copy. We

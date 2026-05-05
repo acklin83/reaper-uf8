@@ -201,6 +201,7 @@ void UC1Surface::invalidateCache()
 {
     ringCellCache_.clear();
     lastZone05Text_.clear();  // force the next pushFocusedParamReadout_ to send
+    lastZone03Text_.clear();
     lastButtonLed_.fill(-1);  // re-push every button LED on the next poll
     lastBcBypassed_ = -1;     // re-push BC backlight (without phantom cosmetic)
 }
@@ -1403,17 +1404,31 @@ void UC1Surface::pushButtonReadout_(uint8_t /*buttonId*/, std::string_view label
 
 void UC1Surface::pushFocusedParamReadout_()
 {
-    if (!device_ || !focusedTrack_) return;
+    if (!device_) return;
     const auto focused = uf8::getFocusedParam();
     if (focused.domain == uf8::Domain::None) return;
 
-    auto match = uf8::lookupPluginOnTrack(focusedTrack_, focused.domain);
+    // Plug-in lookup track: prefer the touched-FX track (the one
+    // chase last resolved a Link slot on), else fall back to UC1's
+    // focusedTrack_. The two diverge when the user edits a plug-in
+    // on a non-selected track — we still want to render the
+    // param-value readout for what they just edited.
+    void* lookupTrack = uf8::g_focusedFxTrack.load(std::memory_order_relaxed);
+    if (!lookupTrack) lookupTrack = focusedTrack_;
+    if (!lookupTrack) return;
+
+    auto match = uf8::lookupPluginOnTrack(lookupTrack, focused.domain);
+    if (!match.map && lookupTrack != focusedTrack_ && focusedTrack_) {
+        lookupTrack = focusedTrack_;
+        match = uf8::lookupPluginOnTrack(lookupTrack, focused.domain);
+    }
     if (!match.map) return;
     const uf8::LinkSlot* slotPtr = uf8::findSlotByLinkIdx(*match.map,
                                                           focused.slotIdx);
-    if (!slotPtr) return;  // plugin doesn't expose this Link slot
+    if (!slotPtr) return;
+
     const auto& slot = *slotPtr;
-    MediaTrack* tr = static_cast<MediaTrack*>(focusedTrack_);
+    MediaTrack* tr = static_cast<MediaTrack*>(lookupTrack);
     char formatted[64] = {};
     const double cur = TrackFX_GetParamNormalized(tr, match.fxIndex,
                                                   slot.vst3Param);
@@ -1422,20 +1437,31 @@ void UC1Surface::pushFocusedParamReadout_()
     std::string value = stripUnitIfNonNumeric(compactUnit(formatted));
     auto readout = formatReadout(slot.name, value);
 
-    // Dedup: poll() calls this every tick at 30 Hz; skip the USB write
-    // when the rendered text didn't change. Same cache also dedups
-    // against handleKnob_'s direct call after a UC1 knob turn — the
-    // setFocus + pushFocusedParamReadout_ path lands here, fills the
-    // cache, and the next poll-tick's recompute is a no-op.
-    if (readout == lastZone05Text_) return;
-    lastZone05Text_ = readout;
+    // Per-domain LCD zone routing. CS → zone 0x03 (Channel Strip
+    // readout area), BC → zone 0x05 (Bus Comp readout area). Per
+    // captures uc1_04 + uc1_15 SSL 360° drives them domain-correctly.
+    const uint8_t zoneByte = (focused.domain == uf8::Domain::BusComp)
+                           ? zone::kBusCompReadout
+                           : zone::kChannelStripReadout;
+    std::string& cache = (zoneByte == zone::kBusCompReadout)
+                       ? lastZone05Text_ : lastZone03Text_;
+    if (readout == cache) return;
+    cache = readout;
 
-    // Unified readout zone — Channel-Strip params and Bus-Comp params
-    // both render here, regardless of which UF8/UC1 control sourced
-    // the change. Matches SSL UC1's user-facing "currently edited
-    // value" display convention. Zone 0x03 stays reserved for button
-    // status text (S/C Listen On, Solo On, ...).
-    device_->send(buildDisplayText(zone::kBusCompReadout, readout, readout.size()));
+    // SSL 360° readout-update burst (uc1_04 BC threshold sweep, uc1_15
+    // CS knob sweep): precursor → track-name-triple LARGE → text. The
+    // precursor (FF 66 03 00 01 00) is what the firmware reacts to —
+    // skipping it leaves the readout zone stale on subsequent updates.
+    // The triple comes from refresh()'s last build (cached) so the
+    // BC carousel content is restored after the precursor's reset.
+    device_->send(buildColourBarEnable(false));
+    if (!lastSmallTripleFrame_.empty()) {
+        device_->send(std::vector<uint8_t>(lastSmallTripleFrame_));
+    }
+    if (!lastLargeTripleFrame_.empty()) {
+        device_->send(std::vector<uint8_t>(lastLargeTripleFrame_));
+    }
+    device_->send(buildDisplayText(zoneByte, readout, readout.size()));
 }
 
 void UC1Surface::renderExtFuncsSubscreen_()
@@ -2479,11 +2505,15 @@ void UC1Surface::refresh()
     const std::string prevName = nameOfIdx(curIdx - 1);
     const std::string currName = nameOfIdx(curIdx);
     const std::string nextName = nameOfIdx(curIdx + 1);
-    device_->send(buildTrackNameTripleSmall(prevName, currName, nextName));
-    device_->send(buildTrackNameTripleLarge(
+    auto smallTriple = buildTrackNameTripleSmall(prevName, currName, nextName);
+    lastSmallTripleFrame_ = smallTriple;
+    device_->send(std::move(smallTriple));
+    auto largeTriple = buildTrackNameTripleLarge(
         bcNameAtRank(bcRank - 1),
         bcNameAtRank(bcRank),
-        bcNameAtRank(bcRank + 1)));
+        bcNameAtRank(bcRank + 1));
+    lastLargeTripleFrame_ = largeTriple;
+    device_->send(std::move(largeTriple));
 
     // 7-segment push moved to the end of refresh() — see below. Several
     // knob ring cell maps (FaderLevel, BC Mix, BC Release) overlap the
