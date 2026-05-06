@@ -2321,14 +2321,13 @@ void onUf8Input(const uint8_t* dataIn, size_t lenIn)
             // We only queue while the user is actively touching the fader,
             // so REAPER's motor echo doesn't feed back.
             //
-            // ASYMMETRY: TOUCH opcode (FF 20 02) uses 1-indexed rawStrip
-            // and we shift by -1 in the touch handler. POSITION opcode
-            // (FF 21 03) uses 0-indexed rawStrip directly. Verified by
-            // the long-running edb1121 build; combining the two opcodes
-            // under a single shift convention breaks REAPER updates and
-            // the bit-7 echo for all faders. If you "fix" this asymmetry
-            // without a fresh capture proving symmetric indexing, you
-            // will reproduce the 2026-05-05 morning regression.
+            // Strip indexing: 0-indexed (0..7) on this opcode AND on
+            // FF 20 02 TOUCH. Verified empirically 2026-05-06 by the
+            // /tmp/reaper_uf8_in_dispatch.log histogram (TOUCH frames
+            // span strip 0..7, never 8). The earlier "asymmetry"
+            // hypothesis was self-inflicted: an `rawStrip == 0` filter
+            // dropped Fader 1's TOUCH events silently, making sweep
+            // tests look 1-indexed.
             const uint8_t strip   = data[i + 3];
             const uint8_t rawA    = data[i + 4];
             const uint8_t rawHigh = data[i + 4] & 0x80;     // diag: was bit 7 set?
@@ -2526,19 +2525,23 @@ void onUf8Input(const uint8_t* dataIn, size_t lenIn)
             // (kills the motor-echo feedback loop), and release the motor
             // so the user's hand isn't fighting it.
             //
-            // Strip indexing — DO NOT FLATTEN, see memory
-            // uf8-fader-input-protocol.md before changing.
-            // TOUCH (FF 20 02) is 1-indexed (Fader 1..8 = rawStrip 1..8).
-            // POSITION (FF 21 03) is 0-indexed direct, see line ~2282.
-            // The asymmetry is real and load-bearing — c97f751 tried
-            // to unify them and broke Fader 1 + Fader 8.
+            // Strip indexing — both directions 0-indexed (0..7).
+            // Verified empirically 2026-05-06 by `/tmp/reaper_uf8_in_dispatch.log`
+            // histogram: TOUCH frames span `ff 20 02 00 ..` through
+            // `ff 20 02 07 ..` with proper press+release pairs, never
+            // 0x08. POSITION (FF 21 03) and OUTBOUND LIMP (FF 1D 02)
+            // also 0-indexed (cap51). The "1-indexed with `-1` shift"
+            // hypothesis came from sweep tests where rawStrip=0 was
+            // silently rejected by an earlier `rawStrip == 0` filter,
+            // making the Fader 1 events look "missing" when they were
+            // simply dropped — a self-inflicted illusion.
             const uint8_t rawStrip = data[i + 3];
             const uint8_t state    = data[i + 4];
-            if (rawStrip == 0 || rawStrip > 8) {
+            if (rawStrip > 7) {
                 i += frameSize;
                 continue;
             }
-            const uint8_t strip = static_cast<uint8_t>(rawStrip - 1);
+            const uint8_t strip = rawStrip;
             if (strip < 8) {
                 // Diag log — same path as f73201c. Append-mode, one line
                 // per touch event so we can correlate with FF 1B keepalive
