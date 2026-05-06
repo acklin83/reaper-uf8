@@ -4597,40 +4597,94 @@ uf8::bindings::Modifier liveModifierForLed_()
 // stays driven by main.cpp's existing logic except for the modifier-
 // preview path in sendUf8GlobalLed which forces Bright when a held
 // modifier has a non-noop slot here.
-std::optional<uf8::LedColour> bindingLedColourOverride(
-    uf8::Uf8GlobalLed cell, uf8::GlobalLedState state,
-    uf8::bindings::Modifier mod = uf8::bindings::Modifier::Plain)
+// Resolve the (state, colour) tuple for a global LED cell from the
+// active layer's binding. Honours Brightness::Off/Dim/Bright from the
+// LedOverride / Binding so the user can set "Active=Off" or
+// "Active=Dim" and have it actually render that way — until 2026-05-06
+// we ignored brightness entirely and used only the caller's state,
+// which made every active LED bright regardless of binding settings.
+struct ResolvedLed {
+    uf8::GlobalLedState           state;
+    std::optional<uf8::LedColour> colour;  // nullopt → use cell's table-default colour
+};
+
+uf8::GlobalLedState brightnessToState_(uf8::bindings::Brightness b)
 {
-    const auto bid = buttonIdForGlobalLed(cell);
-    if (bid == uf8::bindings::ButtonId::None) return std::nullopt;
-    // For the active-state path, resolve from the slot whose action
-    // last actually fired (Plain unless a modifier press fired a
-    // non-Noop slot). Inactive path always uses the caller's mod —
-    // either Plain for normal pushes, or the held modifier for the
-    // preview path in sendUf8GlobalLed.
-    uf8::bindings::Modifier resolveMod = mod;
-    if (resolveMod == uf8::bindings::Modifier::Plain &&
-        state == uf8::GlobalLedState::Bright) {
-        resolveMod = uf8::bindings::lastFiredModifier(bid);
+    switch (b) {
+        case uf8::bindings::Brightness::Off:    return uf8::GlobalLedState::Off;
+        case uf8::bindings::Brightness::Dim:    return uf8::GlobalLedState::Dim;
+        case uf8::bindings::Brightness::Bright: return uf8::GlobalLedState::Bright;
     }
+    return uf8::GlobalLedState::Dim;
+}
+
+ResolvedLed resolveLed_(uf8::Uf8GlobalLed cell,
+                         bool active,
+                         uf8::bindings::Modifier mod)
+{
+    ResolvedLed r;
+    r.state = active ? uf8::GlobalLedState::Bright
+                      : uf8::GlobalLedState::Dim;
+    const auto bid = buttonIdForGlobalLed(cell);
+    if (bid == uf8::bindings::ButtonId::None) return r;
     const int activeLayer = uf8::bindings::getActiveLayer();
     const auto bd = uf8::bindings::getBinding(activeLayer, bid);
-    const auto& slot = bd.shortPress[static_cast<int>(resolveMod)];
+    const auto& slot = bd.shortPress[static_cast<int>(mod)];
     uint8_t rgb[3];
     uf8::bindings::Brightness bri;
-    if (state == uf8::GlobalLedState::Bright) {
-        uf8::bindings::effectiveLedActive(bd, slot, rgb, bri);
-    } else {
-        uf8::bindings::effectiveLedInactive(bd, slot, rgb, bri);
+    if (active) uf8::bindings::effectiveLedActive  (bd, slot, rgb, bri);
+    else        uf8::bindings::effectiveLedInactive(bd, slot, rgb, bri);
+    r.state = brightnessToState_(bri);
+    if (!(rgb[0] == 0xFF && rgb[1] == 0xFF && rgb[2] == 0xFF)) {
+        const uint32_t packed = (uint32_t(rgb[0]) << 16)
+                              | (uint32_t(rgb[1]) << 8)
+                              |  uint32_t(rgb[2]);
+        r.colour = uf8::ledColourForTrackRgb(packed);
     }
-    if (rgb[0] == 0xFF && rgb[1] == 0xFF && rgb[2] == 0xFF) {
-        return std::nullopt;
-    }
-    const uint32_t packed = (uint32_t(rgb[0]) << 16)
-                          | (uint32_t(rgb[1]) << 8)
-                          |  uint32_t(rgb[2]);
-    return uf8::ledColourForTrackRgb(packed);
+    return r;
 }
+
+// "Is the bound action currently engaged?" Used by the stateless-cell
+// sweep below. For stateful actions we query the appropriate state
+// (builtin's stateOf, REAPER's GetToggleCommandState2). For stateless
+// actions (one-shot REAPER actions, builtins without stateOf, keyboard
+// chords, MIDI) we report ACTIVE — that way the user's "Active" LED
+// settings render continuously, otherwise binding a custom colour to
+// a zoom / bank / page button has no visible effect because they'd
+// always be inactive.
+bool boundActionIsActive_(uf8::bindings::ButtonId bid)
+{
+    if (bid == uf8::bindings::ButtonId::None) return false;
+    const int activeLayer = uf8::bindings::getActiveLayer();
+    const auto bd = uf8::bindings::getBinding(activeLayer, bid);
+    const auto& sp = bd.shortPress[
+        static_cast<int>(uf8::bindings::Modifier::Plain)];
+    using AT = uf8::bindings::ActionType;
+    switch (sp.type) {
+        case AT::Noop: return false;
+        case AT::Builtin:
+            if (uf8::bindings::builtinHasState(sp.action)) {
+                return uf8::bindings::builtinStateOf(sp.action, sp.param);
+            }
+            return true;  // stateless builtin → render as active
+        case AT::Reaper: {
+            if (sp.action.empty()) return true;
+            int aid = std::atoi(sp.action.c_str());
+            if (aid <= 0) aid = NamedCommandLookup(sp.action.c_str());
+            if (aid > 0) {
+                const int s = GetToggleCommandState2(
+                    SectionFromUniqueID(0), aid);
+                if (s >= 0) return (s == 1);
+            }
+            return true;  // non-toggle action → render as active
+        }
+        case AT::Keyboard:
+        case AT::Midi:
+            return true;
+    }
+    return false;
+}
+
 
 // True when the currently-held modifier has a bindable, non-noop slot
 // on this cell — i.e. holding the modifier "armed" an action that a
@@ -4647,24 +4701,25 @@ bool modifierSlotArmed_(uf8::Uf8GlobalLed cell, uf8::bindings::Modifier mod)
 }
 
 // Wrapper around sendLedFrames(buildUf8GlobalLed(...)) that folds in
-// the user's per-binding LED colour and the modifier-preview path.
-// Use this instead of the raw 2-arg buildUf8GlobalLed at every global-
-// LED push site.
+// the user's per-binding colour AND brightness, plus the modifier-
+// preview path. Use this instead of the raw 2-arg buildUf8GlobalLed
+// at every global-LED push site.
+//
+// `callerState` is the state-machine's "is this cell active right now?"
+// answer (Bright = active, Dim/Off = inactive). The binding's LED
+// brightness setting (Off/Dim/Bright) replaces it, so a user can set
+// "Active=Off" or "Active=Dim" and have it actually render.
 //
 // Behaviour matrix (mod = currently-held modifier, lastFired = the
 // slot whose action last actually fired on this button):
 //
-//   mod held, slot armed, state==Dim                 → preview Dim with mod slot's INACTIVE colour
-//   mod held, slot armed, state==Bright, lastFired!=mod → preview Dim with mod slot's INACTIVE colour
-//   mod held, slot armed, state==Bright, lastFired==mod → state-driven (Bright with mod slot's ACTIVE colour, via lastFiredModifier promotion)
-//   no mod held / slot not armed                     → state-driven with lastFiredModifier promotion on Bright path
-//
-// Suppressing the preview when state==Bright AND lastFired==mod
-// keeps the bright active colour visible after Shift+press fires
-// the Shift slot — without it, the preview path would clobber the
-// just-engaged action's active colour with its own inactive colour.
-void sendUf8GlobalLed(uf8::Uf8GlobalLed cell, uf8::GlobalLedState state)
+//   mod held, slot armed, callerActive=false                 → preview Dim with mod slot's INACTIVE
+//   mod held, slot armed, callerActive=true, lastFired!=mod  → preview Dim with mod slot's INACTIVE
+//   mod held, slot armed, callerActive=true, lastFired==mod  → state-driven via mod slot's ACTIVE
+//   no mod held / slot not armed                             → state-driven with lastFiredModifier promotion
+void sendUf8GlobalLed(uf8::Uf8GlobalLed cell, uf8::GlobalLedState callerState)
 {
+    const bool callerActive = (callerState == uf8::GlobalLedState::Bright);
     const auto mod = liveModifierForLed_();
     const bool armed = (mod != uf8::bindings::Modifier::Plain) &&
                         modifierSlotArmed_(cell, mod);
@@ -4676,24 +4731,34 @@ void sendUf8GlobalLed(uf8::Uf8GlobalLed cell, uf8::GlobalLedState state)
                 (uf8::bindings::lastFiredModifier(bid) == mod);
         }
     }
-    const bool stateIsBright = (state == uf8::GlobalLedState::Bright);
 
-    if (armed && !(stateIsBright && lastFiredMatchesHeld)) {
-        // Preview path — Dim with mod slot's inactive colour.
-        if (auto over = bindingLedColourOverride(
-                cell, uf8::GlobalLedState::Dim, mod)) {
-            sendLedFrames(uf8::buildUf8GlobalLed(
-                cell, uf8::GlobalLedState::Dim, *over));
+    if (armed && !(callerActive && lastFiredMatchesHeld)) {
+        // Preview: render the held modifier slot's INACTIVE
+        // appearance (colour + brightness).
+        const auto r = resolveLed_(cell, /*active*/ false, mod);
+        if (r.colour) {
+            sendLedFrames(uf8::buildUf8GlobalLed(cell, r.state, *r.colour));
         } else {
-            sendLedFrames(uf8::buildUf8GlobalLed(
-                cell, uf8::GlobalLedState::Dim));
+            sendLedFrames(uf8::buildUf8GlobalLed(cell, r.state));
         }
         return;
     }
-    if (auto over = bindingLedColourOverride(cell, state)) {
-        sendLedFrames(uf8::buildUf8GlobalLed(cell, state, *over));
+
+    // Normal path. For the active branch, resolve from the slot
+    // whose action last actually fired (so Shift+press of a Toggle
+    // button keeps showing the Shift slot's active colour).
+    uf8::bindings::Modifier resolveMod = uf8::bindings::Modifier::Plain;
+    if (callerActive) {
+        const auto bid = buttonIdForGlobalLed(cell);
+        if (bid != uf8::bindings::ButtonId::None) {
+            resolveMod = uf8::bindings::lastFiredModifier(bid);
+        }
+    }
+    const auto r = resolveLed_(cell, callerActive, resolveMod);
+    if (r.colour) {
+        sendLedFrames(uf8::buildUf8GlobalLed(cell, r.state, *r.colour));
     } else {
-        sendLedFrames(uf8::buildUf8GlobalLed(cell, state));
+        sendLedFrames(uf8::buildUf8GlobalLed(cell, r.state));
     }
 }
 
@@ -4947,15 +5012,13 @@ void pushUf8GlobalLeds()
         };
         for (auto led : kStateless) {
             const auto bid = buttonIdForGlobalLed(led);
-            bool active = false;
-            if (bid != uf8::bindings::ButtonId::None) {
-                const auto bd = uf8::bindings::getBinding(activeLayer, bid);
-                const auto& sp = bd.shortPress[
-                    static_cast<int>(uf8::bindings::Modifier::Plain)];
-                if (sp.type == uf8::bindings::ActionType::Builtin) {
-                    active = uf8::bindings::builtinStateOf(sp.action, sp.param);
-                }
-            }
+            // Stateful action → query state. Stateless action (one-
+            // shot REAPER, builtin without stateOf, keyboard, MIDI)
+            // → render as active so the user's Active settings are
+            // visible. Without this, every zoom / bank / page button
+            // stayed at the inactive default and any colour edit was
+            // invisible.
+            const bool active = boundActionIsActive_(bid);
             sendUf8GlobalLed(led, active);
         }
         if (!g_globalLedsInit) {
@@ -6043,17 +6106,29 @@ std::string reasixty_resolveActionName(const std::string& action)
     return (n && *n) ? std::string(n) : std::string("(no name)");
 }
 
-// SWELL's BrowseForSaveFile is part of REAPER's binary on macOS; we
-// reach it via dlsym so we don't have to bootstrap the full SWELL
-// function table. REAPER's own GetUserFileNameForRead handles Open
-// dialogs but offers no Save-As variant, hence this small dlsym helper.
+// SWELL's BrowseForSaveFile isn't in REAPER's plug-in SDK header but
+// REAPER's GetFunc does expose it by name. dlsym(RTLD_DEFAULT, ...)
+// USED to resolve it on macOS, but Frank's REAPER on a newer macOS
+// returns null from that path (hardened-runtime / dyld scope shrink
+// 2026-05-06). We capture rec->GetFunc at REAPER_PLUGIN_ENTRY time
+// and use it as the canonical loader.
 using BrowseForSaveFile_t = bool(*)(const char* text, const char* initialdir,
                                     const char* initialfile, const char* extlist,
                                     char* fn, int fnsize);
+static void* (*g_reaperGetFunc)(const char*) = nullptr;
 static BrowseForSaveFile_t loadBrowseForSaveFile_()
 {
-    static BrowseForSaveFile_t p =
-        reinterpret_cast<BrowseForSaveFile_t>(dlsym(RTLD_DEFAULT, "BrowseForSaveFile"));
+    static BrowseForSaveFile_t p = nullptr;
+    if (p) return p;
+    if (g_reaperGetFunc) {
+        p = reinterpret_cast<BrowseForSaveFile_t>(
+            g_reaperGetFunc("BrowseForSaveFile"));
+        if (p) return p;
+    }
+    // Last-ditch fallback for dev builds where rec->GetFunc somehow
+    // wasn't captured. dlsym still works on most setups.
+    p = reinterpret_cast<BrowseForSaveFile_t>(
+        dlsym(RTLD_DEFAULT, "BrowseForSaveFile"));
     return p;
 }
 
@@ -6950,6 +7025,10 @@ extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(
 
     if (rec->caller_version != REAPER_PLUGIN_VERSION) return 0;
     if (REAPERAPI_LoadAPI(rec->GetFunc) != 0) return 0;
+
+    // Capture rec->GetFunc for SWELL APIs not in the plug-in SDK
+    // (e.g. BrowseForSaveFile — see reasixty_exportLayerViaDialog).
+    g_reaperGetFunc = rec->GetFunc;
 
     // Multi-instance picker glue: wire the active-instance lookup so
     // uf8::lookupPluginOnTrack(tr, domain) returns the Nth matching FX

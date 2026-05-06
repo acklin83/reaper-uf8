@@ -306,6 +306,14 @@ bool builtinUsesParam(const std::string& name);
 // name isn't registered.
 bool builtinStateOf(const std::string& name, int param);
 
+// Whether this builtin has a queryable state. Lets the LED pusher
+// distinguish "stateful action that's currently false" (LED stays
+// inactive) from "stateless action that just runs on press"
+// (LED renders the binding's active appearance continuously, so the
+// user's chosen colour is visible — without this, every zoom /
+// bank / page button stays at the inactive default).
+bool builtinHasState(const std::string& name);
+
 // ---- lifecycle / API -------------------------------------------------------
 
 // Load JSON from disk; on missing/corrupt file seed factory defaults and

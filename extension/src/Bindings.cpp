@@ -1913,6 +1913,13 @@ bool builtinStateOf(const std::string& name, int param)
     return it->second.stateOf(param);
 }
 
+bool builtinHasState(const std::string& name)
+{
+    auto it = g_builtins.find(name);
+    if (it == g_builtins.end()) return false;
+    return static_cast<bool>(it->second.stateOf);
+}
+
 void setActiveLayer(int layer)
 {
     if (layer < 0 || layer > 2) return;
