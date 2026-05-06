@@ -2336,13 +2336,10 @@ void onUf8Input(const uint8_t* dataIn, size_t lenIn)
             // We only queue while the user is actively touching the fader,
             // so REAPER's motor echo doesn't feed back.
             //
-            // Strip indexing: 0-indexed (0..7) DIRECT on this opcode.
-            // FF 20 02 TOUCH is 1-indexed (rawStrip 1..8) and shifted
-            // by -1 in its handler — the asymmetry is real, verified
-            // empirically by the "without -1 shift, every fader stays
-            // engaged" symptom (LIMP wire-byte routes one strip too
-            // far). DON'T touch this without a fresh capture proving
-            // symmetry — multiple regressions have come from doing so.
+            // Strip indexing: 0-indexed direct on this opcode AND on
+            // FF 20 02 TOUCH. cap51_ssl360_fader8_drag captured both
+            // directions on user's UF8 (Windows + SSL 360°): Fader 1
+            // = byte 00, Fader 8 = byte 07. No shift, no asymmetry.
             const uint8_t strip   = data[i + 3];
             const uint8_t rawA    = data[i + 4];
             const uint8_t rawHigh = data[i + 4] & 0x80;     // diag: was bit 7 set?
@@ -2540,25 +2537,24 @@ void onUf8Input(const uint8_t* dataIn, size_t lenIn)
             // (kills the motor-echo feedback loop), and release the motor
             // so the user's hand isn't fighting it.
             //
-            // Strip indexing — TOUCH (FF 20 02) is 1-indexed
-            // (Fader N → rawStrip=N, 1..8), shift `-1` to 0..7 internal.
-            // POSITION (FF 21 03) and OUTBOUND LIMP (FF 1D 02) are
-            // 0-indexed direct. Verified empirically 2026-05-06: with
-            // no shift, EVERY fader stays engaged (LIMP wire-byte = N
-            // routes to Fader N+1 → wrong fader limps → user-touched
-            // fader stays engaged). Restoring the shift returned the
-            // working state. The dispatch-log histogram showing
-            // `ff 20 02 00 ..` was misleading: those 2 events are
-            // most likely Fader 8 firmware wraparound glitches, not
-            // normal Fader 1 events. Without a fresh capture proving
-            // 0-indexed, KEEP THE SHIFT.
+            // Strip indexing — 0-indexed END-TO-END (TOUCH, POSITION,
+            // outbound LIMP/target). Hard ground truth from cap51
+            // (USBPcap of SSL 360° on user's UF8 hardware, Windows host):
+            //   Fader 1 (leftmost)  → ff 20 02 00 01 (rawStrip=0)
+            //   Fader 8 (rightmost) → ff 20 02 07 01 (rawStrip=7)
+            //   SSL LIMP for F8     → ff 1d 02 07 00 (wire-byte=7)
+            // No shift. No rawStrip=0 rejection. captures/cap51_ssl360
+            // _fader8_drag.md has the captured bytes. If a future test
+            // contradicts cap51, capture again before changing this —
+            // multiple regressions came from "the firmware feels
+            // 1-indexed today" speculation.
             const uint8_t rawStrip = data[i + 3];
             const uint8_t state    = data[i + 4];
-            if (rawStrip == 0 || rawStrip > 8) {
+            if (rawStrip > 7) {
                 i += frameSize;
                 continue;
             }
-            const uint8_t strip = static_cast<uint8_t>(rawStrip - 1);
+            const uint8_t strip = rawStrip;
             if (strip < 8) {
                 // Diag log — same path as f73201c. Append-mode, one line
                 // per touch event so we can correlate with FF 1B keepalive
@@ -2626,7 +2622,10 @@ void onUf8Input(const uint8_t* dataIn, size_t lenIn)
                             static_cast<double>(signed6)});
             }
         }
-        // cmd 0x33 (v-pot push?) skipped — need more samples to verify
+        // cmd 0x33 (secondary sensor — exact semantics TBD; not a
+        // clean touch event despite carrying strip+state-looking
+        // bytes, observed rapid same-millisecond toggling that doesn't
+        // match human touch cadence)
 
         i += frameSize;
     }
