@@ -2336,10 +2336,11 @@ void onUf8Input(const uint8_t* dataIn, size_t lenIn)
             // We only queue while the user is actively touching the fader,
             // so REAPER's motor echo doesn't feed back.
             //
-            // Strip indexing: 0-indexed direct on this opcode AND on
-            // FF 20 02 TOUCH. cap51_ssl360_fader8_drag captured both
-            // directions on user's UF8 (Windows + SSL 360°): Fader 1
-            // = byte 00, Fader 8 = byte 07. No shift, no asymmetry.
+            // Strip indexing: 0-indexed direct on this opcode (POSITION).
+            // FF 20 02 TOUCH is 1-indexed and shifted by -1 in its
+            // handler — the asymmetry was confirmed empirically by the
+            // "touch Fader N, Fader N+1 limps" symptom when the shift
+            // was removed. Don't unify them.
             const uint8_t strip   = data[i + 3];
             const uint8_t rawA    = data[i + 4];
             const uint8_t rawHigh = data[i + 4] & 0x80;     // diag: was bit 7 set?
@@ -2537,24 +2538,36 @@ void onUf8Input(const uint8_t* dataIn, size_t lenIn)
             // (kills the motor-echo feedback loop), and release the motor
             // so the user's hand isn't fighting it.
             //
-            // Strip indexing — 0-indexed END-TO-END (TOUCH, POSITION,
-            // outbound LIMP/target). Hard ground truth from cap51
-            // (USBPcap of SSL 360° on user's UF8 hardware, Windows host):
-            //   Fader 1 (leftmost)  → ff 20 02 00 01 (rawStrip=0)
-            //   Fader 8 (rightmost) → ff 20 02 07 01 (rawStrip=7)
-            //   SSL LIMP for F8     → ff 1d 02 07 00 (wire-byte=7)
-            // No shift. No rawStrip=0 rejection. captures/cap51_ssl360
-            // _fader8_drag.md has the captured bytes. If a future test
-            // contradicts cap51, capture again before changing this —
-            // multiple regressions came from "the firmware feels
-            // 1-indexed today" speculation.
+            // Strip indexing — verified 2026-05-06 by user's
+            // touch-and-observe test:
+            //   "touch Fader N → Fader N+1's motor goes limp"
+            // means INBOUND is 1-indexed (rawStrip=N for Fader N) AND
+            // OUTBOUND is 0-indexed (wire-byte K limps Fader K+1).
+            // Mapping that makes Fader N's LIMP land on Fader N:
+            //     strip = rawStrip - 1
+            //
+            // cap51 captured the wire bytes correctly but its `.md`
+            // labels ("Fader 1 = rawStrip=0") were the capturer's
+            // annotation, not verified by an isolated touch — the
+            // sweep started at the leftmost fader and the first
+            // logged event was labelled "Fader 1" without checking.
+            // The empirical "rechts davon" symptom is the load-bearing
+            // truth.
+            //
+            // Fader 8 wraparound: the firmware sometimes emits
+            // rawStrip=0 instead of rawStrip=8 for Fader 8 (rare —
+            // ~2 events per session). Map rawStrip=0 → strip=7 so
+            // those events still limp Fader 8 instead of being
+            // dropped silently.
             const uint8_t rawStrip = data[i + 3];
             const uint8_t state    = data[i + 4];
-            if (rawStrip > 7) {
+            if (rawStrip > 8) {
                 i += frameSize;
                 continue;
             }
-            const uint8_t strip = rawStrip;
+            const uint8_t strip = (rawStrip == 0)
+                                      ? static_cast<uint8_t>(7)
+                                      : static_cast<uint8_t>(rawStrip - 1);
             if (strip < 8) {
                 // Diag log — same path as f73201c. Append-mode, one line
                 // per touch event so we can correlate with FF 1B keepalive
