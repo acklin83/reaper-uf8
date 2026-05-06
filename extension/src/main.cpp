@@ -2210,19 +2210,46 @@ std::array<std::atomic<bool>, 8>     g_lastTouchPbValid{};
 std::array<uint16_t, 8>             g_lastFaderPb{};
 bool                                g_faderPbInit{false};
 
-void onUf8Input(const uint8_t* data, size_t len)
+// Carry-over buffer for frames split across USB bulk-IN URBs. UF8
+// firmware emits FF-framed events back-to-back without aligning them
+// to USB packet boundaries, so a `FF 20 02 <strip> <state>` touch
+// frame can arrive as `FF 20 02` in one URB and `<strip> <state>` in
+// the next. Without stitching, both halves are dropped (`unknown:` log)
+// — manifests as Fader 8 (or any fader, but statistically Fader 8 most
+// often) silently failing to limp because the TOUCH event never reaches
+// the dispatcher. Capped to prevent unbounded growth from corrupt input.
+static std::vector<uint8_t> g_inputResidual;
+constexpr size_t kInputResidualMax = 64;
+
+void onUf8Input(const uint8_t* dataIn, size_t lenIn)
 {
     // Debug: log every non-trivial IN packet that reaches this handler,
     // including payloads that might be interesting (anything not a pure
     // 31 60 / poll pair).
     if (FILE* f = std::fopen("/tmp/reaper_uf8_in_dispatch.log", "a")) {
-        std::fprintf(f, "[%zu] ", len);
-        for (size_t k = 0; k < len && k < 32; ++k) std::fprintf(f, "%02x ", data[k]);
+        std::fprintf(f, "[%zu] ", lenIn);
+        for (size_t k = 0; k < lenIn && k < 32; ++k) std::fprintf(f, "%02x ", dataIn[k]);
         std::fprintf(f, "\n");
         std::fclose(f);
     }
 
     if (!g_midi) return;
+
+    // Stitch any leftover bytes from the previous URB to the front of
+    // this one before parsing. The thread-safety story: this handler
+    // runs on the libusb event thread and is the SOLE writer/reader of
+    // g_inputResidual.
+    std::vector<uint8_t> stitched;
+    const uint8_t* data = dataIn;
+    size_t         len  = lenIn;
+    if (!g_inputResidual.empty()) {
+        stitched.reserve(g_inputResidual.size() + lenIn);
+        stitched.insert(stitched.end(), g_inputResidual.begin(), g_inputResidual.end());
+        stitched.insert(stitched.end(), dataIn, dataIn + lenIn);
+        g_inputResidual.clear();
+        data = stitched.data();
+        len  = stitched.size();
+    }
 
     // Walk past each FF frame in the buffer (multiple frames can arrive
     // concatenated, optionally preceded by a 31 60 / 31 00 session prefix).
@@ -2231,7 +2258,14 @@ void onUf8Input(const uint8_t* data, size_t len)
         // Session-prefix byte 0x31 + flag byte: skip both.
         if (data[i] == 0x31 && i + 1 < len) { i += 2; continue; }
         if (data[i] != 0xFF) { ++i; continue; }
-        if (i + 2 >= len) break;  // need at least FF, cmd, something
+        // Need at least FF + cmd to know how much more to expect.
+        if (i + 2 >= len) {
+            // Carry FF (and possibly cmd) into the next URB.
+            if (len - i <= kInputResidualMax) {
+                g_inputResidual.assign(data + i, data + len);
+            }
+            break;
+        }
 
         // Figure out frame size based on the command byte.
         const uint8_t cmd = data[i + 1];
@@ -2255,10 +2289,8 @@ void onUf8Input(const uint8_t* data, size_t len)
             case 0x33: frameSize = 6; break;   // pressure sensor (TBD)
             default:   frameSize = 0; break;
         }
-        if (frameSize == 0 || i + frameSize > len) {
-            // Log the first few bytes of anything we didn't recognise so
-            // unknown events (e.g. channel-encoder rotation) can be
-            // reverse-engineered by turning the control with logging on.
+        if (frameSize == 0) {
+            // Unknown command — log and skip one byte.
             if (FILE* f = std::fopen("/tmp/reaper_uf8_unknown.log", "a")) {
                 std::fprintf(f, "unknown:");
                 const size_t show = std::min<size_t>(len - i, 12);
@@ -2268,6 +2300,16 @@ void onUf8Input(const uint8_t* data, size_t len)
             }
             ++i;
             continue;
+        }
+        if (i + frameSize > len) {
+            // Truncated frame at end of buffer — known opcode but the
+            // payload extends past the URB boundary. Carry the partial
+            // frame into the next URB rather than dropping it (which
+            // is how Fader 8 TOUCH events and others were silently lost).
+            if (len - i <= kInputResidualMax) {
+                g_inputResidual.assign(data + i, data + len);
+            }
+            break;
         }
 
         // Dispatch by command.
@@ -2486,30 +2528,17 @@ void onUf8Input(const uint8_t* data, size_t len)
             //
             // Strip indexing — DO NOT FLATTEN, see memory
             // uf8-fader-input-protocol.md before changing.
-            //
-            // Empirically (single-fader tests on user's macOS
-            // hardware, 2026-05-06):
-            //   Fader 1..7 → rawStrip = 1..7
-            //   Fader 8    → rawStrip = 0    (wraps around)
-            // POSITION opcode (FF 21 03) is 0-indexed direct, see the
-            // load-bearing comment around line 2282. Don't try to
-            // unify the two conventions without a fresh capture.
-            //
-            // The "0-indexed end-to-end" claim from c97f751 came from
-            // cap51 (Windows SSL 360°), which only proves the OUTBOUND
-            // FF 1D 02 motor-LIMP is 0-indexed. That says nothing about
-            // the INBOUND FF 20 02 touch byte on this firmware. Three
-            // commits in one week tried to "simplify" this and each
-            // broke a different fader. Stop.
+            // TOUCH (FF 20 02) is 1-indexed (Fader 1..8 = rawStrip 1..8).
+            // POSITION (FF 21 03) is 0-indexed direct, see line ~2282.
+            // The asymmetry is real and load-bearing — c97f751 tried
+            // to unify them and broke Fader 1 + Fader 8.
             const uint8_t rawStrip = data[i + 3];
             const uint8_t state    = data[i + 4];
-            if (rawStrip > 8) {
+            if (rawStrip == 0 || rawStrip > 8) {
                 i += frameSize;
                 continue;
             }
-            const uint8_t strip = (rawStrip == 0)
-                                      ? static_cast<uint8_t>(7)
-                                      : static_cast<uint8_t>(rawStrip - 1);
+            const uint8_t strip = static_cast<uint8_t>(rawStrip - 1);
             if (strip < 8) {
                 // Diag log — same path as f73201c. Append-mode, one line
                 // per touch event so we can correlate with FF 1B keepalive
