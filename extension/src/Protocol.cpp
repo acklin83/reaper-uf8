@@ -239,32 +239,52 @@ const PaletteRgb* selPaletteRgb(int* count)
     return kRgb;
 }
 
+namespace {
+// HSV chromatic-plane projection: (S·cosH, S·sinH). Used to compare
+// colours by hue/saturation, not raw RGB. Raw-RGB Euclidean misranks
+// dark inputs (r12/g25/b84 → orange instead of blue) because palette
+// entries with small numbers happen to be close, regardless of hue.
+// Even max-channel-normalised RGB misranks tinted darks (same input
+// matched red-tinted "blue-leaning violet" instead of pure deep blue,
+// because Euclidean treats green-tint and red-tint as both being
+// equally "off-axis"). Polar HSV puts opposite tints on opposite
+// sides, so hue distance is honest.
+struct ChromaXY { double x, y; };
+ChromaXY chromaXY(int r, int g, int b)
+{
+    const int mx = std::max({r, g, b});
+    const int mn = std::min({r, g, b});
+    if (mx == 0 || mx == mn) return {0.0, 0.0};
+    const double chroma = static_cast<double>(mx - mn);
+    const double s = chroma / mx;
+    double h_deg = 0.0;
+    if (mx == r) {
+        h_deg = 60.0 * ((static_cast<double>(g) - b) / chroma);
+        if (h_deg < 0) h_deg += 360.0;
+    } else if (mx == g) {
+        h_deg = 60.0 * (((static_cast<double>(b) - r) / chroma) + 2.0);
+    } else {
+        h_deg = 60.0 * (((static_cast<double>(r) - g) / chroma) + 4.0);
+    }
+    const double h_rad = h_deg * 3.14159265358979323846 / 180.0;
+    return {s * std::cos(h_rad), s * std::sin(h_rad)};
+}
+} // anonymous
+
 LedColour ledColourForTrackRgb(uint32_t rgb)
 {
     if (rgb == 0) return ledColourWhite();
-    // Compare in chromaticity space — divide each channel by max(R,G,B) so
-    // brightness drops out. Without this, dark inputs (e.g. REAPER's
-    // r12/g25/b84 dark blue) match orange instead of blue because their
-    // raw-RGB Euclidean distance rewards palette entries with low total
-    // brightness.
     const int r = static_cast<int>((rgb >> 16) & 0xFF);
     const int g = static_cast<int>((rgb >> 8)  & 0xFF);
     const int b = static_cast<int>( rgb        & 0xFF);
-    const int m = std::max({r, g, b});
-    const int rn = m ? (r * 255 + m / 2) / m : 0;
-    const int gn = m ? (g * 255 + m / 2) / m : 0;
-    const int bn = m ? (b * 255 + m / 2) / m : 0;
-    int bestDist = std::numeric_limits<int>::max();
+    const ChromaXY cxy = chromaXY(r, g, b);
+    double bestDist = std::numeric_limits<double>::infinity();
     LedColour best = ledColourWhite();
     for (const auto& p : kSelPalette) {
-        const int pm = std::max({static_cast<int>(p.r),
-                                 static_cast<int>(p.g),
-                                 static_cast<int>(p.b)});
-        const int prn = pm ? (p.r * 255 + pm / 2) / pm : 0;
-        const int pgn = pm ? (p.g * 255 + pm / 2) / pm : 0;
-        const int pbn = pm ? (p.b * 255 + pm / 2) / pm : 0;
-        const int dr = rn - prn, dg = gn - pgn, db = bn - pbn;
-        const int d  = dr*dr + dg*dg + db*db;
+        const ChromaXY pxy = chromaXY(p.r, p.g, p.b);
+        const double dx = cxy.x - pxy.x;
+        const double dy = cxy.y - pxy.y;
+        const double d  = dx*dx + dy*dy;
         if (d < bestDist) { bestDist = d; best = p.bytes; }
     }
     return best;

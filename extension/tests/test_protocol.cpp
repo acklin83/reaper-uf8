@@ -130,14 +130,14 @@ int main()
         auto q = quantize(0xFFFF00);
         EXPECT(q == 0x07 || q == 0x0A);
     }
-    // Dark blue (REAPER's r12/g25/b84) was rendering as orange before the
-    // chromaticity fix because raw RGB Euclidean distance favoured the
-    // dim dark-orange palette entry over saturated deep blue. Should land
-    // on a blue family entry (deep blue 0x04 or blue-leaning violet 0x09).
-    {
-        auto q = quantize(0x0C1954);
-        EXPECT(q == 0x04 || q == 0x09);
-    }
+    // Dark blue (REAPER's r12/g25/b84) was rendering as orange under
+    // raw-RGB matching, then as light violet under naive max-channel
+    // chromaticity (because the input's slight green tint and palette
+    // 0x09's red tint looked equally "off-axis" to Euclidean distance).
+    // HSV polar matching puts opposite tints on opposite sides — input
+    // hue 229° is clearly closer to deep blue (240°) than to 0x09 (255°)
+    // or 0x01 (240° but heavily desaturated).
+    EXPECT(quantize(0x0C1954) == 0x04);
 
     // --- LED colour pair (cap31, cap33). Lock the bytes captured from
     //     SSL 360° so a regression in the formula or colour-table is caught.

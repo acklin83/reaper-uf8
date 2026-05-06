@@ -2,26 +2,44 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <limits>
 
 namespace uf8 {
 
 namespace {
 
-// Project a colour onto its chromaticity by scaling so the largest channel
-// is 255. Removes brightness from the comparison — without this, dark
-// inputs (e.g. REAPER's r12/g25/b84 dark blue) prefer the dark-orange
-// palette entry over deep blue purely because raw RGB Euclidean distance
-// rewards "small numbers" and our palette has no muted-blue entry.
-Rgb chromaticity(Rgb c)
+// Project a colour onto the HSV chromatic plane: (S·cosH, S·sinH).
+// Using HSV — not normalised RGB — because Euclidean distance in
+// chromaticity-RGB treats "green tint" and "red tint" as equally far
+// from pure blue, so r12/g25/b84 (slight green tint, hue 229°) ended
+// up matching the red-tinted "blue-leaning violet" palette entry
+// (hue 255°) instead of pure deep blue (hue 240°). Polar HSV
+// coordinates put opposite tints on opposite sides, so hue distance
+// behaves correctly. Saturation as the radius gives desaturated
+// inputs a shorter pull on hue, which lets light/desaturated
+// palette entries (e.g. light violet 0x01) win over saturated ones
+// for low-saturation inputs without an extra weighting hack.
+struct ChromaXY { double x, y; };
+
+ChromaXY chromaXY(Rgb c)
 {
-    const uint8_t m = std::max({c.r, c.g, c.b});
-    if (m == 0) return c;
-    return Rgb{
-        static_cast<uint8_t>((c.r * 255 + m / 2) / m),
-        static_cast<uint8_t>((c.g * 255 + m / 2) / m),
-        static_cast<uint8_t>((c.b * 255 + m / 2) / m),
-    };
+    const int mx = std::max({c.r, c.g, c.b});
+    const int mn = std::min({c.r, c.g, c.b});
+    if (mx == 0 || mx == mn) return {0.0, 0.0};
+    const double chroma = static_cast<double>(mx - mn);
+    const double s = chroma / mx;
+    double h_deg = 0.0;
+    if (mx == c.r) {
+        h_deg = 60.0 * ((static_cast<double>(c.g) - c.b) / chroma);
+        if (h_deg < 0) h_deg += 360.0;
+    } else if (mx == c.g) {
+        h_deg = 60.0 * (((static_cast<double>(c.b) - c.r) / chroma) + 2.0);
+    } else {
+        h_deg = 60.0 * (((static_cast<double>(c.r) - c.g) / chroma) + 4.0);
+    }
+    const double h_rad = h_deg * 3.14159265358979323846 / 180.0;
+    return {s * std::cos(h_rad), s * std::sin(h_rad)};
 }
 
 
@@ -69,22 +87,18 @@ std::optional<Rgb> paletteEntry(uint8_t index)
 
 uint8_t quantize(Rgb c)
 {
-    // Nearest-match in chromaticity space (each colour normalised so its
-    // brightest channel == 255). Comparing raw RGB makes dark inputs
-    // gravitate to whichever palette entry happens to have the lowest
-    // total brightness — which is why r12/g25/b84 dark blue used to land
-    // on the dark-orange entry instead of deep blue.
-    const Rgb cn = chromaticity(c);
-    int bestDist = std::numeric_limits<int>::max();
+    // Nearest-match in the HSV chromatic plane — see chromaXY() above
+    // for the why.
+    const ChromaXY cxy = chromaXY(c);
+    double bestDist = std::numeric_limits<double>::infinity();
     uint8_t bestIdx = 0x01;  // default if literally nothing matches
 
     for (uint8_t i = 0; i < 16; ++i) {
         if (!kHasEntry[i]) continue;
-        const Rgb pn = chromaticity(kPalette[i]);
-        const int dr = static_cast<int>(cn.r) - pn.r;
-        const int dg = static_cast<int>(cn.g) - pn.g;
-        const int db = static_cast<int>(cn.b) - pn.b;
-        const int d = dr * dr + dg * dg + db * db;
+        const ChromaXY pxy = chromaXY(kPalette[i]);
+        const double dx = cxy.x - pxy.x;
+        const double dy = cxy.y - pxy.y;
+        const double d = dx * dx + dy * dy;
         if (d < bestDist) {
             bestDist = d;
             bestIdx = i;
