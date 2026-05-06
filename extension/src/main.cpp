@@ -5362,14 +5362,21 @@ void onTimer()
                 if (focIdx >= bankOffset && focIdx < bankOffset + 8) {
                     focStrip = focIdx - bankOffset;
                     uc1::UC1Bindings b = uc1::lookupBindingsOnTrack(tr);
+                    // GR readback mirrors UC1Surface::readGr: raw
+                    // TrackFX_GetParam for user-picked GR params
+                    // (most VST3 meter outputs are exposed there
+                    // directly), GainReduction_dB named-config-parm
+                    // as the built-in fallback. When the track has
+                    // no SSL CS / user-mapped CS plug-in, walk the
+                    // FX chain and use the first FX exposing the
+                    // PreSonus GainReduction_dB convention (Frank
+                    // 2026-05-06: ReaComp / FabFilter Pro-C2 etc.
+                    // should still drive the UF8 strip).
+                    bool gotIt = false;
+                    double gr = 0.0;
+                    double offsetDb = 0.0;
                     if (b.channelMap && b.channelFxIdx >= 0) {
-                        // GR readback mirrors UC1Surface::readGr: raw
-                        // TrackFX_GetParam for user-picked GR params
-                        // (most VST3 meter outputs are exposed there
-                        // directly), GainReduction_dB named-config-parm
-                        // as the built-in fallback.
-                        bool gotIt = false;
-                        double gr = 0.0;
+                        offsetDb = b.channelGrOffsetDb;
                         if (b.channelGrParam >= 0) {
                             double mn = 0.0, mx = 0.0;
                             gr = TrackFX_GetParam(tr, b.channelFxIdx,
@@ -5384,17 +5391,29 @@ void onTimer()
                                 gotIt = true;
                             }
                         }
-                        if (gotIt) {
-                            gr += b.channelGrOffsetDb;
-                            if (gr < 0) gr = -gr;
-                            if (gr > 10.0) gr = 10.0;
-                            const uint8_t newByte = static_cast<uint8_t>(
-                                std::lround(gr * (0x18 / 10.0)));
-                            uint8_t& held = g_uf8GrBytes[focStrip];
-                            if (newByte > held) held = newByte;
-                            else if (held > newByte) --held;
-                            targetBytes[focStrip] = held;
+                    }
+                    if (!gotIt) {
+                        const int fxCount = TrackFX_GetCount(tr);
+                        for (int fx = 0; fx < fxCount; ++fx) {
+                            char buf[64] = {0};
+                            if (!TrackFX_GetNamedConfigParm(
+                                    tr, fx, "GainReduction_dB",
+                                    buf, sizeof(buf))) continue;
+                            gr = std::atof(buf);
+                            gotIt = true;
+                            break;
                         }
+                    }
+                    if (gotIt) {
+                        gr += offsetDb;
+                        if (gr < 0) gr = -gr;
+                        if (gr > 10.0) gr = 10.0;
+                        const uint8_t newByte = static_cast<uint8_t>(
+                            std::lround(gr * (0x18 / 10.0)));
+                        uint8_t& held = g_uf8GrBytes[focStrip];
+                        if (newByte > held) held = newByte;
+                        else if (held > newByte) --held;
+                        targetBytes[focStrip] = held;
                     }
                 }
             }
