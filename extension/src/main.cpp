@@ -1943,6 +1943,10 @@ void pushAutoModeLeds(int mode);
 void pushLayerLeds(int active);
 int  autoModeToLedIndex(int mode);
 uint16_t linearVolumeToPb(double linear);
+// Folds the active layer's per-binding LED colour into a global-LED push.
+// Defined alongside pushUf8GlobalLeds — see comment there.
+void sendUf8GlobalLed(uf8::Uf8GlobalLed cell, bool on);
+void sendUf8GlobalLed(uf8::Uf8GlobalLed cell, uf8::GlobalLedState state);
 extern int g_lastAutoMode;
 
 // Cell 0x24 sits outside the per-strip LED range. cap33 shows SSL360
@@ -1968,8 +1972,7 @@ void sendSelRenderTrigger()
     // Restore AutoTrim to the value driven by the current REAPER auto
     // mode (lit only when mode == 0/Trim/Read).
     const bool trimActive = (autoModeToLedIndex(g_lastAutoMode) == 2);
-    sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::AutoTrim,
-                                         trimActive));
+    sendUf8GlobalLed(uf8::Uf8GlobalLed::AutoTrim, trimActive);
 }
 
 // Push the selected-strip bitmask. cap33: SSL360 sends this after the
@@ -4494,6 +4497,126 @@ constexpr uf8::Uf8GlobalLed kAutoLeds[5] = {
     uf8::Uf8GlobalLed::AutoLatch,
     uf8::Uf8GlobalLed::AutoTouch,
 };
+
+// Translate a global-LED cell to the bindings::ButtonId that the user
+// edits in Settings → Bindings. Returns ButtonId::None for cells with
+// no bindable button (Norm/Auto/Rec live elsewhere). Used by
+// sendUf8GlobalLed to fold per-binding LED-colour overrides into the
+// existing pushUf8GlobalLeds flow without disturbing state logic.
+uf8::bindings::ButtonId buttonIdForGlobalLed(uf8::Uf8GlobalLed cell)
+{
+    using L = uf8::Uf8GlobalLed;
+    using B = uf8::bindings::ButtonId;
+    switch (cell) {
+        case L::Layer1:       return B::Layer1;
+        case L::Layer2:       return B::Layer2;
+        case L::Layer3:       return B::Layer3;
+        case L::Quick1:       return B::Quick1;
+        case L::Quick2:       return B::Quick2;
+        case L::Quick3:       return B::Quick3;
+        case L::Channel:      return B::Channel;
+        case L::Btn360:       return B::Btn360;
+        case L::SendPlugin1:  return B::SendPlugin1;
+        case L::SendPlugin2:  return B::SendPlugin2;
+        case L::SendPlugin3:  return B::SendPlugin3;
+        case L::SendPlugin4:  return B::SendPlugin4;
+        case L::SendPlugin5:  return B::SendPlugin5;
+        case L::SendPlugin6:  return B::SendPlugin6;
+        case L::SendPlugin7:  return B::SendPlugin7;
+        case L::SendPlugin8:  return B::SendPlugin8;
+        case L::Plugin:       return B::PluginBtn;
+        case L::PageLeft:     return B::PageLeft;
+        case L::PageRight:    return B::PageRight;
+        case L::Flip:         return B::Flip;
+        case L::AutoOff:      return B::AutoOff;
+        case L::AutoRead:     return B::AutoRead;
+        case L::AutoWrite:    return B::AutoWrite;
+        case L::AutoTrim:     return B::AutoTrim;
+        case L::AutoLatch:    return B::AutoLatch;
+        case L::AutoTouch:    return B::AutoTouch;
+        case L::VPotBank:     return B::VPotBank;
+        case L::Soft1:        return B::SoftKey1Bank;
+        case L::Soft2:        return B::SoftKey2Bank;
+        case L::Soft3:        return B::SoftKey3Bank;
+        case L::Soft4:        return B::SoftKey4Bank;
+        case L::Soft5:        return B::SoftKey5Bank;
+        case L::Pan:          return B::Pan;
+        case L::Fine:         return B::Fine;
+        case L::Nav:          return B::Nav;
+        case L::Nudge:        return B::Nudge;
+        case L::Focus:        return B::EncFocus;
+        case L::BankLeft:     return B::BankLeft;
+        case L::BankRight:    return B::BankRight;
+        case L::ZoomUp:       return B::ZoomUp;
+        case L::ZoomLeft:     return B::ZoomLeft;
+        case L::ZoomCenter:   return B::ZoomCenter;
+        case L::ZoomRight:    return B::ZoomRight;
+        case L::ZoomDown:     return B::ZoomDown;
+        // Norm / Rec / Auto have no ButtonId in the v1 catalogue —
+        // they're driven by REAPER state, not by user-bindable actions.
+        case L::Norm:
+        case L::Rec:
+        case L::Auto:
+            return B::None;
+    }
+    return B::None;
+}
+
+// If the user has set a non-default colour on the binding for this
+// cell on the active layer, return it as an LedColour ready for the
+// 3-arg buildUf8GlobalLed overload. Otherwise std::nullopt = caller
+// uses the cell's table-default colour. The "user customised" guard
+// is "rgb != white"; default {0xFF,0xFF,0xFF} → factory bindings stay
+// visually identical to today, only deliberate edits surface.
+//
+// Color-from-binding only — state (when LED is on/off, Bright/Dim)
+// stays driven by main.cpp's existing logic. Brightness from the
+// LedOverride/Binding is intentionally ignored here; the aborted
+// 2026-05-05 side-quest tried mixing colour + state and broke FLIP +
+// scribble strips. See `feedback-led-user-color-aborted` memory.
+std::optional<uf8::LedColour> bindingLedColourOverride(
+    uf8::Uf8GlobalLed cell, uf8::GlobalLedState state)
+{
+    const auto bid = buttonIdForGlobalLed(cell);
+    if (bid == uf8::bindings::ButtonId::None) return std::nullopt;
+    const int activeLayer = uf8::bindings::getActiveLayer();
+    const auto bd = uf8::bindings::getBinding(activeLayer, bid);
+    const auto& slot = bd.shortPress[
+        static_cast<int>(uf8::bindings::Modifier::Plain)];
+    uint8_t rgb[3];
+    uf8::bindings::Brightness bri;
+    if (state == uf8::GlobalLedState::Bright) {
+        uf8::bindings::effectiveLedActive(bd, slot, rgb, bri);
+    } else {
+        uf8::bindings::effectiveLedInactive(bd, slot, rgb, bri);
+    }
+    if (rgb[0] == 0xFF && rgb[1] == 0xFF && rgb[2] == 0xFF) {
+        return std::nullopt;
+    }
+    const uint32_t packed = (uint32_t(rgb[0]) << 16)
+                          | (uint32_t(rgb[1]) << 8)
+                          |  uint32_t(rgb[2]);
+    return uf8::ledColourForTrackRgb(packed);
+}
+
+// Wrapper around sendLedFrames(buildUf8GlobalLed(...)) that folds in
+// the user's per-binding LED colour when present. Use this instead of
+// the raw 2-arg buildUf8GlobalLed at every global-LED push site.
+void sendUf8GlobalLed(uf8::Uf8GlobalLed cell, uf8::GlobalLedState state)
+{
+    if (auto over = bindingLedColourOverride(cell, state)) {
+        sendLedFrames(uf8::buildUf8GlobalLed(cell, state, *over));
+    } else {
+        sendLedFrames(uf8::buildUf8GlobalLed(cell, state));
+    }
+}
+
+void sendUf8GlobalLed(uf8::Uf8GlobalLed cell, bool on)
+{
+    sendUf8GlobalLed(cell,
+        on ? uf8::GlobalLedState::Bright : uf8::GlobalLedState::Dim);
+}
+
 int autoModeToLedIndex(int mode)
 {
     switch (mode) {
@@ -4516,7 +4639,7 @@ void pushAutoModeLeds(int mode)
     if (!g_dev || !g_dev->isOpen()) return;
     const int active = autoModeToLedIndex(mode);
     for (int i = 0; i < 5; ++i) {
-        sendLedFrames(uf8::buildUf8GlobalLed(kAutoLeds[i], i == active));
+        sendUf8GlobalLed(kAutoLeds[i], i == active);
     }
     g_lastAutoMode = mode;
 }
@@ -4528,9 +4651,9 @@ void pushAutoModeLeds(int mode)
 void pushLayerLeds(int active)
 {
     if (!g_dev || !g_dev->isOpen()) return;
-    sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Layer1, active == 0));
-    sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Layer2, active == 1));
-    sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Layer3, active == 2));
+    sendUf8GlobalLed(uf8::Uf8GlobalLed::Layer1, active == 0);
+    sendUf8GlobalLed(uf8::Uf8GlobalLed::Layer2, active == 1);
+    sendUf8GlobalLed(uf8::Uf8GlobalLed::Layer3, active == 2);
     g_lastActiveLayer = active;
 }
 
@@ -4610,14 +4733,15 @@ void pushUf8GlobalLeds()
     }
 
     if (anyArmed != g_lastAnyArmed || !g_globalLedsInit) {
-        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Rec, anyArmed));
+        // Rec has no ButtonId; sendUf8GlobalLed falls through to table colour.
+        sendUf8GlobalLed(uf8::Uf8GlobalLed::Rec, anyArmed);
         g_lastAnyArmed = anyArmed;
     }
 
     // Pan LED tracks the global "force all V-Pots to Pan" toggle so the
     // hardware shows the active mode at a glance.
     if (forcePan != g_lastForcePan || !g_globalLedsInit) {
-        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Pan, forcePan));
+        sendUf8GlobalLed(uf8::Uf8GlobalLed::Pan, forcePan);
         g_lastForcePan = forcePan;
     }
 
@@ -4637,14 +4761,14 @@ void pushUf8GlobalLeds()
                 uf8::GlobalLedState::Bright,
                 uf8::ledColourForTrackRgb(0xFF0000)));   // red
         } else {
-            sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Flip, flip));
+            sendUf8GlobalLed(uf8::Uf8GlobalLed::Flip, flip);
         }
         g_lastFlip = flip;
     }
 
     // Shift/Fine LED — momentary, follows the held state of 0x6F.
     if (shiftHeld != g_lastShiftHeld || !g_globalLedsInit) {
-        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Fine, shiftHeld));
+        sendUf8GlobalLed(uf8::Uf8GlobalLed::Fine, shiftHeld);
         g_lastShiftHeld = shiftHeld;
     }
 
@@ -4652,12 +4776,12 @@ void pushUf8GlobalLeds()
     // matching g_softKeyBank (0..5). Single dirty-check rewrites all 6
     // since the user expects a clean radio-button look on every change.
     if (softKeyBank != g_lastSoftKeyBank || !g_globalLedsInit) {
-        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::VPotBank, softKeyBank == 0));
-        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Soft1,    softKeyBank == 1));
-        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Soft2,    softKeyBank == 2));
-        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Soft3,    softKeyBank == 3));
-        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Soft4,    softKeyBank == 4));
-        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Soft5,    softKeyBank == 5));
+        sendUf8GlobalLed(uf8::Uf8GlobalLed::VPotBank, softKeyBank == 0);
+        sendUf8GlobalLed(uf8::Uf8GlobalLed::Soft1,    softKeyBank == 1);
+        sendUf8GlobalLed(uf8::Uf8GlobalLed::Soft2,    softKeyBank == 2);
+        sendUf8GlobalLed(uf8::Uf8GlobalLed::Soft3,    softKeyBank == 3);
+        sendUf8GlobalLed(uf8::Uf8GlobalLed::Soft4,    softKeyBank == 4);
+        sendUf8GlobalLed(uf8::Uf8GlobalLed::Soft5,    softKeyBank == 5);
         g_lastSoftKeyBank = softKeyBank;
     }
 
@@ -4672,8 +4796,7 @@ void pushUf8GlobalLeds()
     // wired so future hardware revisions / plugin-mixer-mode contexts
     // get visual differentiation if they support it.
     if (pluginLit != g_lastPluginLit || !g_globalLedsInit) {
-        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Plugin,
-                                             pluginLit == 1));
+        sendUf8GlobalLed(uf8::Uf8GlobalLed::Plugin, pluginLit == 1);
         g_lastPluginLit = pluginLit;
     }
 
@@ -4682,10 +4805,10 @@ void pushUf8GlobalLeds()
     // Quick 3 (= I/O meter toggle, not yet wired) stays init-dim.
     // Cells confirmed via probe 2026-04-30: Q1 0x3C, Q2 0x3B, Q3 0x3A.
     if (domainLed != g_lastDomainLed || !g_globalLedsInit) {
-        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Quick1, domainLed == 0));
-        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Quick2, domainLed == 1));
+        sendUf8GlobalLed(uf8::Uf8GlobalLed::Quick1, domainLed == 0);
+        sendUf8GlobalLed(uf8::Uf8GlobalLed::Quick2, domainLed == 1);
         if (!g_globalLedsInit) {
-            sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Quick3, false));
+            sendUf8GlobalLed(uf8::Uf8GlobalLed::Quick3, false);
         }
         g_lastDomainLed = domainLed;
     }
@@ -4717,7 +4840,7 @@ void pushUf8GlobalLeds()
             uf8::Uf8GlobalLed::ZoomLeft, uf8::Uf8GlobalLed::ZoomRight,
             uf8::Uf8GlobalLed::ZoomCenter,
         }) {
-            sendLedFrames(uf8::buildUf8GlobalLed(led, false));
+            sendUf8GlobalLed(led, false);
         }
     }
 
@@ -4738,7 +4861,7 @@ void pushUf8GlobalLeds()
             const bool sendHit = (sendVAll == i || sendFAll == i);
             const bool recvHit = (recvVAll == i || recvFAll == i);
             const bool active  = sendHit || recvHit;
-            sendLedFrames(uf8::buildUf8GlobalLed(kSpLeds[i], active));
+            sendUf8GlobalLed(kSpLeds[i], active);
         }
     }
     g_lastRoutingKey = routingKey;
@@ -4748,8 +4871,8 @@ void pushUf8GlobalLeds()
     // we just ensure both are at known dim state. Cells PL 0x2D,
     // PR 0x2C (cap48 2026-04-30). Both are 3-state legacy LEDs.
     if (!g_globalLedsInit) {
-        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::PageLeft, false));
-        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::PageRight, false));
+        sendUf8GlobalLed(uf8::Uf8GlobalLed::PageLeft, false);
+        sendUf8GlobalLed(uf8::Uf8GlobalLed::PageRight, false);
         g_lastPageLeftLit = 0;
         g_lastPageRightLit = 0;
     }
@@ -4770,12 +4893,12 @@ void pushUf8GlobalLeds()
             if (sp.type != uf8::bindings::ActionType::Builtin) return false;
             return uf8::bindings::builtinStateOf(sp.action, sp.param);
         };
-        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Nav,
-            cellActive(uf8::bindings::ButtonId::Nav)));
-        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Nudge,
-            cellActive(uf8::bindings::ButtonId::Nudge)));
-        sendLedFrames(uf8::buildUf8GlobalLed(uf8::Uf8GlobalLed::Focus,
-            cellActive(uf8::bindings::ButtonId::EncFocus)));
+        sendUf8GlobalLed(uf8::Uf8GlobalLed::Nav,
+            cellActive(uf8::bindings::ButtonId::Nav));
+        sendUf8GlobalLed(uf8::Uf8GlobalLed::Nudge,
+            cellActive(uf8::bindings::ButtonId::Nudge));
+        sendUf8GlobalLed(uf8::Uf8GlobalLed::Focus,
+            cellActive(uf8::bindings::ButtonId::EncFocus));
         g_lastEncoderMode = encMode;
     }
 
@@ -6377,8 +6500,7 @@ void registerBindingHandlers()
 
     registerBuiltin("bank_left", DescBuilder{
         [](bool firing, bool pressed, int /*param*/) {
-            sendLedFrames(uf8::buildUf8GlobalLed(
-                uf8::Uf8GlobalLed::BankLeft, pressed));
+            sendUf8GlobalLed(uf8::Uf8GlobalLed::BankLeft, pressed);
             if (!firing) return;
             const int trackCount = visibleTrackCount();
             const int maxStart   = trackCount > 1 ? trackCount - 1 : 0;
@@ -6391,8 +6513,7 @@ void registerBindingHandlers()
     });
     registerBuiltin("bank_right", DescBuilder{
         [](bool firing, bool pressed, int /*param*/) {
-            sendLedFrames(uf8::buildUf8GlobalLed(
-                uf8::Uf8GlobalLed::BankRight, pressed));
+            sendUf8GlobalLed(uf8::Uf8GlobalLed::BankRight, pressed);
             if (!firing) return;
             const int trackCount = visibleTrackCount();
             const int maxStart   = trackCount > 1 ? trackCount - 1 : 0;
@@ -6657,16 +6778,14 @@ void registerBindingHandlers()
     };
     registerBuiltin("page_left", DescBuilder{
         [pageStep](bool firing, bool pressed, int /*param*/) {
-            sendLedFrames(uf8::buildUf8GlobalLed(
-                uf8::Uf8GlobalLed::PageLeft, pressed));
+            sendUf8GlobalLed(uf8::Uf8GlobalLed::PageLeft, pressed);
             if (firing) pageStep(-1);
         },
         nullptr, "Page ← (soft-key bank prev)", false
     });
     registerBuiltin("page_right", DescBuilder{
         [pageStep](bool firing, bool pressed, int /*param*/) {
-            sendLedFrames(uf8::buildUf8GlobalLed(
-                uf8::Uf8GlobalLed::PageRight, pressed));
+            sendUf8GlobalLed(uf8::Uf8GlobalLed::PageRight, pressed);
             if (firing) pageStep(1);
         },
         nullptr, "Page → (soft-key bank next)", false
@@ -6678,7 +6797,7 @@ void registerBindingHandlers()
     auto zoomBuiltin = [](uf8::Uf8GlobalLed led, int actionId, const char* label) {
         return DescBuilder{
             [led, actionId](bool firing, bool pressed, int /*param*/) {
-                sendLedFrames(uf8::buildUf8GlobalLed(led, pressed));
+                sendUf8GlobalLed(led, pressed);
                 if (firing && actionId) {
                     queueInput({PendingInput::MainAction, 0,
                                 static_cast<double>(actionId)});
