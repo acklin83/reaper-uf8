@@ -4655,13 +4655,14 @@ ResolvedLed resolveLed_(uf8::Uf8GlobalLed cell,
 }
 
 // "Is the bound action currently engaged?" Used by the stateless-cell
-// sweep below. For stateful actions we query the appropriate state
-// (builtin's stateOf, REAPER's GetToggleCommandState2). For stateless
-// actions (one-shot REAPER actions, builtins without stateOf, keyboard
-// chords, MIDI) we report ACTIVE — that way the user's "Active" LED
-// settings render continuously, otherwise binding a custom colour to
-// a zoom / bank / page button has no visible effect because they'd
-// always be inactive.
+// sweep below. Stateful actions (builtin with stateOf, REAPER toggle
+// action) report their actual state. Stateless actions (one-shot
+// REAPER, builtin without stateOf, keyboard, MIDI) report INACTIVE so
+// the LED shows the binding's inactive colour/brightness — earlier
+// "treat stateless as active" rendered Channel + every zoom button
+// permanently bright (Frank 2026-05-06). Press feedback through the
+// builtin handler (sendUf8GlobalLed(led, true) at press, false at
+// release) still gives the brief highlight users expect.
 bool boundActionIsActive_(uf8::bindings::ButtonId bid)
 {
     if (bid == uf8::bindings::ButtonId::None) return false;
@@ -4676,9 +4677,9 @@ bool boundActionIsActive_(uf8::bindings::ButtonId bid)
             if (uf8::bindings::builtinHasState(sp.action)) {
                 return uf8::bindings::builtinStateOf(sp.action, sp.param);
             }
-            return true;  // stateless builtin → render as active
+            return false;
         case AT::Reaper: {
-            if (sp.action.empty()) return true;
+            if (sp.action.empty()) return false;
             int aid = std::atoi(sp.action.c_str());
             if (aid <= 0) aid = NamedCommandLookup(sp.action.c_str());
             if (aid > 0) {
@@ -4686,11 +4687,11 @@ bool boundActionIsActive_(uf8::bindings::ButtonId bid)
                     SectionFromUniqueID(0), aid);
                 if (s >= 0) return (s == 1);
             }
-            return true;  // non-toggle action → render as active
+            return false;
         }
         case AT::Keyboard:
         case AT::Midi:
-            return true;
+            return false;
     }
     return false;
 }
