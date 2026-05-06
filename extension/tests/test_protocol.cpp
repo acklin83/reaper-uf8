@@ -130,6 +130,14 @@ int main()
         auto q = quantize(0xFFFF00);
         EXPECT(q == 0x07 || q == 0x0A);
     }
+    // Dark blue (REAPER's r12/g25/b84) was rendering as orange before the
+    // chromaticity fix because raw RGB Euclidean distance favoured the
+    // dim dark-orange palette entry over saturated deep blue. Should land
+    // on a blue family entry (deep blue 0x04 or blue-leaning violet 0x09).
+    {
+        auto q = quantize(0x0C1954);
+        EXPECT(q == 0x04 || q == 0x09);
+    }
 
     // --- LED colour pair (cap31, cap33). Lock the bytes captured from
     //     SSL 360° so a regression in the formula or colour-table is caught.

@@ -242,13 +242,28 @@ const PaletteRgb* selPaletteRgb(int* count)
 LedColour ledColourForTrackRgb(uint32_t rgb)
 {
     if (rgb == 0) return ledColourWhite();
+    // Compare in chromaticity space — divide each channel by max(R,G,B) so
+    // brightness drops out. Without this, dark inputs (e.g. REAPER's
+    // r12/g25/b84 dark blue) match orange instead of blue because their
+    // raw-RGB Euclidean distance rewards palette entries with low total
+    // brightness.
     const int r = static_cast<int>((rgb >> 16) & 0xFF);
     const int g = static_cast<int>((rgb >> 8)  & 0xFF);
     const int b = static_cast<int>( rgb        & 0xFF);
+    const int m = std::max({r, g, b});
+    const int rn = m ? (r * 255 + m / 2) / m : 0;
+    const int gn = m ? (g * 255 + m / 2) / m : 0;
+    const int bn = m ? (b * 255 + m / 2) / m : 0;
     int bestDist = std::numeric_limits<int>::max();
     LedColour best = ledColourWhite();
     for (const auto& p : kSelPalette) {
-        const int dr = r - p.r, dg = g - p.g, db = b - p.b;
+        const int pm = std::max({static_cast<int>(p.r),
+                                 static_cast<int>(p.g),
+                                 static_cast<int>(p.b)});
+        const int prn = pm ? (p.r * 255 + pm / 2) / pm : 0;
+        const int pgn = pm ? (p.g * 255 + pm / 2) / pm : 0;
+        const int pbn = pm ? (p.b * 255 + pm / 2) / pm : 0;
+        const int dr = rn - prn, dg = gn - pgn, db = bn - pbn;
         const int d  = dr*dr + dg*dg + db*db;
         if (d < bestDist) { bestDist = d; best = p.bytes; }
     }

@@ -1,11 +1,29 @@
 #include "Palette.h"
 
+#include <algorithm>
 #include <array>
 #include <limits>
 
 namespace uf8 {
 
 namespace {
+
+// Project a colour onto its chromaticity by scaling so the largest channel
+// is 255. Removes brightness from the comparison — without this, dark
+// inputs (e.g. REAPER's r12/g25/b84 dark blue) prefer the dark-orange
+// palette entry over deep blue purely because raw RGB Euclidean distance
+// rewards "small numbers" and our palette has no muted-blue entry.
+Rgb chromaticity(Rgb c)
+{
+    const uint8_t m = std::max({c.r, c.g, c.b});
+    if (m == 0) return c;
+    return Rgb{
+        static_cast<uint8_t>((c.r * 255 + m / 2) / m),
+        static_cast<uint8_t>((c.g * 255 + m / 2) / m),
+        static_cast<uint8_t>((c.b * 255 + m / 2) / m),
+    };
+}
+
 
 // Reference RGB for each palette index — identified by direct on-device
 // probe (uf8_palette_probe, re-run 2026-04-21 after the original sweep
@@ -51,18 +69,21 @@ std::optional<Rgb> paletteEntry(uint8_t index)
 
 uint8_t quantize(Rgb c)
 {
-    // Nearest-match in RGB Euclidean space, restricted to mapped entries.
-    // When we sweep the full palette we can either remove the restriction or
-    // keep it (unmapped entries become "never chosen" which is safer).
+    // Nearest-match in chromaticity space (each colour normalised so its
+    // brightest channel == 255). Comparing raw RGB makes dark inputs
+    // gravitate to whichever palette entry happens to have the lowest
+    // total brightness — which is why r12/g25/b84 dark blue used to land
+    // on the dark-orange entry instead of deep blue.
+    const Rgb cn = chromaticity(c);
     int bestDist = std::numeric_limits<int>::max();
-    uint8_t bestIdx = 0x01;  // default to red if literally nothing matches
+    uint8_t bestIdx = 0x01;  // default if literally nothing matches
 
     for (uint8_t i = 0; i < 16; ++i) {
         if (!kHasEntry[i]) continue;
-        const auto& p = kPalette[i];
-        const int dr = static_cast<int>(c.r) - p.r;
-        const int dg = static_cast<int>(c.g) - p.g;
-        const int db = static_cast<int>(c.b) - p.b;
+        const Rgb pn = chromaticity(kPalette[i]);
+        const int dr = static_cast<int>(cn.r) - pn.r;
+        const int dg = static_cast<int>(cn.g) - pn.g;
+        const int db = static_cast<int>(cn.b) - pn.b;
         const int d = dr * dr + dg * dg + db * db;
         if (d < bestDist) {
             bestDist = d;
