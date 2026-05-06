@@ -4596,9 +4596,19 @@ std::optional<uf8::LedColour> bindingLedColourOverride(
 {
     const auto bid = buttonIdForGlobalLed(cell);
     if (bid == uf8::bindings::ButtonId::None) return std::nullopt;
+    // For the active-state path, resolve from the slot whose action
+    // last actually fired (Plain unless a modifier press fired a
+    // non-Noop slot). Inactive path always uses the caller's mod —
+    // either Plain for normal pushes, or the held modifier for the
+    // preview path in sendUf8GlobalLed.
+    uf8::bindings::Modifier resolveMod = mod;
+    if (resolveMod == uf8::bindings::Modifier::Plain &&
+        state == uf8::GlobalLedState::Bright) {
+        resolveMod = uf8::bindings::lastFiredModifier(bid);
+    }
     const int activeLayer = uf8::bindings::getActiveLayer();
     const auto bd = uf8::bindings::getBinding(activeLayer, bid);
-    const auto& slot = bd.shortPress[static_cast<int>(mod)];
+    const auto& slot = bd.shortPress[static_cast<int>(resolveMod)];
     uint8_t rgb[3];
     uf8::bindings::Brightness bri;
     if (state == uf8::GlobalLedState::Bright) {
@@ -4634,21 +4644,35 @@ bool modifierSlotArmed_(uf8::Uf8GlobalLed cell, uf8::bindings::Modifier mod)
 // Use this instead of the raw 2-arg buildUf8GlobalLed at every global-
 // LED push site.
 //
-// Behaviour:
-//   - Modifier held + cell has armed modifier slot → Dim with the
-//     modifier slot's INACTIVE colour. The action hasn't fired yet,
-//     so the inactive (idle) appearance is the honest preview — user
-//     requested this over a bright/active highlight 2026-05-06.
-//     Reverts to Plain on release.
-//   - Otherwise → caller's `state` + Plain modifier override.
+// Behaviour matrix (mod = currently-held modifier, lastFired = the
+// slot whose action last actually fired on this button):
+//
+//   mod held, slot armed, state==Dim                 → preview Dim with mod slot's INACTIVE colour
+//   mod held, slot armed, state==Bright, lastFired!=mod → preview Dim with mod slot's INACTIVE colour
+//   mod held, slot armed, state==Bright, lastFired==mod → state-driven (Bright with mod slot's ACTIVE colour, via lastFiredModifier promotion)
+//   no mod held / slot not armed                     → state-driven with lastFiredModifier promotion on Bright path
+//
+// Suppressing the preview when state==Bright AND lastFired==mod
+// keeps the bright active colour visible after Shift+press fires
+// the Shift slot — without it, the preview path would clobber the
+// just-engaged action's active colour with its own inactive colour.
 void sendUf8GlobalLed(uf8::Uf8GlobalLed cell, uf8::GlobalLedState state)
 {
     const auto mod = liveModifierForLed_();
-    if (mod != uf8::bindings::Modifier::Plain &&
-        modifierSlotArmed_(cell, mod)) {
-        // Pass Dim → bindingLedColourOverride resolves via
-        // effectiveLedInactive. Falls through to table colour if the
-        // modifier slot still has default-white inactive override.
+    const bool armed = (mod != uf8::bindings::Modifier::Plain) &&
+                        modifierSlotArmed_(cell, mod);
+    bool lastFiredMatchesHeld = false;
+    if (armed) {
+        const auto bid = buttonIdForGlobalLed(cell);
+        if (bid != uf8::bindings::ButtonId::None) {
+            lastFiredMatchesHeld =
+                (uf8::bindings::lastFiredModifier(bid) == mod);
+        }
+    }
+    const bool stateIsBright = (state == uf8::GlobalLedState::Bright);
+
+    if (armed && !(stateIsBright && lastFiredMatchesHeld)) {
+        // Preview path — Dim with mod slot's inactive colour.
         if (auto over = bindingLedColourOverride(
                 cell, uf8::GlobalLedState::Dim, mod)) {
             sendLedFrames(uf8::buildUf8GlobalLed(

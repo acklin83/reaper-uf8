@@ -441,4 +441,12 @@ void tickPending();
 // to dirty the dedup cache.
 uint64_t generation();
 
+// Modifier of the last action that ACTUALLY fired on this button
+// (slot type != Noop). Returns Modifier::Plain when no fire has
+// happened yet on this id. Used by main.cpp's LED pusher to resolve
+// the active-state colour from the slot whose action is currently
+// engaged — Shift+press of a Toggle button keeps the LED showing
+// the Shift slot's active colour after release.
+Modifier lastFiredModifier(ButtonId id);
+
 } // namespace uf8::bindings

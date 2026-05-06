@@ -280,6 +280,15 @@ std::atomic<bool> g_modCtrlHeld {false};
 // next tick instead of waiting for a press to dirty the state.
 std::atomic<uint64_t> g_bindingsGen{0};
 
+// Per-ButtonId modifier of the last action that ACTUALLY fired (slot
+// type != Noop). Lets the LED pusher resolve the active-state colour
+// from the slot whose action is engaged — Shift+press of a Toggle
+// button now keeps the LED showing the Shift slot's active colour
+// after release, instead of falling back to Plain. Sized to 256 to
+// cover any future ButtonId additions without resizing.
+constexpr size_t kLastFiredModSize = 256;
+std::array<std::atomic<uint8_t>, kLastFiredModSize> g_lastFiredMod{};
+
 uint32_t pressKey(int layer, ButtonId id)
 {
     return (static_cast<uint32_t>(layer) << 16)
@@ -1606,12 +1615,13 @@ bool dispatch(ButtonId id, bool pressed)
 
     // Standard (no long-press) path — fire per behavior. Modifier slot
     // is selected at the press edge and re-used for the release edge so
-    // a Momentary binding's release matches its press even if the user
-    // dropped the modifier between. Toggle and Hold ignore modifiers
-    // (their semantics with a modifier are ambiguous) and always fire
-    // the Plain slot.
+    // a binding's release matches its press even if the user dropped
+    // the modifier between. All three behaviours honour the modifier
+    // now (Toggle and Hold used to fall back to Plain — Frank
+    // 2026-05-06: Shift+Press should fire the Shift slot regardless
+    // of the binding's behaviour).
     int slotIdx = static_cast<int>(Modifier::Plain);
-    if (bd.behavior == Behavior::Momentary) {
+    if (bd.behavior == Behavior::Momentary || bd.behavior == Behavior::Hold) {
         const uint32_t k = pressKey(layer, id);
         if (pressed) {
             g_pressStart[k] = { std::chrono::steady_clock::now(),
@@ -1624,6 +1634,8 @@ bool dispatch(ButtonId id, bool pressed)
                 g_pressStart.erase(it);
             }
         }
+    } else {  // Behavior::Toggle — fires only on press-edge, uses live mod.
+        if (pressed) slotIdx = static_cast<int>(currentModifierSnapshot());
     }
     bool firing;
     switch (bd.behavior) {
@@ -1631,7 +1643,20 @@ bool dispatch(ButtonId id, bool pressed)
         case Behavior::Toggle:    firing = pressed; break;
         case Behavior::Hold:      firing = true;    break;
     }
-    runSlot_(bd.shortPress[slotIdx], firing, pressed);
+    const auto& slot = bd.shortPress[slotIdx];
+    if (firing && slot.type != ActionType::Noop) {
+        // Remember which modifier slot this button last actually fired
+        // — main.cpp's LED pusher reads this so the active-state
+        // colour matches the slot whose action is engaged. Without it,
+        // a Shift+press fired the Shift slot's action but the LED kept
+        // showing the Plain slot's active colour after release.
+        const auto idx = static_cast<size_t>(id);
+        if (idx < g_lastFiredMod.size()) {
+            g_lastFiredMod[idx].store(static_cast<uint8_t>(slotIdx),
+                                       std::memory_order_relaxed);
+        }
+    }
+    runSlot_(slot, firing, pressed);
     return true;
 }
 
@@ -1926,6 +1951,15 @@ void onMixerVisibilityChanged(bool visible)
 uint64_t generation()
 {
     return g_bindingsGen.load(std::memory_order_relaxed);
+}
+
+Modifier lastFiredModifier(ButtonId id)
+{
+    const auto idx = static_cast<size_t>(id);
+    if (idx >= g_lastFiredMod.size()) return Modifier::Plain;
+    const auto v = g_lastFiredMod[idx].load(std::memory_order_relaxed);
+    if (v >= kModifierCount) return Modifier::Plain;
+    return static_cast<Modifier>(v);
 }
 
 } // namespace uf8::bindings
