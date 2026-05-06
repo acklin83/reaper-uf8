@@ -2421,6 +2421,13 @@ void UC1Surface::pollGainReduction_()
     // contributions blended; in practice the Gate's contribution shows
     // up as a Range-sized spike when gating, so the Comp strip is the
     // closest thing we have to "comp activity" without separate readout).
+    //
+    // When the track has no SSL CS / user-mapped CS plug-in, Frank
+    // 2026-05-06: fall back to ANY FX on the track that exposes the
+    // PreSonus GainReduction_dB named-config-parm. ReaComp, FabFilter
+    // Pro-C2, Waves SSL G, etc. all implement it. The first hit wins;
+    // walk the chain so the meter still does something useful when
+    // the user is mixing with a non-SSL compressor.
     float csCompGr = 0.0f;
     MediaTrack* csTr = static_cast<MediaTrack*>(focusedTrack_);
     if (csTr) {
@@ -2428,6 +2435,19 @@ void UC1Surface::pollGainReduction_()
         if (b.channelMap) {
             csCompGr = readGr(csTr, b.channelFxIdx,
                               b.channelGrParam, b.channelGrOffsetDb);
+        } else {
+            const int fxCount = TrackFX_GetCount(csTr);
+            for (int fx = 0; fx < fxCount; ++fx) {
+                char buf[64] = {0};
+                if (!TrackFX_GetNamedConfigParm(csTr, fx, "GainReduction_dB",
+                                                buf, sizeof(buf))) {
+                    continue;
+                }
+                double v = std::atof(buf);
+                if (v < 0) v = -v;
+                csCompGr = static_cast<float>(v);
+                break;
+            }
         }
     }
 
