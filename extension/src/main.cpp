@@ -4728,6 +4728,24 @@ bool modifierSlotArmed_(uf8::Uf8GlobalLed cell, uf8::bindings::Modifier mod)
 //   mod held, slot armed, callerActive=true, lastFired!=mod  → preview Dim with mod slot's INACTIVE
 //   mod held, slot armed, callerActive=true, lastFired==mod  → state-driven via mod slot's ACTIVE
 //   no mod held / slot not armed                             → state-driven with lastFiredModifier promotion
+// Per-cell push cache so sendUf8GlobalLed can be called every tick
+// without hammering the OUT endpoint. Keyed on (state, packed RGB |
+// 0x10000 sentinel for "use table colour"). Cleared when the bindings
+// generation bumps (a colour edit in Settings invalidates everything)
+// and on g_globalLedsInit reset (project load / reopen).
+struct GlobalLedKey {
+    int  state    = -1;
+    int  colour32 = -1;  // 0xRRGGBB, or 0x10000 for "no override"
+    bool valid    = false;
+};
+constexpr size_t kGlobalLedCacheSize = 64;  // Uf8GlobalLed enum has ~46 entries
+std::array<GlobalLedKey, kGlobalLedCacheSize> g_lastGlobalLedPush{};
+
+void invalidateGlobalLedCache_()
+{
+    for (auto& k : g_lastGlobalLedPush) k.valid = false;
+}
+
 void sendUf8GlobalLed(uf8::Uf8GlobalLed cell, uf8::GlobalLedState callerState)
 {
     const bool callerActive = (callerState == uf8::GlobalLedState::Bright);
@@ -4743,29 +4761,54 @@ void sendUf8GlobalLed(uf8::Uf8GlobalLed cell, uf8::GlobalLedState callerState)
         }
     }
 
+    ResolvedLed r;
     if (armed && !(callerActive && lastFiredMatchesHeld)) {
         // Preview: render the held modifier slot's INACTIVE
         // appearance (colour + brightness).
-        const auto r = resolveLed_(cell, /*active*/ false, mod);
-        if (r.colour) {
-            sendLedFrames(uf8::buildUf8GlobalLed(cell, r.state, *r.colour));
-        } else {
-            sendLedFrames(uf8::buildUf8GlobalLed(cell, r.state));
+        r = resolveLed_(cell, /*active*/ false, mod);
+    } else {
+        // Normal path. For the active branch, resolve from the slot
+        // whose action last actually fired (so Shift+press of a
+        // Toggle button keeps showing the Shift slot's active colour).
+        uf8::bindings::Modifier resolveMod = uf8::bindings::Modifier::Plain;
+        if (callerActive) {
+            const auto bid = buttonIdForGlobalLed(cell);
+            if (bid != uf8::bindings::ButtonId::None) {
+                resolveMod = uf8::bindings::lastFiredModifier(bid);
+            }
         }
-        return;
+        r = resolveLed_(cell, callerActive, resolveMod);
     }
 
-    // Normal path. For the active branch, resolve from the slot
-    // whose action last actually fired (so Shift+press of a Toggle
-    // button keeps showing the Shift slot's active colour).
-    uf8::bindings::Modifier resolveMod = uf8::bindings::Modifier::Plain;
-    if (callerActive) {
-        const auto bid = buttonIdForGlobalLed(cell);
-        if (bid != uf8::bindings::ButtonId::None) {
-            resolveMod = uf8::bindings::lastFiredModifier(bid);
-        }
+    // Per-cell dedup. Same (state, colour) as last push → skip USB
+    // write. Lets the caller poll us every tick (which it must, so
+    // mixer-toggle-driven Btn360 brightens the moment the mixer
+    // window opens — Frank 2026-05-06 flagged that without this
+    // cache, Btn360 only updates after some other state change
+    // happens to invalidate the outer dedup).
+    const size_t idx = static_cast<size_t>(cell);
+    int colour32 = 0x10000;  // "no override"
+    if (r.colour) {
+        // Encode the LedColour bytes deterministically. LedColour has
+        // four bytes (aBright/bBright/aDim/bDim) but the same input
+        // RGB always produces the same LedColour, so packing
+        // {aBright,bBright,aDim,bDim} into 32 bits is stable.
+        colour32 = (int(r.colour->aBright) << 24)
+                 | (int(r.colour->bBright) << 16)
+                 | (int(r.colour->aDim)    <<  8)
+                 |  int(r.colour->bDim);
     }
-    const auto r = resolveLed_(cell, callerActive, resolveMod);
+    if (idx < g_lastGlobalLedPush.size()) {
+        auto& last = g_lastGlobalLedPush[idx];
+        if (last.valid && last.state == static_cast<int>(r.state) &&
+            last.colour32 == colour32) {
+            return;
+        }
+        last.state    = static_cast<int>(r.state);
+        last.colour32 = colour32;
+        last.valid    = true;
+    }
+
     if (r.colour) {
         sendLedFrames(uf8::buildUf8GlobalLed(cell, r.state, *r.colour));
     } else {
@@ -4887,6 +4930,7 @@ void pushUf8GlobalLeds()
     const uint64_t bindingsGen = uf8::bindings::generation();
     if (bindingsGen != s_lastBindingsGen) {
         g_globalLedsInit = false;
+        invalidateGlobalLedCache_();
         s_lastBindingsGen = bindingsGen;
     }
 
@@ -4897,18 +4941,21 @@ void pushUf8GlobalLeds()
     static uf8::bindings::Modifier s_lastLiveMod = uf8::bindings::Modifier::Plain;
     if (liveMod != s_lastLiveMod) {
         g_globalLedsInit = false;
+        invalidateGlobalLedCache_();
         s_lastLiveMod = liveMod;
     }
 
-    if (g_globalLedsInit && autoMode == g_lastAutoMode &&
-        anyArmed == g_lastAnyArmed && forcePan == g_lastForcePan &&
-        flip == g_lastFlip && shiftHeld == g_lastShiftHeld &&
-        encMode == g_lastEncoderMode && softKeyBank == g_lastSoftKeyBank &&
-        pluginLit == g_lastPluginLit && domainLed == g_lastDomainLed &&
-        activeLayer == g_lastActiveLayer &&
-        routingKey == g_lastRoutingKey) {
-        return;
-    }
+    if (!g_globalLedsInit) invalidateGlobalLedCache_();
+
+    // No outer early-return any more. Each section below has its own
+    // dedup against last-known state, AND sendUf8GlobalLed has a
+    // per-cell cache so re-evaluating cheaply skips redundant USB
+    // writes. The stateless-cell sweep at the bottom NEEDS this
+    // every-tick run — its active state comes from runtime queries
+    // (mixer-window visibility, REAPER toggle commands) that aren't
+    // in any of the dedup keys. Without this, Btn360 only redrew
+    // after some unrelated state change happened to break the gate
+    // (Frank 2026-05-06).
 
     if (autoMode != g_lastAutoMode || !g_globalLedsInit) {
         pushAutoModeLeds(autoMode);
