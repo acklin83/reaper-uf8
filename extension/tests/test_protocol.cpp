@@ -138,6 +138,12 @@ int main()
     // hue 229° is clearly closer to deep blue (240°) than to 0x09 (255°)
     // or 0x01 (240° but heavily desaturated).
     EXPECT(quantize(0x0C1954) == 0x04);
+    // Medium-dark blue 0x00427D (hue 208°). Pure HSV-polar Euclidean
+    // matched it to cyan (180°, 28° away) instead of deep blue (240°,
+    // 32° away). The blue-family-affinity multiplier pulls in-band
+    // entries closer when the input is also in the band, fixing this
+    // case without breaking pure cyan / lime / yellow matching.
+    EXPECT(quantize(0x00427D) == 0x04);
 
     // --- LED colour pair (cap31, cap33). Lock the bytes captured from
     //     SSL 360° so a regression in the formula or colour-table is caught.

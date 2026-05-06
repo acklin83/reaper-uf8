@@ -249,12 +249,16 @@ namespace {
 // because Euclidean treats green-tint and red-tint as both being
 // equally "off-axis"). Polar HSV puts opposite tints on opposite
 // sides, so hue distance is honest.
-struct ChromaXY { double x, y; };
+//
+// hueDeg is also carried so the family-affinity step in
+// ledColourForTrackRgb can pull blue-family inputs toward blue-
+// family palette entries.
+struct ChromaXY { double x, y, hueDeg; bool grey; };
 ChromaXY chromaXY(int r, int g, int b)
 {
     const int mx = std::max({r, g, b});
     const int mn = std::min({r, g, b});
-    if (mx == 0 || mx == mn) return {0.0, 0.0};
+    if (mx == 0 || mx == mn) return {0.0, 0.0, 0.0, true};
     const double chroma = static_cast<double>(mx - mn);
     const double s = chroma / mx;
     double h_deg = 0.0;
@@ -267,7 +271,16 @@ ChromaXY chromaXY(int r, int g, int b)
         h_deg = 60.0 * (((static_cast<double>(r) - g) / chroma) + 4.0);
     }
     const double h_rad = h_deg * 3.14159265358979323846 / 180.0;
-    return {s * std::cos(h_rad), s * std::sin(h_rad)};
+    return {s * std::cos(h_rad), s * std::sin(h_rad), h_deg, false};
+}
+// Same blue-family band Palette.cpp's quantize uses — see comments
+// there for the rationale.
+constexpr double kBlueBandLo = 195.0;
+constexpr double kBlueBandHi = 260.0;
+constexpr double kFamilyMul  = 0.6;
+bool inBlueBand(double h)
+{
+    return h >= kBlueBandLo && h <= kBlueBandHi;
 }
 } // anonymous
 
@@ -278,13 +291,17 @@ LedColour ledColourForTrackRgb(uint32_t rgb)
     const int g = static_cast<int>((rgb >> 8)  & 0xFF);
     const int b = static_cast<int>( rgb        & 0xFF);
     const ChromaXY cxy = chromaXY(r, g, b);
+    const bool inputBlueFamily = !cxy.grey && inBlueBand(cxy.hueDeg);
     double bestDist = std::numeric_limits<double>::infinity();
     LedColour best = ledColourWhite();
     for (const auto& p : kSelPalette) {
         const ChromaXY pxy = chromaXY(p.r, p.g, p.b);
         const double dx = cxy.x - pxy.x;
         const double dy = cxy.y - pxy.y;
-        const double d  = dx*dx + dy*dy;
+        double d  = dx*dx + dy*dy;
+        if (inputBlueFamily && !pxy.grey && inBlueBand(pxy.hueDeg)) {
+            d *= kFamilyMul;
+        }
         if (d < bestDist) { bestDist = d; best = p.bytes; }
     }
     return best;

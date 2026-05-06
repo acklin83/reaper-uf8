@@ -20,13 +20,18 @@ namespace {
 // inputs a shorter pull on hue, which lets light/desaturated
 // palette entries (e.g. light violet 0x01) win over saturated ones
 // for low-saturation inputs without an extra weighting hack.
-struct ChromaXY { double x, y; };
+//
+// hueDeg is carried alongside (x, y) so the family-affinity step
+// below can pull entries in the same perceptual hue band toward the
+// input — without it, hue 208° lands on cyan 180° instead of deep
+// blue 240° because the angular gap is mathematically smaller.
+struct ChromaXY { double x, y, hueDeg; bool grey; };
 
 ChromaXY chromaXY(Rgb c)
 {
     const int mx = std::max({c.r, c.g, c.b});
     const int mn = std::min({c.r, c.g, c.b});
-    if (mx == 0 || mx == mn) return {0.0, 0.0};
+    if (mx == 0 || mx == mn) return {0.0, 0.0, 0.0, true};
     const double chroma = static_cast<double>(mx - mn);
     const double s = chroma / mx;
     double h_deg = 0.0;
@@ -39,7 +44,29 @@ ChromaXY chromaXY(Rgb c)
         h_deg = 60.0 * (((static_cast<double>(c.r) - c.g) / chroma) + 4.0);
     }
     const double h_rad = h_deg * 3.14159265358979323846 / 180.0;
-    return {s * std::cos(h_rad), s * std::sin(h_rad)};
+    return {s * std::cos(h_rad), s * std::sin(h_rad), h_deg, false};
+}
+
+// Perceptual "blue family" band — hues humans would unambiguously
+// call blue. Cyan (180°) is on one side, violet (~270°) on the other.
+// 195..260° covers everything between azure and indigo without
+// poaching from cyan (deep cyan still reads cyan, deep violet still
+// reads violet). Used as a soft prior in nearest-match: input AND
+// palette-entry hues both inside the band → distance×0.6, pulling
+// blue-family inputs toward blue-family palette entries even when
+// cyan happens to be slightly closer in raw HSV-polar Euclidean.
+//
+// Only blue is biased — the other 10 palette anchors are well
+// separated in hue, no other family needs the prior. If a future
+// regression demands it, add bands here; keep them narrow enough
+// that pure cyan / pure violet still match their own anchors.
+constexpr double kBlueBandLo = 195.0;
+constexpr double kBlueBandHi = 260.0;
+constexpr double kFamilyMul  = 0.6;
+
+bool inBlueBand(double hueDeg)
+{
+    return hueDeg >= kBlueBandLo && hueDeg <= kBlueBandHi;
 }
 
 
@@ -90,6 +117,7 @@ uint8_t quantize(Rgb c)
     // Nearest-match in the HSV chromatic plane — see chromaXY() above
     // for the why.
     const ChromaXY cxy = chromaXY(c);
+    const bool inputBlueFamily = !cxy.grey && inBlueBand(cxy.hueDeg);
     double bestDist = std::numeric_limits<double>::infinity();
     uint8_t bestIdx = 0x01;  // default if literally nothing matches
 
@@ -98,7 +126,13 @@ uint8_t quantize(Rgb c)
         const ChromaXY pxy = chromaXY(kPalette[i]);
         const double dx = cxy.x - pxy.x;
         const double dy = cxy.y - pxy.y;
-        const double d = dx * dx + dy * dy;
+        double d = dx * dx + dy * dy;
+        // Soft pull toward the blue family for blue-family inputs.
+        // Without this, hue 208° (between cyan 180° and deep blue
+        // 240°) lands on cyan because the angular gap is smaller.
+        if (inputBlueFamily && !pxy.grey && inBlueBand(pxy.hueDeg)) {
+            d *= kFamilyMul;
+        }
         if (d < bestDist) {
             bestDist = d;
             bestIdx = i;
