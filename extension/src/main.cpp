@@ -2258,10 +2258,25 @@ void onUf8Input(const uint8_t* dataIn, size_t lenIn)
         // Session-prefix byte 0x31 + flag byte: skip both.
         if (data[i] == 0x31 && i + 1 < len) { i += 2; continue; }
         if (data[i] != 0xFF) { ++i; continue; }
-        // Need at least FF + cmd to know how much more to expect.
+        // Need at least FF + cmd to know how much more to expect. If
+        // we only have a lone FF at the end, drop it — it's most likely
+        // a stray byte (frame checksum that happened to land on 0xFF),
+        // not the start of a real frame. Saving it as residual would
+        // mis-frame the next URB. If we have FF+cmd, only save when
+        // the cmd byte is one we actually know — otherwise the FF was
+        // also a stray.
+        if (i + 1 >= len) {
+            // Lone FF at the very end — drop.
+            break;
+        }
         if (i + 2 >= len) {
-            // Carry FF (and possibly cmd) into the next URB.
-            if (len - i <= kInputResidualMax) {
+            // FF + cmd at the end. Only carry over if cmd is recognised.
+            const uint8_t peekCmd = data[i + 1];
+            const bool known = (peekCmd == 0x04 || peekCmd == 0x20 ||
+                                peekCmd == 0x21 || peekCmd == 0x22 ||
+                                peekCmd == 0x23 || peekCmd == 0x24 ||
+                                peekCmd == 0x33);
+            if (known && len - i <= kInputResidualMax) {
                 g_inputResidual.assign(data + i, data + len);
             }
             break;
@@ -2321,13 +2336,13 @@ void onUf8Input(const uint8_t* dataIn, size_t lenIn)
             // We only queue while the user is actively touching the fader,
             // so REAPER's motor echo doesn't feed back.
             //
-            // Strip indexing: 0-indexed (0..7) on this opcode AND on
-            // FF 20 02 TOUCH. Verified empirically 2026-05-06 by the
-            // /tmp/reaper_uf8_in_dispatch.log histogram (TOUCH frames
-            // span strip 0..7, never 8). The earlier "asymmetry"
-            // hypothesis was self-inflicted: an `rawStrip == 0` filter
-            // dropped Fader 1's TOUCH events silently, making sweep
-            // tests look 1-indexed.
+            // Strip indexing: 0-indexed (0..7) DIRECT on this opcode.
+            // FF 20 02 TOUCH is 1-indexed (rawStrip 1..8) and shifted
+            // by -1 in its handler — the asymmetry is real, verified
+            // empirically by the "without -1 shift, every fader stays
+            // engaged" symptom (LIMP wire-byte routes one strip too
+            // far). DON'T touch this without a fresh capture proving
+            // symmetry — multiple regressions have come from doing so.
             const uint8_t strip   = data[i + 3];
             const uint8_t rawA    = data[i + 4];
             const uint8_t rawHigh = data[i + 4] & 0x80;     // diag: was bit 7 set?
@@ -2525,23 +2540,25 @@ void onUf8Input(const uint8_t* dataIn, size_t lenIn)
             // (kills the motor-echo feedback loop), and release the motor
             // so the user's hand isn't fighting it.
             //
-            // Strip indexing — both directions 0-indexed (0..7).
-            // Verified empirically 2026-05-06 by `/tmp/reaper_uf8_in_dispatch.log`
-            // histogram: TOUCH frames span `ff 20 02 00 ..` through
-            // `ff 20 02 07 ..` with proper press+release pairs, never
-            // 0x08. POSITION (FF 21 03) and OUTBOUND LIMP (FF 1D 02)
-            // also 0-indexed (cap51). The "1-indexed with `-1` shift"
-            // hypothesis came from sweep tests where rawStrip=0 was
-            // silently rejected by an earlier `rawStrip == 0` filter,
-            // making the Fader 1 events look "missing" when they were
-            // simply dropped — a self-inflicted illusion.
+            // Strip indexing — TOUCH (FF 20 02) is 1-indexed
+            // (Fader N → rawStrip=N, 1..8), shift `-1` to 0..7 internal.
+            // POSITION (FF 21 03) and OUTBOUND LIMP (FF 1D 02) are
+            // 0-indexed direct. Verified empirically 2026-05-06: with
+            // no shift, EVERY fader stays engaged (LIMP wire-byte = N
+            // routes to Fader N+1 → wrong fader limps → user-touched
+            // fader stays engaged). Restoring the shift returned the
+            // working state. The dispatch-log histogram showing
+            // `ff 20 02 00 ..` was misleading: those 2 events are
+            // most likely Fader 8 firmware wraparound glitches, not
+            // normal Fader 1 events. Without a fresh capture proving
+            // 0-indexed, KEEP THE SHIFT.
             const uint8_t rawStrip = data[i + 3];
             const uint8_t state    = data[i + 4];
-            if (rawStrip > 7) {
+            if (rawStrip == 0 || rawStrip > 8) {
                 i += frameSize;
                 continue;
             }
-            const uint8_t strip = rawStrip;
+            const uint8_t strip = static_cast<uint8_t>(rawStrip - 1);
             if (strip < 8) {
                 // Diag log — same path as f73201c. Append-mode, one line
                 // per touch event so we can correlate with FF 1B keepalive
