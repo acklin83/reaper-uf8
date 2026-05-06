@@ -436,6 +436,14 @@ std::atomic<int> g_scribbleBrightness{BL_Full};
 // ExtState; toggling re-fires bankDirty so per-strip SEL re-pushes.
 std::atomic<bool> g_selFollowsColor{true};
 
+// "Show any GR data" — when true (default), the CS GR strip on UF8
+// AND the UC1 Comp meter fall back to ANY track FX exposing the
+// PreSonus GainReduction_dB convention if no SSL CS / user-mapped
+// CS plug-in is on the focused track. When false, GR is shown only
+// when an SSL CS / mapped plug-in is present (matches pre-2026-05-06
+// behaviour). Controlled via Settings → Device.
+std::atomic<bool> g_grAnyFx{true};
+
 // Meter ballistic. Peak = raw peak per Track_GetPeakInfo (no smoothing
 // here; REAPER's own ballistics already apply); VU = exp-smoothed dB
 // with τ=300 ms; RMS = exp-smoothed linear power with τ=600 ms then
@@ -527,6 +535,10 @@ void loadBrightness()
     const char* selFollow = GetExtState("rea_sixty", "sel_follows_color");
     if (selFollow && *selFollow) {
         g_selFollowsColor.store(std::atoi(selFollow) != 0);
+    }
+    const char* grAny = GetExtState("rea_sixty", "gr_any_fx");
+    if (grAny && *grAny) {
+        g_grAnyFx.store(std::atoi(grAny) != 0);
     }
     const char* bm = GetExtState("rea_sixty", "ballistic_mode");
     if (bm && *bm) {
@@ -5392,7 +5404,7 @@ void onTimer()
                             }
                         }
                     }
-                    if (!gotIt) {
+                    if (!gotIt && g_grAnyFx.load()) {
                         const int fxCount = TrackFX_GetCount(tr);
                         for (int fx = 0; fx < fxCount; ++fx) {
                             char buf[64] = {0};
@@ -6113,6 +6125,17 @@ void reasixty_setSelFollowsColor(bool follow)
     // Force a per-strip SEL re-push so the new colour mode lands without
     // requiring the user to bank-shift or click around.
     g_bankDirty.store(true);
+}
+
+bool reasixty_grAnyFx()
+{
+    return g_grAnyFx.load();
+}
+
+void reasixty_setGrAnyFx(bool enabled)
+{
+    g_grAnyFx.store(enabled);
+    SetExtState("rea_sixty", "gr_any_fx", enabled ? "1" : "0", true);
 }
 
 // Build a diagnostic .zip on the user's Desktop with extension state +

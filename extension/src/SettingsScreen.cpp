@@ -44,6 +44,8 @@ void reasixty_identifyUf8();
 void reasixty_identifyUc1();
 bool reasixty_selFollowsColor();
 void reasixty_setSelFollowsColor(bool follow);
+bool reasixty_grAnyFx();
+void reasixty_setGrAnyFx(bool enabled);
 int  reasixty_ballisticMode();
 void reasixty_setBallisticMode(int mode);
 void reasixty_exportDiagnostic();  // shows confirmation dialog itself
@@ -168,6 +170,20 @@ void SettingsScreen::drawDevice(ImGui_Context* ctx)
     if (ImGui_Checkbox(ctx, "SEL LED follows REAPER track colour",
                        &selFollow)) {
         reasixty_setSelFollowsColor(selFollow);
+    }
+
+    // GR meter source — when "Show any GR data" is on, the CS GR strip
+    // (UF8) and the UC1 Comp meter fall back to ANY track FX exposing
+    // the PreSonus GainReduction_dB convention if no SSL CS / mapped
+    // CS plug-in is on the focused track. ReaComp / FabFilter etc. work
+    // out of the box. Off limits the meter to SSL CS / mapped plug-ins.
+    static char kGrItems[] =
+        "Only Show Channel Strip GR\0Show any GR Data\0";
+    int grIdx = reasixty_grAnyFx() ? 1 : 0;
+    if (ImGui_Combo(ctx, "GR meter source", &grIdx,
+                    kGrItems,
+                    /*popup_max_height_in_items*/ nullptr)) {
+        reasixty_setGrAnyFx(grIdx == 1);
     }
 
     // Ballistic dropdown. Combo's `items` arg is a NUL-separated list

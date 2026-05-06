@@ -19,6 +19,7 @@
 // with UF8's SEL/CHANNEL-encoder paths so UC1 encoders feel identical.
 void reasixty_followSelectedInMixer(MediaTrack* tr);
 void reasixty_toggleMixerWindow();
+bool reasixty_grAnyFx();   // GR-source toggle (Settings → Device)
 
 namespace uc1 {
 
@@ -2435,7 +2436,7 @@ void UC1Surface::pollGainReduction_()
         if (b.channelMap) {
             csCompGr = readGr(csTr, b.channelFxIdx,
                               b.channelGrParam, b.channelGrOffsetDb);
-        } else {
+        } else if (::reasixty_grAnyFx()) {
             const int fxCount = TrackFX_GetCount(csTr);
             for (int fx = 0; fx < fxCount; ++fx) {
                 char buf[64] = {0};
