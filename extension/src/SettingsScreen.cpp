@@ -2102,11 +2102,32 @@ void drawCsiImportSection(ImGui_Context* ctx, int editLayer)
 
     ImGui_Spacing(ctx);
     if (ImGui_Button(ctx, "Preview", /*size_w*/ nullptr, /*size_h*/ nullptr)) {
+        // Logging the click + result so a future Settings-window crash
+        // points at the exact step that died — Frank 2026-05-06
+        // reported clicking Preview hanged the window with no recovery.
+        if (FILE* f = std::fopen("/tmp/rea_sixty_csi_import.log", "a")) {
+            std::fprintf(f, "preview click path=%s\n", s_path);
+            std::fclose(f);
+        }
         s_report = uf8::csi_import::preview(s_path);
+        if (FILE* f = std::fopen("/tmp/rea_sixty_csi_import.log", "a")) {
+            std::fprintf(f, "preview done loaded=%d err='%s' "
+                            "entries=%zu mapped=%d skipped=%d warn=%d\n",
+                         (int)s_report.loaded, s_report.error.c_str(),
+                         s_report.entries.size(),
+                         s_report.appliedCount, s_report.skippedCount,
+                         s_report.warningCount);
+            std::fclose(f);
+        }
     }
     ImGui_SameLine(ctx, /*offset_from_start_x*/ nullptr, /*spacing*/ nullptr);
     if (ImGui_Button(ctx, "Apply now",
                      /*size_w*/ nullptr, /*size_h*/ nullptr)) {
+        if (FILE* f = std::fopen("/tmp/rea_sixty_csi_import.log", "a")) {
+            std::fprintf(f, "apply click path=%s layer=%d clear=%d\n",
+                         s_path, s_targetLayer, (int)s_clearLayerFirst);
+            std::fclose(f);
+        }
         s_report = uf8::csi_import::apply(s_path, s_targetLayer,
                                           s_clearLayerFirst);
     }
@@ -2142,24 +2163,48 @@ void drawCsiImportSection(ImGui_Context* ctx, int editLayer)
         // EndChild leaves the ImGui stack desynced and the next frame
         // tears down the parent window.
         double childH = 240;
-        if (ImGui_BeginChild(ctx, "csi_import_log",
-                             /*size_w*/ nullptr, &childH,
-                             /*child_flags*/ nullptr,
-                             /*window_flags*/ nullptr)) {
-            for (const auto& e : s_report.entries) {
+        const bool childOpen = ImGui_BeginChild(
+            ctx, "csi_import_log",
+            /*size_w*/ nullptr, &childH,
+            /*child_flags*/ nullptr,
+            /*window_flags*/ nullptr);
+        if (childOpen) {
+            // Cap how many rows we render in one frame — a misconfigured
+            // CSI Home.zon can produce hundreds of entries and ImGui
+            // doesn't degrade gracefully past a few thousand text widgets
+            // per frame. 200 is plenty for any sane SSL UF8 surface
+            // (the stock config is ~50 lines).
+            constexpr size_t kMaxRows = 200;
+            const size_t total = s_report.entries.size();
+            const size_t shown = total < kMaxRows ? total : kMaxRows;
+            for (size_t i = 0; i < shown; ++i) {
+                const auto& e = s_report.entries[i];
                 int colour;
                 if (!e.applied)        colour = 0x888888FF; // skipped (grey)
                 else if (e.warning)    colour = 0xFFC050FF; // warning (amber)
                 else                   colour = 0x80FF80FF; // applied (green)
                 char line[512];
-                std::snprintf(line, sizeof(line), "  %-14s  →  %s",
+                std::snprintf(line, sizeof(line), "  %-14s  ->  %s",
                               e.widget.c_str(), e.mappedTo.c_str());
                 ImGui_TextColored(ctx, colour, line);
                 if (!e.action.empty()) {
                     std::snprintf(line, sizeof(line),
                                   "                CSI: %s", e.action.c_str());
-                    ImGui_TextColored(ctx, 0x99999999, line);
+                    // Plain Text instead of TextColored with the
+                    // alpha=0x99 grey — that uncommon colour was the
+                    // outlier in the previous render path; eliminating
+                    // it removes one suspect for the 2026-05-06 crash
+                    // report. ImGui's own TextDisabled style handles
+                    // the de-emphasis just as well.
+                    ImGui_TextDisabled(ctx, line);
                 }
+            }
+            if (total > shown) {
+                char foot[96];
+                std::snprintf(foot, sizeof(foot),
+                              "  ... %zu more entries (capped at %zu)",
+                              total - shown, kMaxRows);
+                ImGui_TextDisabled(ctx, foot);
             }
         }
         ImGui_EndChild(ctx);
