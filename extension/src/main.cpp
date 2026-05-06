@@ -2881,7 +2881,14 @@ bool isBinarySlot(const uf8::LinkSlot& s)
         || id == "LowEqBell"       || id == "CompFastAttack"
         || id == "CompPeak"        || id == "GateExpander"
         || id == "GateAttack"      || id == "EqType"
-        || id == "Pre"             || id == "ImpedanceIn";
+        || id == "Pre"             || id == "ImpedanceIn"
+        // Frank 2026-05-06: V-Pot push should toggle / cycle these
+        // EXT_FUNCS slots instead of resetting to 0.5. WidthMode is a
+        // 3-state enum (Full / Low / High) — the multi-step cycling
+        // path inside the binary branch (TrackFX_GetParameterStepSizes)
+        // walks all three values per push.
+        || id == "AutoMakeup"      || id == "WidthMode"
+        || id == "FiltersIn";
 }
 
 // Is this slot a bipolar param with a meaningful centre detent (0 dB

@@ -84,12 +84,12 @@ constexpr LinkSlot kCs2Slots[] = {
     { ext::EqToSC,         "EqToSC",         "EQ To S/C",      "EQ-SC", 36,  false },
     { ext::DynamicsPreEq,  "DynamicsPreEq",  "Dyn Pre-EQ",     "D-EQ",  34,  false },
     // Compressor extension
-    { ext::AutoMakeup,     "AutoMakeup",     "Auto Make-up",   "A.MU",  49,  false },
+    { ext::AutoMakeup,     "AutoMakeup",     "Auto Mkp",   "A.MU",  49,  false },
     { ext::AutoMakeupOff,  "AutoMakeupOff",  "A.M-up Off",     "A.MO",  50,  false },
     // Output stage
     {  2, "Width",                            "Width",          "WID",   40,  false },
     { ext::WidthMode,      "WidthMode",      "Width Mode",     "W.MOD", 47,  false },
-    { ext::WidthFreq,      "WidthFreq",      "Width Freq",     "W.FRQ", 48,  false },
+    { ext::WidthFreq,      "WidthFreq",      "Width Freq",     "W.FRQ", 48,  false, 0.0 },
     {  3, "Pan",                              "Pan",            "PAN",   41,  false },
     { 46, "GroupSense",                       "GroupSense",     "GRP",   45,  false },
 };
@@ -137,7 +137,7 @@ constexpr LinkSlot k4kESlots[] = {
     { ext::EqToSC,         "EqToSC",         "EQ To S/C",      "EQ-SC", 20,  false },
     { ext::DynamicsPreEq,  "DynamicsPreEq",  "Dyn Pre-EQ",     "D-EQ",  34,  false },
     // Compressor extension
-    { ext::AutoMakeup,     "AutoMakeup",     "Auto Make-up",   "A.MU",  40,  false },
+    { ext::AutoMakeup,     "AutoMakeup",     "Auto Mkp",   "A.MU",  40,  false },
     { ext::AutoMakeupOff,  "AutoMakeupOff",  "A.M-up Off",     "A.MO",  41,  false },
     // Preamp section
     { ext::Pre,            "Pre",            "Pre",            "PRE",    3,  false },
@@ -145,7 +145,7 @@ constexpr LinkSlot k4kESlots[] = {
     // Output stage
     {  2, "Width",                            "Width",          "WID",    9,  false },
     { ext::WidthMode,      "WidthMode",      "Width Mode",     "W.MOD", 10,  false },
-    { ext::WidthFreq,      "WidthFreq",      "Width Freq",     "W.FRQ", 11,  false },
+    { ext::WidthFreq,      "WidthFreq",      "Width Freq",     "W.FRQ", 11,  false, 0.0 },
     {  3, "Pan",                              "Pan",            "PAN",   12,  false },
     // Misc (no Legacy Cut/Solo/SoloSafe on 4K E)
     { 46, "GroupSense",                       "GroupSense",     "GRP",   48,  false },
@@ -191,7 +191,7 @@ constexpr LinkSlot k4kBSlots[] = {
     { ext::EqToSC,         "EqToSC",         "EQ To S/C",      "EQ-SC", 15,  false },
     { ext::DynamicsPreEq,  "DynamicsPreEq",  "Dyn Pre-EQ",     "D-EQ",  29,  false },
     // Compressor extension
-    { ext::AutoMakeup,     "AutoMakeup",     "Auto Make-up",   "A.MU",  47,  false },
+    { ext::AutoMakeup,     "AutoMakeup",     "Auto Mkp",   "A.MU",  47,  false },
     { ext::AutoMakeupOff,  "AutoMakeupOff",  "A.M-up Off",     "A.MO",  48,  false },
     // Preamp section (4K B-style)
     { ext::Pre,            "Pre",            "Pre",            "PRE",    3,  false },
@@ -199,7 +199,7 @@ constexpr LinkSlot k4kBSlots[] = {
     // Output stage
     {  2, "Width",                            "Width",          "WID",    8,  false },
     { ext::WidthMode,      "WidthMode",      "Width Mode",     "W.MOD", 45,  false },
-    { ext::WidthFreq,      "WidthFreq",      "Width Freq",     "W.FRQ", 46,  false },
+    { ext::WidthFreq,      "WidthFreq",      "Width Freq",     "W.FRQ", 46,  false, 0.0 },
     {  3, "Pan",                              "Pan",            "PAN",    9,  false },
     { 46, "GroupSense",                       "GroupSense",     "GRP",   42,  false },
 };
@@ -246,7 +246,7 @@ constexpr LinkSlot k4kGSlots[] = {
     { ext::EqToSC,         "EqToSC",         "EQ To S/C",      "EQ-SC",  4,  false },
     { ext::DynamicsPreEq,  "DynamicsPreEq",  "Dyn Pre-EQ",     "D-EQ",   5,  false },
     // Compressor extension
-    { ext::AutoMakeup,     "AutoMakeup",     "Auto Make-up",   "A.MU",  44,  false },
+    { ext::AutoMakeup,     "AutoMakeup",     "Auto Mkp",   "A.MU",  44,  false },
     { ext::AutoMakeupOff,  "AutoMakeupOff",  "A.M-up Off",     "A.MO",  45,  false },
     // Preamp section (4K G adds variable input impedance)
     { ext::ImpedanceIn,    "ImpedanceIn",    "Imp In",         "IMPi",   7,  false },
@@ -256,7 +256,7 @@ constexpr LinkSlot k4kGSlots[] = {
     // Output stage
     {  2, "Width",                            "Width",          "WID",   15,  false },
     { ext::WidthMode,      "WidthMode",      "Width Mode",     "W.MOD", 16,  false },
-    { ext::WidthFreq,      "WidthFreq",      "Width Freq",     "W.FRQ", 17,  false },
+    { ext::WidthFreq,      "WidthFreq",      "Width Freq",     "W.FRQ", 17,  false, 0.0 },
     {  3, "Pan",                              "Pan",            "PAN",   18,  false },
     // Misc (no Legacy Cut/Solo/SoloSafe on 4K G)
     { 46, "GroupSense",                       "GroupSense",     "GRP",   52,  false },
