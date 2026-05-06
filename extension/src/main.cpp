@@ -2484,27 +2484,32 @@ void onUf8Input(const uint8_t* data, size_t len)
             // (kills the motor-echo feedback loop), and release the motor
             // so the user's hand isn't fighting it.
             //
-            // Strip indexing: 0-indexed end-to-end, matches cap51
-            // (SSL 360° on Windows) and confirmed on user's macOS by
-            // a controlled left-to-right sweep 2026-05-05. User
-            // touched 8 faders in sequence; log showed rawStrip 1..7
-            // (only 7 distinct values) — Fader 1 emits rawStrip=0
-            // which we were silently rejecting. cap51 LIMP/touch
-            // wire-bytes also match 0..7. Don't shift, don't reject 0.
+            // Strip indexing — DO NOT FLATTEN, see memory
+            // uf8-fader-input-protocol.md before changing.
             //
-            // Failure mode of an erroneous `-1` shift: Fader 1's
-            // rawStrip=0 gets dropped (no LIMP, motor fights), and
-            // Fader 8's rawStrip=7 gets mapped to internal strip=6,
-            // which limps the wrong physical fader (Fader 7) — leaving
-            // Fader 8 motor engaged. Both symptoms observed during
-            // 2026-05-04/05 thrashing.
+            // Empirically (single-fader tests on user's macOS
+            // hardware, 2026-05-06):
+            //   Fader 1..7 → rawStrip = 1..7
+            //   Fader 8    → rawStrip = 0    (wraps around)
+            // POSITION opcode (FF 21 03) is 0-indexed direct, see the
+            // load-bearing comment around line 2282. Don't try to
+            // unify the two conventions without a fresh capture.
+            //
+            // The "0-indexed end-to-end" claim from c97f751 came from
+            // cap51 (Windows SSL 360°), which only proves the OUTBOUND
+            // FF 1D 02 motor-LIMP is 0-indexed. That says nothing about
+            // the INBOUND FF 20 02 touch byte on this firmware. Three
+            // commits in one week tried to "simplify" this and each
+            // broke a different fader. Stop.
             const uint8_t rawStrip = data[i + 3];
             const uint8_t state    = data[i + 4];
-            if (rawStrip > 7) {
+            if (rawStrip > 8) {
                 i += frameSize;
                 continue;
             }
-            const uint8_t strip = rawStrip;
+            const uint8_t strip = (rawStrip == 0)
+                                      ? static_cast<uint8_t>(7)
+                                      : static_cast<uint8_t>(rawStrip - 1);
             if (strip < 8) {
                 // Diag log — same path as f73201c. Append-mode, one line
                 // per touch event so we can correlate with FF 1B keepalive
