@@ -4643,16 +4643,24 @@ ResolvedLed resolveLed_(uf8::Uf8GlobalLed cell,
     const auto bd = uf8::bindings::getBinding(activeLayer, bid);
     const auto& slot = bd.shortPress[static_cast<int>(mod)];
 
-    // Empty (Noop) slot + user hasn't ticked "show LED when empty"
-    // → no override; the cell's table-default colour wins. Without
-    // this check, an unbound button's default-white binding colour
-    // would clobber colourful table defaults (zoom pad's red /
-    // green / yellow). When the user actually binds an action OR
-    // ticks ledShowWhenEmpty, we honour the binding's colour
-    // unconditionally — including white, so a user can deliberately
-    // turn the zoom centre white.
+    // No override only when the binding is TRULY untouched: empty
+    // slot, no ledShowWhenEmpty flag, AND every LED knob still at
+    // its factory default (white@Bright active, white@Dim inactive).
+    // The moment the user touches any LED setting OR binds an
+    // action, we apply the binding's appearance — including a
+    // deliberate white. Without the "ledTouched" check, a user
+    // setting colour=red on an unbound zoom button gets serialised
+    // fine but the next REAPER restart shows the cell's hardcoded
+    // table colour because slot.type stays Noop (Frank 2026-05-06).
+    using B = uf8::bindings::Brightness;
     const bool slotEmpty = (slot.type == uf8::bindings::ActionType::Noop);
-    if (slotEmpty && !bd.ledShowWhenEmpty) return r;
+    const bool ledTouched =
+        !(bd.color[0] == 0xFF && bd.color[1] == 0xFF && bd.color[2] == 0xFF
+          && bd.brightness == B::Bright
+          && bd.inactiveColor[0] == 0xFF && bd.inactiveColor[1] == 0xFF
+          && bd.inactiveColor[2] == 0xFF
+          && bd.inactiveBrightness == B::Dim);
+    if (slotEmpty && !bd.ledShowWhenEmpty && !ledTouched) return r;
 
     uint8_t rgb[3];
     uf8::bindings::Brightness bri;
