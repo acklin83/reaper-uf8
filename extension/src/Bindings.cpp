@@ -273,6 +273,13 @@ std::atomic<bool> g_modShiftHeld{false};
 std::atomic<bool> g_modCmdHeld  {false};
 std::atomic<bool> g_modCtrlHeld {false};
 
+// Monotonic counter bumped on every mutation of g_cfg (setBinding,
+// clearBinding, layer setters, load, importFrom). main.cpp reads this
+// in pushUf8GlobalLeds and invalidates its dedup cache on a delta so
+// LED-colour edits in Settings → Bindings reach the hardware on the
+// next tick instead of waiting for a press to dirty the state.
+std::atomic<uint64_t> g_bindingsGen{0};
+
 uint32_t pressKey(int layer, ButtonId id)
 {
     return (static_cast<uint32_t>(layer) << 16)
@@ -1271,6 +1278,7 @@ void load()
             // re-walk the upgrade chain.
             ensureConfigDir_();
             writeFile_(configPath_(), serialize(g_cfg));
+            g_bindingsGen.fetch_add(1, std::memory_order_relaxed);
             return;
         }
     }
@@ -1279,6 +1287,7 @@ void load()
     seedFactoryDefaults_(g_cfg);
     ensureConfigDir_();
     writeFile_(configPath_(), serialize(g_cfg));
+    g_bindingsGen.fetch_add(1, std::memory_order_relaxed);
 }
 
 void save()
@@ -1308,6 +1317,7 @@ bool importFrom(const std::string& path)
         g_cfg = std::move(tmp);
         ensureConfigDir_();
         writeFile_(configPath_(), serialize(g_cfg));
+        g_bindingsGen.fetch_add(1, std::memory_order_relaxed);
     }
     return true;
 }
@@ -1350,6 +1360,7 @@ bool importLayerFrom(int layer, const std::string& path)
         g_cfg.layers[layer] = std::move(tmp);
         ensureConfigDir_();
         writeFile_(configPath_(), serialize(g_cfg));
+        g_bindingsGen.fetch_add(1, std::memory_order_relaxed);
     }
     return true;
 }
@@ -1639,6 +1650,7 @@ void persistLocked_()
 {
     ensureConfigDir_();
     writeFile_(configPath_(), serialize(g_cfg));
+    g_bindingsGen.fetch_add(1, std::memory_order_relaxed);
 }
 }
 
@@ -1909,6 +1921,11 @@ void onMixerVisibilityChanged(bool visible)
             g_savedLayer = -1;
         }
     }
+}
+
+uint64_t generation()
+{
+    return g_bindingsGen.load(std::memory_order_relaxed);
 }
 
 } // namespace uf8::bindings

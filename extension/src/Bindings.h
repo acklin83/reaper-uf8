@@ -433,4 +433,12 @@ void effectiveLedInactive(const Binding& bd, const ActionSlot& slot,
 // chains never sit in the queue (they run synchronously in dispatch).
 void tickPending();
 
+// Monotonic counter bumped on every Config mutation (setBinding,
+// clearBinding, layer setters, load, importFrom, importLayerFrom).
+// main.cpp polls this in pushUf8GlobalLeds and forces a full LED
+// re-push on a delta — so colour edits in Settings → Bindings reach
+// the hardware on the next tick instead of waiting for a button press
+// to dirty the dedup cache.
+uint64_t generation();
+
 } // namespace uf8::bindings

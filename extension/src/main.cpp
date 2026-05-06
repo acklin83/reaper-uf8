@@ -4562,6 +4562,23 @@ uf8::bindings::ButtonId buttonIdForGlobalLed(uf8::Uf8GlobalLed cell)
     return B::None;
 }
 
+// Resolve which Modifier slot drives the LED right now. While Shift /
+// Cmd / Ctrl is physically held, the corresponding modifier slot wins
+// — so a bound Shift+Pan with a custom colour previews that colour on
+// the Pan LED for as long as Shift is down. Release returns to Plain.
+// This mirrors the press-time behaviour: dispatch() snapshots the same
+// modifier when the button actually fires, so what you see is what
+// you'll get.
+uf8::bindings::Modifier liveModifierForLed_()
+{
+    using M = uf8::bindings::Modifier;
+    // Precedence matches dispatch(): Ctrl > Cmd > Shift > Plain.
+    if (uf8::bindings::modifierHeld(M::Ctrl))  return M::Ctrl;
+    if (uf8::bindings::modifierHeld(M::Cmd))   return M::Cmd;
+    if (uf8::bindings::modifierHeld(M::Shift)) return M::Shift;
+    return M::Plain;
+}
+
 // If the user has set a non-default colour on the binding for this
 // cell on the active layer, return it as an LedColour ready for the
 // 3-arg buildUf8GlobalLed overload. Otherwise std::nullopt = caller
@@ -4570,19 +4587,18 @@ uf8::bindings::ButtonId buttonIdForGlobalLed(uf8::Uf8GlobalLed cell)
 // visually identical to today, only deliberate edits surface.
 //
 // Color-from-binding only — state (when LED is on/off, Bright/Dim)
-// stays driven by main.cpp's existing logic. Brightness from the
-// LedOverride/Binding is intentionally ignored here; the aborted
-// 2026-05-05 side-quest tried mixing colour + state and broke FLIP +
-// scribble strips. See `feedback-led-user-color-aborted` memory.
+// stays driven by main.cpp's existing logic except for the modifier-
+// preview path in sendUf8GlobalLed which forces Bright when a held
+// modifier has a non-noop slot here.
 std::optional<uf8::LedColour> bindingLedColourOverride(
-    uf8::Uf8GlobalLed cell, uf8::GlobalLedState state)
+    uf8::Uf8GlobalLed cell, uf8::GlobalLedState state,
+    uf8::bindings::Modifier mod = uf8::bindings::Modifier::Plain)
 {
     const auto bid = buttonIdForGlobalLed(cell);
     if (bid == uf8::bindings::ButtonId::None) return std::nullopt;
     const int activeLayer = uf8::bindings::getActiveLayer();
     const auto bd = uf8::bindings::getBinding(activeLayer, bid);
-    const auto& slot = bd.shortPress[
-        static_cast<int>(uf8::bindings::Modifier::Plain)];
+    const auto& slot = bd.shortPress[static_cast<int>(mod)];
     uint8_t rgb[3];
     uf8::bindings::Brightness bri;
     if (state == uf8::GlobalLedState::Bright) {
@@ -4599,11 +4615,49 @@ std::optional<uf8::LedColour> bindingLedColourOverride(
     return uf8::ledColourForTrackRgb(packed);
 }
 
+// True when the currently-held modifier has a bindable, non-noop slot
+// on this cell — i.e. holding the modifier "armed" an action that a
+// press would fire. Used to force-Bright the LED while previewing.
+bool modifierSlotArmed_(uf8::Uf8GlobalLed cell, uf8::bindings::Modifier mod)
+{
+    if (mod == uf8::bindings::Modifier::Plain) return false;
+    const auto bid = buttonIdForGlobalLed(cell);
+    if (bid == uf8::bindings::ButtonId::None) return false;
+    const auto bd = uf8::bindings::getBinding(
+        uf8::bindings::getActiveLayer(), bid);
+    const auto& slot = bd.shortPress[static_cast<int>(mod)];
+    return slot.type != uf8::bindings::ActionType::Noop;
+}
+
 // Wrapper around sendLedFrames(buildUf8GlobalLed(...)) that folds in
-// the user's per-binding LED colour when present. Use this instead of
-// the raw 2-arg buildUf8GlobalLed at every global-LED push site.
+// the user's per-binding LED colour and the modifier-preview path.
+// Use this instead of the raw 2-arg buildUf8GlobalLed at every global-
+// LED push site.
+//
+// Behaviour:
+//   - Modifier held + cell has armed modifier slot → Bright with the
+//     modifier slot's override colour (or the modifier slot's plain
+//     resolved colour). Reverts to Plain on release.
+//   - Otherwise → caller's `state` + Plain modifier override (existing
+//     behaviour from the previous commit).
 void sendUf8GlobalLed(uf8::Uf8GlobalLed cell, uf8::GlobalLedState state)
 {
+    const auto mod = liveModifierForLed_();
+    if (mod != uf8::bindings::Modifier::Plain &&
+        modifierSlotArmed_(cell, mod)) {
+        // Force Bright while previewing — the slot's resolved colour
+        // is the dominant visual cue. Falls through to table colour
+        // if the modifier slot still has the default-white override.
+        if (auto over = bindingLedColourOverride(
+                cell, uf8::GlobalLedState::Bright, mod)) {
+            sendLedFrames(uf8::buildUf8GlobalLed(
+                cell, uf8::GlobalLedState::Bright, *over));
+        } else {
+            sendLedFrames(uf8::buildUf8GlobalLed(
+                cell, uf8::GlobalLedState::Bright));
+        }
+        return;
+    }
     if (auto over = bindingLedColourOverride(cell, state)) {
         sendLedFrames(uf8::buildUf8GlobalLed(cell, state, *over));
     } else {
@@ -4718,6 +4772,26 @@ void pushUf8GlobalLeds()
     // visually identical to dim — user asked for both states regardless.
     const int pluginLit = g_pluginFaderMode.load() ? 1 : 0;
 
+    // Bindings generation — bumped on any setBinding/clearBinding/load/
+    // import. Polling here keeps colour edits in Settings → Bindings
+    // visible on the next tick without needing a press to dirty state.
+    static uint64_t s_lastBindingsGen = 0;
+    const uint64_t bindingsGen = uf8::bindings::generation();
+    if (bindingsGen != s_lastBindingsGen) {
+        g_globalLedsInit = false;
+        s_lastBindingsGen = bindingsGen;
+    }
+
+    // Live modifier — affects every LED via sendUf8GlobalLed's preview
+    // path. Track edges so the row repaints on Shift / Cmd / Ctrl
+    // press AND release.
+    const uf8::bindings::Modifier liveMod = liveModifierForLed_();
+    static uf8::bindings::Modifier s_lastLiveMod = uf8::bindings::Modifier::Plain;
+    if (liveMod != s_lastLiveMod) {
+        g_globalLedsInit = false;
+        s_lastLiveMod = liveMod;
+    }
+
     if (g_globalLedsInit && autoMode == g_lastAutoMode &&
         anyArmed == g_lastAnyArmed && forcePan == g_lastForcePan &&
         flip == g_lastFlip && shiftHeld == g_lastShiftHeld &&
@@ -4821,26 +4895,43 @@ void pushUf8GlobalLeds()
         pushLayerLeds(activeLayer);
     }
 
-    // Init-dim LEDs whose state we don't drive yet — without these,
-    // anything left bright by the probe action (or by SSL360 before
-    // Rea-Sixty took the device) lingers across reloads. All shipped
-    // dim baseline so the user sees the row exists; they go bright
-    // when actively used (press feedback) or when bound via Settings.
-    if (!g_globalLedsInit) {
-        // Layer1/2/3 LEDs are now driven actively by the activeLayer
-        // dedup above — keep them out of the init-dim sweep so we don't
-        // briefly clear the active-layer LED on first tick.
-        for (auto led : {
+    // Stateless-cell sweep: cells that have no hardcoded state machine
+    // in this pusher (Btn360, Channel, BankL/R, Zoom*) — drive their
+    // Bright/Dim from the bound builtin's stateOf, same pattern as
+    // the encoder-mode block below. A user-bound toggle (e.g.
+    // mixer_toggle on Btn360) lights up bright while engaged; a
+    // bound momentary builtin (bank_left) returns false from stateOf
+    // so the cell stays dim until the press handler flashes it.
+    // AutoOff / Auto / Norm stay init-dim — REAPER drives Auto via
+    // pushAutoModeLeds and Norm has no v1 binding.
+    {
+        constexpr uf8::Uf8GlobalLed kStateless[] = {
             uf8::Uf8GlobalLed::Btn360,
             uf8::Uf8GlobalLed::Channel,
-            uf8::Uf8GlobalLed::AutoOff, uf8::Uf8GlobalLed::Auto,
-            uf8::Uf8GlobalLed::Norm,
             uf8::Uf8GlobalLed::BankLeft, uf8::Uf8GlobalLed::BankRight,
             uf8::Uf8GlobalLed::ZoomUp, uf8::Uf8GlobalLed::ZoomDown,
             uf8::Uf8GlobalLed::ZoomLeft, uf8::Uf8GlobalLed::ZoomRight,
             uf8::Uf8GlobalLed::ZoomCenter,
-        }) {
-            sendUf8GlobalLed(led, false);
+        };
+        for (auto led : kStateless) {
+            const auto bid = buttonIdForGlobalLed(led);
+            bool active = false;
+            if (bid != uf8::bindings::ButtonId::None) {
+                const auto bd = uf8::bindings::getBinding(activeLayer, bid);
+                const auto& sp = bd.shortPress[
+                    static_cast<int>(uf8::bindings::Modifier::Plain)];
+                if (sp.type == uf8::bindings::ActionType::Builtin) {
+                    active = uf8::bindings::builtinStateOf(sp.action, sp.param);
+                }
+            }
+            sendUf8GlobalLed(led, active);
+        }
+        if (!g_globalLedsInit) {
+            for (auto led : { uf8::Uf8GlobalLed::AutoOff,
+                              uf8::Uf8GlobalLed::Auto,
+                              uf8::Uf8GlobalLed::Norm }) {
+                sendUf8GlobalLed(led, false);
+            }
         }
     }
 
