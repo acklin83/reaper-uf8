@@ -4630,17 +4630,27 @@ ResolvedLed resolveLed_(uf8::Uf8GlobalLed cell,
     const int activeLayer = uf8::bindings::getActiveLayer();
     const auto bd = uf8::bindings::getBinding(activeLayer, bid);
     const auto& slot = bd.shortPress[static_cast<int>(mod)];
+
+    // Empty (Noop) slot + user hasn't ticked "show LED when empty"
+    // → no override; the cell's table-default colour wins. Without
+    // this check, an unbound button's default-white binding colour
+    // would clobber colourful table defaults (zoom pad's red /
+    // green / yellow). When the user actually binds an action OR
+    // ticks ledShowWhenEmpty, we honour the binding's colour
+    // unconditionally — including white, so a user can deliberately
+    // turn the zoom centre white.
+    const bool slotEmpty = (slot.type == uf8::bindings::ActionType::Noop);
+    if (slotEmpty && !bd.ledShowWhenEmpty) return r;
+
     uint8_t rgb[3];
     uf8::bindings::Brightness bri;
     if (active) uf8::bindings::effectiveLedActive  (bd, slot, rgb, bri);
     else        uf8::bindings::effectiveLedInactive(bd, slot, rgb, bri);
     r.state = brightnessToState_(bri);
-    if (!(rgb[0] == 0xFF && rgb[1] == 0xFF && rgb[2] == 0xFF)) {
-        const uint32_t packed = (uint32_t(rgb[0]) << 16)
-                              | (uint32_t(rgb[1]) << 8)
-                              |  uint32_t(rgb[2]);
-        r.colour = uf8::ledColourForTrackRgb(packed);
-    }
+    const uint32_t packed = (uint32_t(rgb[0]) << 16)
+                          | (uint32_t(rgb[1]) << 8)
+                          |  uint32_t(rgb[2]);
+    r.colour = uf8::ledColourForTrackRgb(packed);
     return r;
 }
 
@@ -6408,7 +6418,13 @@ void registerBindingHandlers()
         [](bool firing, bool /*pressed*/, int /*param*/) {
             if (firing) g_mixerToggleRequest.store(true);
         },
-        nullptr, "Open / close Plugin Mixer", false
+        // Without a stateOf, the LED pusher's stateless-cell sweep
+        // (boundActionIsActive_) treats this as "always active" and
+        // pins Btn360 bright — Frank 2026-05-06. Returning the actual
+        // window-visible state lets the LED track open/closed
+        // honestly.
+        [](int /*param*/) -> bool { return g_mixerWindow.isOpen(); },
+        "Open / close Plugin Mixer", false
     });
 
     // ---- Phase 2.5 surface-filter modes ----------------------------------
