@@ -4635,26 +4635,27 @@ bool modifierSlotArmed_(uf8::Uf8GlobalLed cell, uf8::bindings::Modifier mod)
 // LED push site.
 //
 // Behaviour:
-//   - Modifier held + cell has armed modifier slot → Bright with the
-//     modifier slot's override colour (or the modifier slot's plain
-//     resolved colour). Reverts to Plain on release.
-//   - Otherwise → caller's `state` + Plain modifier override (existing
-//     behaviour from the previous commit).
+//   - Modifier held + cell has armed modifier slot → Dim with the
+//     modifier slot's INACTIVE colour. The action hasn't fired yet,
+//     so the inactive (idle) appearance is the honest preview — user
+//     requested this over a bright/active highlight 2026-05-06.
+//     Reverts to Plain on release.
+//   - Otherwise → caller's `state` + Plain modifier override.
 void sendUf8GlobalLed(uf8::Uf8GlobalLed cell, uf8::GlobalLedState state)
 {
     const auto mod = liveModifierForLed_();
     if (mod != uf8::bindings::Modifier::Plain &&
         modifierSlotArmed_(cell, mod)) {
-        // Force Bright while previewing — the slot's resolved colour
-        // is the dominant visual cue. Falls through to table colour
-        // if the modifier slot still has the default-white override.
+        // Pass Dim → bindingLedColourOverride resolves via
+        // effectiveLedInactive. Falls through to table colour if the
+        // modifier slot still has default-white inactive override.
         if (auto over = bindingLedColourOverride(
-                cell, uf8::GlobalLedState::Bright, mod)) {
+                cell, uf8::GlobalLedState::Dim, mod)) {
             sendLedFrames(uf8::buildUf8GlobalLed(
-                cell, uf8::GlobalLedState::Bright, *over));
+                cell, uf8::GlobalLedState::Dim, *over));
         } else {
             sendLedFrames(uf8::buildUf8GlobalLed(
-                cell, uf8::GlobalLedState::Bright));
+                cell, uf8::GlobalLedState::Dim));
         }
         return;
     }
