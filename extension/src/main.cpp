@@ -2533,24 +2533,24 @@ void onUf8Input(const uint8_t* dataIn, size_t lenIn)
             // (kills the motor-echo feedback loop), and release the motor
             // so the user's hand isn't fighting it.
             //
-            // Strip indexing — 0-indexed END-TO-END (TOUCH, POSITION,
-            // outbound LIMP/target). Hard ground truth from cap51
-            // (USBPcap of SSL 360° on user's UF8 hardware, Windows host):
-            //   Fader 1 (leftmost)  → ff 20 02 00 01 (rawStrip=0)
-            //   Fader 8 (rightmost) → ff 20 02 07 01 (rawStrip=7)
-            //   SSL LIMP for F8     → ff 1d 02 07 00 (wire-byte=7)
-            // No shift. No rawStrip=0 rejection. captures/cap51_ssl360
-            // _fader8_drag.md has the captured bytes. If a future test
-            // contradicts cap51, capture again before changing this —
-            // multiple regressions came from "the firmware feels
-            // 1-indexed today" speculation.
+            // Strip indexing — TOUCH IS 1-INDEXED (rawStrip 1..8 for
+            // faders 1..8). POSITION is 0-INDEXED. OUTBOUND motor /
+            // LIMP is 0-INDEXED. Verified live on Frank's hardware
+            // 2026-05-07 via /tmp/uf8_fader_input.log (first touched
+            // fader = fader 1, logged as strip 1) and /tmp/reaper_uf8
+            // _in_dispatch.log (position frames carry rawStrip 0).
+            // Subtracting 1 here aligns touch with the rest. cap51's
+            // earlier "0-indexed end-to-end" claim conflicts with the
+            // live data — the cap51 capture may have been a different
+            // firmware mode or analysed wrong; the live log on Frank's
+            // device today is the ground truth.
             const uint8_t rawStrip = data[i + 3];
             const uint8_t state    = data[i + 4];
-            if (rawStrip > 7) {
+            if (rawStrip < 1 || rawStrip > 8) {
                 i += frameSize;
                 continue;
             }
-            const uint8_t strip = rawStrip;
+            const uint8_t strip = rawStrip - 1;
             if (strip < 8) {
                 // Diag log — same path as f73201c. Append-mode, one line
                 // per touch event so we can correlate with FF 1B keepalive
