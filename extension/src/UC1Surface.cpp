@@ -3010,28 +3010,36 @@ void UC1Surface::pushGainReduction(float bcGrDb, float csCompGrDb, float csGateG
     //
     // Brightness: 6 visible steps per LED — {0x03, 0x19, 0x2D, 0x54,
     // 0x99, 0xFF}, captured from dual_35_cs_gr_ramp + uc1_36_gate_gr.
-    // 0x03 is SSL360's "threshold-entering seed" before the proper
-    // ramp; treating it as a real visible step gives extra resolution
-    // at low GR — without it the meter felt blunt below 1 dB. 5 LEDs
-    // × 6 sub-steps = 30 sub-steps over 20 dB Vollausschlag → 0.667 dB
-    // per sub-step. Earlier 5-step subset matched dual_35's visible
-    // gross steps but skipped the dim seed (Frank 2026-05-07).
+    // 5 LEDs × 6 sub-steps = 30 sub-steps over 20 dB Vollausschlag →
+    // 0.667 dB per sub-step. Same sub-step index drives both the UC1
+    // strip here AND the UF8 byte (computed in main.cpp), so the two
+    // hardware meters stay synchronised at every dB level (Frank
+    // 2026-05-07: capture verified UF8 byte 0x05 ↔ UC1 LED 0 full,
+    // 0x18 ↔ LED 4 sub 3 — the byte mapping in main.cpp is now
+    // derived from this 30-step sub-step rather than redundantly
+    // computed from dB).
     static const uint8_t kLevels[6] = {0x03, 0x19, 0x2D, 0x54, 0x99, 0xFF};
     constexpr int   kSubsPerLed = 6;
     constexpr int   kSubsTotal  = 5 * kSubsPerLed;     // 30
     constexpr float kDbPerSub   = 20.0f / kSubsTotal;  // 0.667 dB
 
-    auto stripTargets = [&](float dB, uint8_t (&out)[5]) {
-        if (dB < 0) dB = 0;
-        const int pos = static_cast<int>(dB / kDbPerSub);  // 0..29
-        const int active = (pos / kSubsPerLed > 4)
-                            ? 4 : (pos / kSubsPerLed);
-        const int sub    = (pos % kSubsPerLed > kSubsPerLed - 1)
-                            ? kSubsPerLed - 1 : (pos % kSubsPerLed);
+    auto subStepFromDb = [&](float dB) -> int {
+        if (dB <= 0) return 0;
+        int s = static_cast<int>(std::lround(dB / kDbPerSub));
+        if (s > kSubsTotal) s = kSubsTotal;
+        return s;
+    };
+    auto stripTargets = [&](int subStep, uint8_t (&out)[5]) {
+        if (subStep < 0) subStep = 0;
+        if (subStep >= kSubsTotal) {
+            for (auto& o : out) o = 0xFF;
+            return;
+        }
+        const int active = subStep / kSubsPerLed;        // 0..4
+        const int sub    = subStep % kSubsPerLed;        // 0..5
         for (int i = 0; i < 5; ++i) out[i] = 0;
         for (int i = 0; i < active; ++i) out[i] = 0xFF;
-        out[active] = (pos == 0 && dB < kDbPerSub * 0.5f)
-                       ? 0x00 : kLevels[sub];
+        out[active] = (subStep == 0) ? 0x00 : kLevels[sub];
     };
 
     // Match SSL360's exact pattern from dual_35 — counted across the
@@ -3091,8 +3099,8 @@ void UC1Surface::pushGainReduction(float bcGrDb, float csCompGrDb, float csGateG
     static uint8_t lastGateSel[5] = {0, 0, 0, 0, 0};
     uint8_t compTarget[5];
     uint8_t gateTarget[5];
-    stripTargets(csCompGrDb, compTarget);
-    stripTargets(csGateGrDb, gateTarget);
+    stripTargets(subStepFromDb(csCompGrDb), compTarget);
+    stripTargets(subStepFromDb(csGateGrDb), gateTarget);
 
     pushStrip(0x5C, compTarget, lastCompBri, lastCompSel);
     pushStrip(0x61, gateTarget, lastGateBri, lastGateSel);

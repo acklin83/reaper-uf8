@@ -5337,15 +5337,12 @@ void onTimer()
     // so all GR rendered onto strip 1 only. Now: locate the focused
     // track inside the visible bank and stamp its strip's byte.
     //
-    // Calibration: SSL360's UF8 GR ramp in dual_35_cs_gr_ramp uses
-    // byte 0x02 as the IDLE/no-GR floor and ramps 0x02..0x18 across
-    // 0..20 dB (23 distinct values, see docs/protocol-notes.md:375).
-    // Span = 22 byte-units, baseline = 0x02. Mapping per SSL spec:
-    //   gr ≤ 0  → 0x00 (LED off, slightly below SSL's 0x02 idle)
-    //   gr > 0  → round(0x02 + gr × 22 / 20)
-    // Earlier 0..0x18 over 10 dB read way too hot; 0..0x18 over 20 dB
-    // dropped the floor offset and read too cold below 4 dB (Frank
-    // 2026-05-07).
+    // Calibration: identical 30-sub-step ladder as UC1 (UC1Surface.cpp
+    // pushGainReduction). One sub-step = 0.667 dB. SSL360's capture
+    // (dual_35_cs_gr_ramp) showed UF8 byte 0x05 ↔ UC1 LED 0 full
+    // (sub 6), 0x0A ↔ LED 1 full (sub 12), 0x18 ↔ LED 4 sub 3 (sub 27).
+    // Map sub-step → byte: 0 → 0x00 off; 1..30 → round(0x02 + sub×22/30).
+    // Both meters now light up in lock-step at every dB level.
     // Ballistics: up immediately, down 1 byte/tick — Plugin's
     // GainReduction_dB tracks the signal envelope tightly so the raw
     // byte swings several positions per audio beat without rate-limit.
@@ -5410,11 +5407,15 @@ void onTimer()
                         gr += offsetDb;
                         if (gr < 0) gr = -gr;
                         if (gr > 20.0) gr = 20.0;
-                        // SSL spec: floor 0x02, span 0x16 over 20 dB.
-                        const uint8_t newByte = (gr <= 0.001)
+                        // Same 30-step sub-step ladder UC1 uses.
+                        // sub = round(gr × 30 / 20); byte 0x02..0x18.
+                        int sub = static_cast<int>(std::lround(gr * 1.5));
+                        if (sub < 0) sub = 0;
+                        if (sub > 30) sub = 30;
+                        const uint8_t newByte = (sub == 0)
                             ? uint8_t(0x00)
                             : static_cast<uint8_t>(
-                                std::lround(0x02 + gr * (22.0 / 20.0)));
+                                std::lround(0x02 + sub * (22.0 / 30.0)));
                         uint8_t& held = g_uf8GrBytes[focStrip];
                         if (newByte > held) held = newByte;
                         else if (held > newByte) --held;
