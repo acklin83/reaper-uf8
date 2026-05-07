@@ -5336,11 +5336,16 @@ void onTimer()
     // strip — earlier mistake was treating bytes 5..11 as zero-padding,
     // so all GR rendered onto strip 1 only. Now: locate the focused
     // track inside the visible bank and stamp its strip's byte.
-    // Calibration: byte 0x00 = rest (no LEDs), byte 0x18 = 20 dB GR
-    // (Vollausschlag, SSL native GR range — see docs/protocol-notes.md:417,
-    // mechanical BC needle is 0..200 = 0..20 dB and the LED strips
-    // match). 1.2 byte/dB. Earlier 10 dB Vollausschlag read hotter than
-    // the plug-in's own meter (Frank 2026-05-07).
+    //
+    // Calibration: SSL360's UF8 GR ramp in dual_35_cs_gr_ramp uses
+    // byte 0x02 as the IDLE/no-GR floor and ramps 0x02..0x18 across
+    // 0..20 dB (23 distinct values, see docs/protocol-notes.md:375).
+    // Span = 22 byte-units, baseline = 0x02. Mapping per SSL spec:
+    //   gr ≤ 0  → 0x00 (LED off, slightly below SSL's 0x02 idle)
+    //   gr > 0  → round(0x02 + gr × 22 / 20)
+    // Earlier 0..0x18 over 10 dB read way too hot; 0..0x18 over 20 dB
+    // dropped the floor offset and read too cold below 4 dB (Frank
+    // 2026-05-07).
     // Ballistics: up immediately, down 1 byte/tick — Plugin's
     // GainReduction_dB tracks the signal envelope tightly so the raw
     // byte swings several positions per audio beat without rate-limit.
@@ -5405,8 +5410,11 @@ void onTimer()
                         gr += offsetDb;
                         if (gr < 0) gr = -gr;
                         if (gr > 20.0) gr = 20.0;
-                        const uint8_t newByte = static_cast<uint8_t>(
-                            std::lround(gr * (0x18 / 20.0)));
+                        // SSL spec: floor 0x02, span 0x16 over 20 dB.
+                        const uint8_t newByte = (gr <= 0.001)
+                            ? uint8_t(0x00)
+                            : static_cast<uint8_t>(
+                                std::lround(0x02 + gr * (22.0 / 20.0)));
                         uint8_t& held = g_uf8GrBytes[focStrip];
                         if (newByte > held) held = newByte;
                         else if (held > newByte) --held;
