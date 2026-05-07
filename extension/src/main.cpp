@@ -4640,27 +4640,21 @@ ResolvedLed resolveLed_(uf8::Uf8GlobalLed cell,
     const auto bid = buttonIdForGlobalLed(cell);
     if (bid == uf8::bindings::ButtonId::None) return r;
     const int activeLayer = uf8::bindings::getActiveLayer();
+
+    // Only override when the user has explicitly touched this binding.
+    // "Touched" = an entry exists in the layer's bindings map, even if
+    // every field is at default — the act of saving (via the editor)
+    // creates the entry. A user who picks deliberate-white on a cell
+    // whose firmware default is non-white (zoom row red/green/yellow)
+    // now gets white. A user who NEVER opened the editor for a cell
+    // gets the table-default colour, untouched. Frank 2026-05-07
+    // flagged that white edits weren't surviving REAPER restart
+    // because the previous "ledTouched" heuristic couldn't tell
+    // factory white from user-chosen white — they're byte-identical.
+    if (!uf8::bindings::hasBinding(activeLayer, bid)) return r;
+
     const auto bd = uf8::bindings::getBinding(activeLayer, bid);
     const auto& slot = bd.shortPress[static_cast<int>(mod)];
-
-    // No override only when the binding is TRULY untouched: empty
-    // slot, no ledShowWhenEmpty flag, AND every LED knob still at
-    // its factory default (white@Bright active, white@Dim inactive).
-    // The moment the user touches any LED setting OR binds an
-    // action, we apply the binding's appearance — including a
-    // deliberate white. Without the "ledTouched" check, a user
-    // setting colour=red on an unbound zoom button gets serialised
-    // fine but the next REAPER restart shows the cell's hardcoded
-    // table colour because slot.type stays Noop (Frank 2026-05-06).
-    using B = uf8::bindings::Brightness;
-    const bool slotEmpty = (slot.type == uf8::bindings::ActionType::Noop);
-    const bool ledTouched =
-        !(bd.color[0] == 0xFF && bd.color[1] == 0xFF && bd.color[2] == 0xFF
-          && bd.brightness == B::Bright
-          && bd.inactiveColor[0] == 0xFF && bd.inactiveColor[1] == 0xFF
-          && bd.inactiveColor[2] == 0xFF
-          && bd.inactiveBrightness == B::Dim);
-    if (slotEmpty && !bd.ledShowWhenEmpty && !ledTouched) return r;
 
     uint8_t rgb[3];
     uf8::bindings::Brightness bri;

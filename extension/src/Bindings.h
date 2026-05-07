@@ -386,6 +386,17 @@ void onMixerVisibilityChanged(bool visible);
 // each frame). Returns a default-constructed Binding if no entry exists.
 Binding getBinding(int layer, ButtonId id);
 
+// Whether the layer has an entry for this id at all. Distinguishes
+// "user has touched this binding" (entry exists, even if all fields
+// are at defaults) from "untouched" (no entry, getBinding would
+// return Binding{}). The LED pusher uses this to decide whether to
+// honour the binding's appearance (entry exists → user-customised)
+// or fall through to the cell's table-default colour (no entry →
+// firmware/factory look). Without this distinction, a user who
+// picks white deliberately on a non-white-table cell can't get
+// white because Binding{} also has white as default.
+bool hasBinding(int layer, ButtonId id);
+
 // User Soft-Key Bank accessors. bankIdx 0..kUserBankCount-1, slotIdx
 // 0..kUserBankSlots-1. Out-of-range indices return defaults / silently
 // ignore writes.

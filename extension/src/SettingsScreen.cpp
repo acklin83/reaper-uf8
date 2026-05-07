@@ -2035,15 +2035,23 @@ void drawBindingEditor(ImGui_Context* ctx, int layer, ButtonId id)
 
     ImGui_Spacing(ctx);
     ImGui_Separator(ctx);
+    bool cleared = false;
     if (ImGui_Button(ctx, "Clear binding (Do nothing)",
                      /*size_w*/ nullptr, /*size_h*/ nullptr)) {
-        bd = Binding{};   // reset to default (Noop, Momentary)
-        dirty = true;
+        // Remove the entry entirely so the LED pusher's hasBinding
+        // check returns false → cell falls back to its table-default
+        // colour. Just resetting to Binding{} would leave a default-
+        // valued entry that resolveLed_ now treats as "user touched
+        // it" and renders white-Bright/white-Dim, hiding the firmware
+        // default the user expects after a Clear.
+        cleared = true;
+        bd = Binding{};   // also reflect the cleared state in this frame's UI snapshot
     }
 
     popBindingsTheme(ctx, themePushed);
 
-    if (dirty) setBinding(layer, id, bd);
+    if (cleared) clearBinding(layer, id);
+    else if (dirty) setBinding(layer, id, bd);
 
     ImGui_PopID(ctx);
 }

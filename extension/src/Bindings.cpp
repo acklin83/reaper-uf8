@@ -1688,6 +1688,14 @@ Binding getBinding(int layer, ButtonId id)
     return it->second;
 }
 
+bool hasBinding(int layer, ButtonId id)
+{
+    std::lock_guard<std::mutex> lk(g_cfgMutex);
+    if (layer < 0 || layer > 2 || id == ButtonId::None) return false;
+    return g_cfg.layers[layer].bindings.find(id)
+        != g_cfg.layers[layer].bindings.end();
+}
+
 void setBinding(int layer, ButtonId id, const Binding& bd)
 {
     if (layer < 0 || layer > 2 || id == ButtonId::None) return;
