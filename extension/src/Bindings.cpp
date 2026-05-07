@@ -363,24 +363,26 @@ void seedFactoryDefaults_(Config& c)
         spShift.action = "instance_cycle";
     }
 
-    // Automation row — one builtin per mode (no magic params in JSON).
-    // Colours mirror the hardware LED table (Protocol.cpp kUf8GlobalLedTable)
-    // so the Bindings editor displays the same swatch the device shows.
+    // Automation row — one builtin per mode. Factory colours all white;
+    // the user sets each LED themselves via Settings → Bindings (Frank
+    // 2026-05-07: explicitly does NOT want hardware-default colours
+    // imposed). The hardware LED table in Protocol.cpp is now only a
+    // fallback for the rare 2-arg buildUf8GlobalLed call paths that
+    // bypass resolveLed_.
     L1[ButtonId::AutoOff]   = mkBuiltin("auto_off",   Behavior::Momentary, "OFF");
-    L1[ButtonId::AutoRead]  = mkBuiltin("auto_read",  Behavior::Momentary, "READ",    0,   255,   0);  // green
-    L1[ButtonId::AutoWrite] = mkBuiltin("auto_write", Behavior::Momentary, "WRITE", 255,     0,   0);  // red
-    L1[ButtonId::AutoTrim]  = mkBuiltin("auto_trim",  Behavior::Momentary, "TRIM",  255,   128,   0);  // orange
-    L1[ButtonId::AutoLatch] = mkBuiltin("auto_latch", Behavior::Momentary, "LATCH", 255,     0,   0);  // red
-    L1[ButtonId::AutoTouch] = mkBuiltin("auto_touch", Behavior::Momentary, "TOUCH", 255,   255,   0);  // yellow
+    L1[ButtonId::AutoRead]  = mkBuiltin("auto_read",  Behavior::Momentary, "READ");
+    L1[ButtonId::AutoWrite] = mkBuiltin("auto_write", Behavior::Momentary, "WRITE");
+    L1[ButtonId::AutoTrim]  = mkBuiltin("auto_trim",  Behavior::Momentary, "TRIM");
+    L1[ButtonId::AutoLatch] = mkBuiltin("auto_latch", Behavior::Momentary, "LATCH");
+    L1[ButtonId::AutoTouch] = mkBuiltin("auto_touch", Behavior::Momentary, "TOUCH");
 
-    // Zoom pad — bundled builtins (REAPER action + LED feedback). Phase B
-    // collapses these into ActionType::Reaper once per-binding LED config
-    // lands.
-    L1[ButtonId::ZoomUp]     = mkBuiltin("zoom_up",     Behavior::Momentary, "ZOOM UP",      0, 255,   0);  // green
-    L1[ButtonId::ZoomDown]   = mkBuiltin("zoom_down",   Behavior::Momentary, "ZOOM DOWN",  255, 255,   0);  // yellow
+    // Zoom pad — bundled builtins. Factory colours all white; user
+    // chooses per LED.
+    L1[ButtonId::ZoomUp]     = mkBuiltin("zoom_up",     Behavior::Momentary, "ZOOM UP");
+    L1[ButtonId::ZoomDown]   = mkBuiltin("zoom_down",   Behavior::Momentary, "ZOOM DOWN");
     L1[ButtonId::ZoomLeft]   = mkBuiltin("zoom_left",   Behavior::Momentary, "ZOOM LEFT");
     L1[ButtonId::ZoomRight]  = mkBuiltin("zoom_right",  Behavior::Momentary, "ZOOM RIGHT");
-    L1[ButtonId::ZoomCenter] = mkBuiltin("zoom_center", Behavior::Momentary, "FIT",        255,   0,   0);  // red
+    L1[ButtonId::ZoomCenter] = mkBuiltin("zoom_center", Behavior::Momentary, "FIT");
 
     // Mode toggles.
     L1[ButtonId::Flip]      = mkBuiltin("flip",                  Behavior::Toggle,    "FLIP");
@@ -1090,60 +1092,45 @@ bool parseLayer_(wdl_json_element* lobj, Layer& out)
     return true;
 }
 
-// Pre-2026-05-02 configs were seeded with white for ALL builtins.
-// Hardware actually drives Auto*/Zoom* in colour; this one-shot
-// upgrade patches in the hardware default so the editor's swatch
-// matches reality. Was previously running unconditionally inside
-// parseLayer_ — that clobbered any later user-chosen white because
-// chosen white is byte-identical to factory white. Now gated on
-// config version < 4 in load(): runs once on the first migration
-// and then never again, so user edits are durable.
-void upgradeWhiteBuiltinColours_(Layer& L)
+// v4 → v5 reset: wipe ALL Auto-row + Zoom-pad colours to white.
+// Frank 2026-05-07: factory hardware-default colours are not wanted —
+// every LED is user-chosen via Settings → Bindings. Configs created
+// before this rule had auto_*/zoom_* coloured by seedFactoryDefaults_
+// and/or the old in-parseLayer migration. This one-shot upgrade
+// resets them to white so the editor presents a blank canvas.
+// Buttons whose binding the user has explicitly recoloured to
+// something OTHER than the previous factory value are left alone
+// (the upgrade only touches bindings whose colour exactly matches
+// the historical hardcoded swatch).
+void upgradeStripFactoryColours_(Layer& L)
 {
+    struct Reset { const char* action; uint8_t r, g, b; };
+    static constexpr Reset kResets[] = {
+        {"auto_read",    0,   255,   0},
+        {"auto_write",   255, 0,     0},
+        {"auto_trim",    255, 128,   0},
+        {"auto_latch",   255, 0,     0},
+        {"auto_touch",   255, 255,   0},
+        {"zoom_up",      0,   255,   0},
+        {"zoom_down",    255, 255,   0},
+        {"zoom_center",  255, 0,     0},
+    };
     for (auto& kv : L.bindings) {
         Binding& bd = kv.second;
-        ButtonId bid = kv.first;
         ActionStep& sp = bd.shortPress[
             static_cast<int>(Modifier::Plain)];
         if (sp.type != ActionType::Builtin) continue;
-        if (!(bd.color[0] == 0xFF && bd.color[1] == 0xFF && bd.color[2] == 0xFF)) continue;
-        struct Patch { const char* action; uint8_t r, g, b; };
-        static constexpr Patch kPatches[] = {
-            {"auto_read",    0,   255,   0},
-            {"auto_write",   255, 0,     0},
-            {"auto_trim",    255, 128,   0},
-            {"auto_latch",   255, 0,     0},
-            {"auto_touch",   255, 255,   0},
-            {"zoom_up",      0,   255,   0},
-            {"zoom_down",    255, 255,   0},
-            {"zoom_center",  255, 0,     0},
-        };
-        uint8_t pr = 0xFF, pg = 0xFF, pb = 0xFF;
-        bool patched = false;
-        for (const auto& p : kPatches) {
-            if (sp.action == p.action) {
-                pr = p.r; pg = p.g; pb = p.b;
-                patched = true;
-                break;
+        for (const auto& rs : kResets) {
+            if (sp.action != rs.action) continue;
+            const bool matchesOld =
+                (bd.color[0] == rs.r && bd.color[1] == rs.g && bd.color[2] == rs.b);
+            if (matchesOld) {
+                bd.color[0] = 0xFF; bd.color[1] = 0xFF; bd.color[2] = 0xFF;
+                bd.inactiveColor[0] = 0xFF;
+                bd.inactiveColor[1] = 0xFF;
+                bd.inactiveColor[2] = 0xFF;
             }
-        }
-        if (!patched && sp.action == "automation_mode") {
-            switch (sp.param) {
-                case 1: pr = 0;   pg = 255; pb = 0;   patched = true; break;
-                case 2: pr = 255; pg = 255; pb = 0;   patched = true; break;
-                case 3: pr = 255; pg = 0;   pb = 0;   patched = true; break;
-                case 4:
-                case 5: pr = 255; pg = 0;   pb = 0;   patched = true; break;
-                case 0:
-                    if (bid == ButtonId::AutoTrim) {
-                        pr = 255; pg = 128; pb = 0; patched = true;
-                    }
-                    break;
-            }
-        }
-        if (patched) {
-            bd.color[0]         = pr; bd.color[1]         = pg; bd.color[2]         = pb;
-            bd.inactiveColor[0] = pr; bd.inactiveColor[1] = pg; bd.inactiveColor[2] = pb;
+            break;
         }
     }
 }
@@ -1233,12 +1220,14 @@ void registerBuiltin(const char* name, BuiltinDescriptor desc)
 // reach existing configs. load() runs every defined upgrade step in
 // order, then writes the bumped version back so the upgrade is
 // idempotent across REAPER restarts.
-// v4 (2026-05-07): "white-builtin colour migration" moved out of
-// parseLayer_ into a one-shot upgrade gated on version < 4. Previous
-// versions ran the migration every load and overwrote user-chosen
-// white with the hardware default colour (zoom-pad red/green/yellow,
-// auto row coloured) — making white edits non-durable.
-constexpr int kCurrentBindingsVersion = 4;
+// v5 (2026-05-07): zoom + auto factory colours abolished — every LED
+// is user-chosen, no firmware/factory hint. v4→v5 upgrade resets the
+// historical hardcoded swatches (auto_read/green, zoom_up/green, …)
+// back to white so the editor starts with a blank canvas; user-edits
+// to anything other than the old factory swatch are preserved.
+// v4 (2026-05-07): unused — bumped only to gate the colour-migration
+// fix that landed mid-day; superseded by v5 the same day.
+constexpr int kCurrentBindingsVersion = 5;
 
 // Upgrade hook: existing configs get factory long-press defaults on
 // the FLIP button (send_this / recv_this+Shift) without touching any
@@ -1298,8 +1287,8 @@ void load()
             if (tmp.version < 3) {
                 for (auto& L : tmp.layers) upgradeSslSoftkeyLabels_(L);
             }
-            if (tmp.version < 4) {
-                for (auto& L : tmp.layers) upgradeWhiteBuiltinColours_(L);
+            if (tmp.version < 5) {
+                for (auto& L : tmp.layers) upgradeStripFactoryColours_(L);
             }
             tmp.version = kCurrentBindingsVersion;
             g_cfg = std::move(tmp);

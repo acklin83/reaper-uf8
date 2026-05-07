@@ -4641,17 +4641,16 @@ ResolvedLed resolveLed_(uf8::Uf8GlobalLed cell,
     if (bid == uf8::bindings::ButtonId::None) return r;
     const int activeLayer = uf8::bindings::getActiveLayer();
 
-    // Only override when the user has explicitly touched this binding.
-    // "Touched" = an entry exists in the layer's bindings map, even if
-    // every field is at default — the act of saving (via the editor)
-    // creates the entry. A user who picks deliberate-white on a cell
-    // whose firmware default is non-white (zoom row red/green/yellow)
-    // now gets white. A user who NEVER opened the editor for a cell
-    // gets the table-default colour, untouched. Frank 2026-05-07
-    // flagged that white edits weren't surviving REAPER restart
-    // because the previous "ledTouched" heuristic couldn't tell
-    // factory white from user-chosen white — they're byte-identical.
-    if (!uf8::bindings::hasBinding(activeLayer, bid)) return r;
+    // No binding entry → LED OFF. Frank 2026-05-07: every LED is user-
+    // chosen, full stop. Without an entry in the layer's bindings map,
+    // the cell stays dark — no hardware-table colour, no "this button
+    // exists" hint. The act of saving anything in the Bindings editor
+    // creates the entry; clearing it removes the entry; the LED
+    // pusher's behaviour follows that signal exactly.
+    if (!uf8::bindings::hasBinding(activeLayer, bid)) {
+        r.state = uf8::GlobalLedState::Off;
+        return r;
+    }
 
     const auto bd = uf8::bindings::getBinding(activeLayer, bid);
     const auto& slot = bd.shortPress[static_cast<int>(mod)];
