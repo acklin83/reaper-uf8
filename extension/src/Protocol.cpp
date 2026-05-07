@@ -656,7 +656,7 @@ constexpr Uf8GlobalLedDef kUf8GlobalLedTable[] = {
     /* Quick1       */ {0x3C, kColourWhite},
     /* Quick2       */ {0x3B, kColourWhite},
     /* Quick3       */ {0x3A, kColourWhite},
-    /* Channel      */ {0x2E, kColourWhite},
+    /* Channel      */ {0x2E, kColourWhite, true},  // 3-state: new init zero-fills legacy mono → colour-pair alone leaves cell dark
     /* Btn360       */ {0x39, kColourWhite},
     // Send/Plugin 1..8 row uses the legacy mono-LED path (FF 3B 03 <id>
     // 00 <state>) — verified via probe 2026-04-30. Cells 0x37 (SP1) →

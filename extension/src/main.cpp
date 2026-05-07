@@ -444,6 +444,11 @@ std::atomic<bool> g_selFollowsColor{true};
 // behaviour). Controlled via Settings → Device.
 std::atomic<bool> g_grAnyFx{true};
 
+// When true, a parameter change on a non-selected track auto-selects that
+// track (Frank 2026-05-07 — V-Pot/SC/BC edits route to selection so UC1
+// follows automatically rather than requiring a manual select).
+std::atomic<bool> g_trackSelFollowsParam{false};
+
 // Meter ballistic. Peak = raw peak per Track_GetPeakInfo (no smoothing
 // here; REAPER's own ballistics already apply); VU = exp-smoothed dB
 // with τ=300 ms; RMS = exp-smoothed linear power with τ=600 ms then
@@ -539,6 +544,10 @@ void loadBrightness()
     const char* grAny = GetExtState("rea_sixty", "gr_any_fx");
     if (grAny && *grAny) {
         g_grAnyFx.store(std::atoi(grAny) != 0);
+    }
+    const char* tselFp = GetExtState("rea_sixty", "track_sel_follows_param");
+    if (tselFp && *tselFp) {
+        g_trackSelFollowsParam.store(std::atoi(tselFp) != 0);
     }
     const char* bm = GetExtState("rea_sixty", "ballistic_mode");
     if (bm && *bm) {
@@ -889,6 +898,20 @@ std::string routeName_(const StripRoute& r)
     return (r.sendCategory == 0)
         ? getTrackSendName(r.track, r.sendIndex)
         : getTrackReceiveName(r.track, r.sendIndex);
+}
+
+// Destination track for a send / source track for a receive. Returns
+// nullptr for hardware-output sends (which have no MediaTrack on the
+// far side). Used by the strip rendering to colour the strip with the
+// route target's colour and key per-track LED helpers off it.
+MediaTrack* routeTargetTrack_(const StripRoute& r)
+{
+    if (!r.active() || !r.valid || !r.track) return nullptr;
+    const char* tag = (r.sendCategory == 0) ? "P_DESTTRACK" : "P_SRCTRACK";
+    auto* other = static_cast<MediaTrack*>(GetSetTrackSendInfo(
+        r.track, r.sendCategory, r.sendIndex, tag, nullptr));
+    if (other && ValidatePtr2(nullptr, other, "MediaTrack*")) return other;
+    return nullptr;
 }
 
 // Nudge step per physical detent (seconds). User-settings-facing later;
@@ -3206,9 +3229,18 @@ void pushZonesForVisibleSlots()
             const int8_t cutKey = effMute ? 1 : 0;
             if (cutKey != g_lastCutLed[s]) {
                 g_lastCutLed[s] = cutKey;
+                // Colour follows the route target in routing modes so
+                // the Cut LED matches the strip's colour bar (which is
+                // already route-coloured via reaperColorForVisibleSlot).
+                MediaTrack* colourTr = tr;
+                if (routedFader && faderRoute.valid) {
+                    if (auto* rt = routeTargetTrack_(faderRoute)) colourTr = rt;
+                } else if (routedVpot && vpotRoute.valid) {
+                    if (auto* rt = routeTargetTrack_(vpotRoute)) colourTr = rt;
+                }
                 sendLedFrames(uf8::buildLedColourPair(
                     static_cast<uint8_t>(s), uf8::LedClass::Cut, effMute,
-                    ledColourFor(LedClass::Mute, tr)));
+                    ledColourFor(LedClass::Mute, colourTr)));
             }
         }
 
@@ -3349,9 +3381,21 @@ void pushZonesForVisibleSlots()
                     : uf8::TopSoftKeyState::Dim;
                 ledCacheKey = static_cast<int8_t>(userBankSlotPresent ? 8 : 7);
             } else if (isToggleCell) {
-                tssk = toggleOn ? uf8::TopSoftKeyState::On
-                                : uf8::TopSoftKeyState::Dim;
-                ledCacheKey = static_cast<int8_t>(toggleOn ? 6 : 5);
+                // Bright when this synthetic-toggle slot is the focused
+                // parameter OR the toggle's own state is "on". Frank
+                // 2026-05-07: previously the Phase soft-key LED only
+                // followed B_PHASE state, so pressing the soft-key
+                // (which sets focus to TrackPhase) didn't light up
+                // unless B_PHASE was already inverted — breaking the
+                // "focused = bright" convention every other CS soft-key
+                // follows.
+                const bool focusHit =
+                    (slotLink != softkey::kNoSlot
+                     && slotLink == focused.slotIdx);
+                const bool bright = focusHit || toggleOn;
+                tssk = bright ? uf8::TopSoftKeyState::On
+                              : uf8::TopSoftKeyState::Dim;
+                ledCacheKey = static_cast<int8_t>(bright ? 6 : 5);
             } else if (slotLink != softkey::kNoSlot && slotLink == focused.slotIdx) {
                 tssk = uf8::TopSoftKeyState::On;         // bright = focused
                 ledCacheKey = 2;
@@ -3640,15 +3684,23 @@ void pushZonesForVisibleSlots()
             vpotBar[s] = vpotPosFromPan(pan);
         }
 
-        // Upper scribble row — REAPER track name (max 7 chars). Even in
-        // Send/Receive routing mode the upper line stays on P_NAME so
-        // the user always knows which track this strip belongs to; the
-        // route's own name moves to the value line below.
+        // Upper scribble row — track name (max 7 chars). In Send/Receive
+        // routing mode the strip represents the routed entity, so show
+        // the send/receive name here (Frank 2026-05-07: each strip's
+        // upper line should reflect the routing target since the user
+        // is editing the route, not the bank track). Falls back to bank
+        // track P_NAME outside routing.
         {
             std::string n;
-            char name[256] = {0};
-            GetSetMediaTrackInfo_String(tr, "P_NAME", name, false);
-            n = name;
+            if (routedFader || routedVpot) {
+                const StripRoute& r = routedFader ? faderRoute : vpotRoute;
+                n = routeName_(r);
+            }
+            if (n.empty()) {
+                char name[256] = {0};
+                GetSetMediaTrackInfo_String(tr, "P_NAME", name, false);
+                n = name;
+            }
             if (n.empty()) {
                 char fallback[8];
                 std::snprintf(fallback, sizeof(fallback), "CH %d", realSlot + 1);
@@ -3819,15 +3871,24 @@ void pushZonesForVisibleSlots()
              || focused.slotIdx == uf8::ext::PluginAB
              || focused.slotIdx == uf8::ext::PluginHQ);
         if (routedFader || routedVpot) {
-            // Routing mode: the value line shows the route's NAME (send
-            // or receive label) so each strip is self-identifying. A
-            // recent pan tweak overlays the formatted pan readout for
-            // kPanOverlayMs before the name returns. Empty/invalid
-            // routes blank the line.
+            // Routing mode value line. The strip's UPPER line already
+            // shows the route name (Frank 2026-05-07), so the value
+            // line is freed to show the parameter the V-Pot is driving:
+            //   routedFader (default) — V-Pots free for pan → "Pan ±xx"
+            //   routedVpot  (Flip)     — V-Pots driving the route level →
+            //                            show route name here so the
+            //                            strip still self-identifies.
+            // Pan-overlay (recent tweak) wins over both for kPanOverlayMs
+            // when a route is active so the formatted pan readout stays
+            // visible while the user is twiddling.
             const StripRoute& r = routedFader ? faderRoute : vpotRoute;
             if (r.valid) {
                 if (g_panOverlayUntilMs[s] > nowMs_()) {
                     valLine = g_panOverlayText[s];
+                } else if (routedFader) {
+                    // Pan readout — track's own pan (V-Pots are free).
+                    const double pan = GetMediaTrackInfo_Value(tr, "D_PAN");
+                    valLine = composeValueLine("Pan", formatPanReadout(pan));
                 } else {
                     std::string n = routeName_(r);
                     if (n.size() > 19) n.resize(19);
@@ -4020,6 +4081,18 @@ void pushZonesForVisibleSlots()
             const bool flipPanHere = g_flip.load() && g_forcePan.load() && !flipHere;
             if (flipHere || flipPanHere) {
                 vpotMode[s] = 0x01;  // FLIP / FLIP+PAN: V-Pot = volume (unipolar)
+            } else if (!slot && focused.slotIdx != -1
+                       && !isVPotPanFocus(focused)
+                       && !g_forcePan.load()
+                       && !g_pluginFaderMode.load()) {
+                // A param is focused but doesn't resolve on this strip:
+                // synthetic toggles (Phase / A/B / HQ) that aren't VST3
+                // params, or a continuous param this strip's plug-in
+                // lacks. Position render sends the collapsed-bar marker
+                // 0x8000; mode 0x08 (bipolar) would draw that marker as
+                // a centre dot — leaving the previous V-Pot ring stuck
+                // visible. 0x03 ("no bar") clears the ring.
+                vpotMode[s] = 0x03;
             } else if (!slot) {
                 vpotMode[s] = 0x08;  // pan fallback — bipolar centre
             } else if (isBinarySlot(*slot)) {
@@ -4149,10 +4222,29 @@ void chaseLastTouchedFx()
     // hijack UC1 to the non-selected track. UF8 V-Pots are explicit
     // per-strip edits and shouldn't steal track focus from UC1; the
     // focused-param/slot update above is enough to keep the soft-key
-    // bank in sync. Plugin-GUI clicks on a different track still need
-    // an explicit selection change to bring UC1 along.
-    if (g_uc1_surface
-        && GetMediaTrackInfo_Value(tr, "I_SELECTED") > 0.5) {
+    // bank in sync.
+    //
+    // Settings opt-in "Track selection follows parameter change":
+    // domain-specific routing because the CS Channel (encoder 1) and BC
+    // Channel (encoder 2) on UC1 are independent track focuses. Frank
+    // 2026-05-07:
+    //   - SC/CS-domain edit → SetOnlyTrackSelected → REAPER selection
+    //     follows → focusedTrack_ + UF8 bank update via SetSurfaceSelected.
+    //   - BC-domain edit → only bcAnchorTrack_ updates → BC encoder/
+    //     section follows on UC1 without disturbing CS Channel or UF8 bank.
+    const bool isSelected = GetMediaTrackInfo_Value(tr, "I_SELECTED") > 0.5;
+    if (!isSelected && g_trackSelFollowsParam.load()) {
+        if (map->domain == uf8::Domain::BusComp) {
+            if (g_uc1_surface) g_uc1_surface->setBcAnchorTrack(tr);
+            return;
+        }
+        if (map->domain == uf8::Domain::ChannelStrip) {
+            SetOnlyTrackSelected(tr);
+            followSelectedInMixer(tr);
+            return;  // SetSurfaceSelected fires and updates UC1
+        }
+    }
+    if (g_uc1_surface && isSelected) {
         g_uc1_surface->setFocusedTrack(tr);
     }
 }
@@ -4196,9 +4288,26 @@ void commitDebouncedTouchReleases()
                 static_cast<int>(s), g_bankOffset.load(), visibleTrackCount());
             if (fr.active()) {
                 if (fr.valid) {
-                    SetTrackSendInfo_Value(fr.track, fr.sendCategory,
-                                           fr.sendIndex, "D_VOL",
-                                           pbToLinearVolume(touchPb));
+                    // Mirror the live fader handler's FLIP precedence:
+                    // FLIP on → write the route's D_PAN, FLIP off →
+                    // write the route's D_VOL. Earlier this branch
+                    // unconditionally wrote D_VOL, which combined with
+                    // the live handler's D_PAN writes during FLIP to
+                    // change BOTH pan and send volume on every fader
+                    // move (Frank 2026-05-07).
+                    if (g_flip.load()) {
+                        double pan = static_cast<double>(touchPb)
+                                   / static_cast<double>(kUf8FaderPbMax);
+                        pan = pan * 2.0 - 1.0;
+                        if (pan < -1.0) pan = -1.0;
+                        if (pan >  1.0) pan =  1.0;
+                        SetTrackSendInfo_Value(fr.track, fr.sendCategory,
+                                               fr.sendIndex, "D_PAN", pan);
+                    } else {
+                        SetTrackSendInfo_Value(fr.track, fr.sendCategory,
+                                               fr.sendIndex, "D_VOL",
+                                               pbToLinearVolume(touchPb));
+                    }
                 }
                 // active-but-invalid: eat the writeback, do NOT fall
                 // through to track-volume.
@@ -4344,11 +4453,15 @@ void pushVuMeter()
     // produce 1-byte drift on continuous audio (block boundaries don't
     // align with the cycle), which flickers the LED at the boundary
     // between two byte values. Up moves go through immediately; a drop
-    // is only accepted if the new byte is at least 2 below the held byte.
+    // is only accepted if the new byte is at least 2 below the held byte
+    // — except dropping to silence (raw == 0), which always passes so
+    // the bottom LED clears cleanly when audio stops (otherwise held=1
+    // would stick forever after any activity, leaving the lowest segment
+    // permanently lit).
     static std::array<uint8_t, 16> s_held{};
     auto stepByte = [](uint8_t& held, uint8_t raw) {
         if (raw > held) held = raw;
-        else if (held - raw >= 2) held = raw;
+        else if (raw == 0 || held - raw >= 2) held = raw;
         // else: hold previous
         return held;
     };
@@ -4615,7 +4728,8 @@ uf8::GlobalLedState brightnessToState_(uf8::bindings::Brightness b)
 
 ResolvedLed resolveLed_(uf8::Uf8GlobalLed cell,
                          bool active,
-                         uf8::bindings::Modifier mod)
+                         uf8::bindings::Modifier mod,
+                         bool useLongPressSlot = false)
 {
     ResolvedLed r;
     r.state = active ? uf8::GlobalLedState::Bright
@@ -4636,7 +4750,13 @@ ResolvedLed resolveLed_(uf8::Uf8GlobalLed cell,
     }
 
     const auto bd = uf8::bindings::getBinding(activeLayer, bid);
-    const auto& slot = bd.shortPress[static_cast<int>(mod)];
+    // Pick the slot the active state is being driven by. Long-press
+    // actions (e.g. send_this on FLIP) live in bd.longPress[]; reading
+    // their LedOverride requires honouring lastFiredWasLongPress so the
+    // user's per-long-press colour choice in the Bindings UI lands.
+    const auto& slot = useLongPressSlot
+                         ? bd.longPress[static_cast<int>(mod)]
+                         : bd.shortPress[static_cast<int>(mod)];
 
     uint8_t rgb[3];
     uf8::bindings::Brightness bri;
@@ -4760,20 +4880,25 @@ void sendUf8GlobalLed(uf8::Uf8GlobalLed cell, uf8::GlobalLedState callerState)
     ResolvedLed r;
     if (armed && !(callerActive && lastFiredMatchesHeld)) {
         // Preview: render the held modifier slot's INACTIVE
-        // appearance (colour + brightness).
-        r = resolveLed_(cell, /*active*/ false, mod);
+        // appearance (colour + brightness). Preview is a hold-state
+        // signal, not a press-time decision, so always read the
+        // short-press slot for the held modifier.
+        r = resolveLed_(cell, /*active*/ false, mod, /*long*/ false);
     } else {
         // Normal path. For the active branch, resolve from the slot
-        // whose action last actually fired (so Shift+press of a
-        // Toggle button keeps showing the Shift slot's active colour).
+        // whose action last actually fired — including whether it was
+        // a long-press (so e.g. send_this active on FLIP renders the
+        // user's long-press LedOverride colour).
         uf8::bindings::Modifier resolveMod = uf8::bindings::Modifier::Plain;
+        bool useLongPress = false;
         if (callerActive) {
             const auto bid = buttonIdForGlobalLed(cell);
             if (bid != uf8::bindings::ButtonId::None) {
-                resolveMod = uf8::bindings::lastFiredModifier(bid);
+                resolveMod   = uf8::bindings::lastFiredModifier(bid);
+                useLongPress = uf8::bindings::lastFiredWasLongPress(bid);
             }
         }
-        r = resolveLed_(cell, callerActive, resolveMod);
+        r = resolveLed_(cell, callerActive, resolveMod, useLongPress);
     }
 
     // Per-cell dedup. Same (state, colour) as last push → skip USB
@@ -4970,26 +5095,21 @@ void pushUf8GlobalLeds()
         g_lastForcePan = forcePan;
     }
 
-    // FLIP LED — three sources of truth, top wins:
-    //   1. send_this active (long-press default) → bright green
-    //   2. recv_this active (long-press + Shift)  → bright red
-    //   3. flip toggle on / off                   → existing white state
-    if (flip != g_lastFlip || routingKey != g_lastRoutingKey || !g_globalLedsInit) {
-        if (sendThis) {
-            sendLedFrames(uf8::buildUf8GlobalLed(
-                uf8::Uf8GlobalLed::Flip,
-                uf8::GlobalLedState::Bright,
-                uf8::ledColourForTrackRgb(0x00FF00)));   // green
-        } else if (recvThis) {
-            sendLedFrames(uf8::buildUf8GlobalLed(
-                uf8::Uf8GlobalLed::Flip,
-                uf8::GlobalLedState::Bright,
-                uf8::ledColourForTrackRgb(0xFF0000)));   // red
-        } else {
-            sendUf8GlobalLed(uf8::Uf8GlobalLed::Flip, flip);
-        }
-        g_lastFlip = flip;
-    }
+    // FLIP LED — bright when V-Pots are being used for something OTHER
+    // than pan: flip toggle on (V-Pots driving plug-in params), or any
+    // routing builtin that targets V-Pots (send_this / recv_this /
+    // specific-slot send/recv with "Flip onto V-Pots" checked). Fader-
+    // routing variants leave the V-Pots free for pan and so they do
+    // NOT light FLIP (Frank 2026-05-07: pressing CHANNEL bound to "8
+    // sends of focused track" with default-Faders was lighting FLIP
+    // even though the V-Pots stayed in pan mode).
+    const bool vpotRoutingActive =
+           g_sendVpotThisTrack.load()
+        || g_recvVpotThisTrack.load()
+        || g_sendVpotAllIdx.load() >= 0
+        || g_recvVpotAllIdx.load() >= 0;
+    sendUf8GlobalLed(uf8::Uf8GlobalLed::Flip, flip || vpotRoutingActive);
+    g_lastFlip = flip;
 
     // Shift/Fine LED — momentary, follows the held state of 0x6F.
     if (shiftHeld != g_lastShiftHeld || !g_globalLedsInit) {
@@ -6142,6 +6262,17 @@ void reasixty_setGrAnyFx(bool enabled)
     SetExtState("rea_sixty", "gr_any_fx", enabled ? "1" : "0", true);
 }
 
+bool reasixty_trackSelFollowsParam()
+{
+    return g_trackSelFollowsParam.load();
+}
+
+void reasixty_setTrackSelFollowsParam(bool follow)
+{
+    g_trackSelFollowsParam.store(follow);
+    SetExtState("rea_sixty", "track_sel_follows_param", follow ? "1" : "0", true);
+}
+
 // Build a diagnostic .zip on the user's Desktop with extension state +
 // any of our existing trace logs (frame trace, ColorSync log) so a user
 // can email us a single archive when something misbehaves. Cheap; runs
@@ -6164,29 +6295,39 @@ namespace {
     int                          g_pickerLayer     = 0;
     uf8::bindings::ButtonId      g_pickerId        = uf8::bindings::ButtonId::None;
     bool                         g_pickerLongPress = false;
+    // Modifier slot (Plain/Shift/Cmd/Ctrl) being edited. -1 = legacy default
+    // = Plain. Tracked so chains under non-Plain modifier slots route to
+    // the right destination on poll.
+    int                          g_pickerModIdx    = 0;
+    // Step index inside the chain — 0 = inline step (legacy), >0 = the
+    // (idx-1)'th element of extraSteps. Without this, the poll writes
+    // every picked action to step 0 regardless of which step's "Browse
+    // Action..." button was clicked (Frank 2026-05-07 — Lua picked for
+    // step 2 landed in step 1).
+    int                          g_pickerStepIdx   = 0;
 }
 
 void reasixty_actionPickerStart(int layer, uf8::bindings::ButtonId id,
-                                bool longPress)
+                                bool longPress, int modIdx, int stepIdx)
 {
-    if (g_pickerActive) {
-        // Replace any previous session — REAPER's PromptForAction(1, ...)
-        // already closes a prior picker before opening the new one.
-    }
     g_pickerLayer     = layer;
     g_pickerId        = id;
     g_pickerLongPress = longPress;
+    g_pickerModIdx    = modIdx;
+    g_pickerStepIdx   = stepIdx;
     g_pickerActive    = true;
     PromptForAction(/*session_mode*/ 1, /*init_id*/ 0, /*section_id*/ 0);
 }
 
 bool reasixty_actionPickerActiveFor(int layer, uf8::bindings::ButtonId id,
-                                    bool longPress)
+                                    bool longPress, int modIdx, int stepIdx)
 {
     return g_pickerActive
         && g_pickerLayer == layer
         && g_pickerId == id
-        && g_pickerLongPress == longPress;
+        && g_pickerLongPress == longPress
+        && g_pickerModIdx == modIdx
+        && g_pickerStepIdx == stepIdx;
 }
 
 void reasixty_actionPickerCancel()
@@ -6208,6 +6349,21 @@ std::string reasixty_resolveActionName(const std::string& action)
     if (cmd <= 0) return "(unresolved)";
     const char* n = kbd_getTextFromCmd(cmd, nullptr);
     return (n && *n) ? std::string(n) : std::string("(no name)");
+}
+
+// True when the action stored in this binding is a REAPER toggle —
+// GetToggleCommandState2 returns 0 or 1 (state known) rather than -1
+// (no toggle state). The bindings editor uses this to auto-fire toggle
+// actions on the inactive edge (no opt-in needed) while exposing a
+// "fire again on inactive" checkbox for one-shot actions.
+bool reasixty_actionIsToggle(const std::string& action)
+{
+    if (action.empty()) return false;
+    int cmd = (action[0] == '_')
+        ? NamedCommandLookup(action.c_str())
+        : std::atoi(action.c_str());
+    if (cmd <= 0) return false;
+    return GetToggleCommandState2(SectionFromUniqueID(0), cmd) >= 0;
 }
 
 // SWELL's BrowseForSaveFile isn't in REAPER's plug-in SDK header but
@@ -6309,9 +6465,24 @@ void reasixty_actionPickerPoll()
     else           actionStr = std::to_string(r);
     using namespace uf8::bindings;
     Binding bd = getBinding(g_pickerLayer, g_pickerId);
-    const int plain = static_cast<int>(Modifier::Plain);
-    if (g_pickerLongPress) bd.longPress[plain].action  = actionStr;
-    else                   bd.shortPress[plain].action = actionStr;
+    const int modIdx = (g_pickerModIdx < 0 || g_pickerModIdx >= kModifierCount)
+                         ? static_cast<int>(Modifier::Plain)
+                         : g_pickerModIdx;
+    auto& slot = g_pickerLongPress ? bd.longPress[modIdx]
+                                    : bd.shortPress[modIdx];
+    // Walk to the step the picker was opened for. stepCount(slot) == 1 + N
+    // extraSteps; idx 0 is the inline step, idx >= 1 indexes into
+    // extraSteps. Out-of-range falls back to step 0 — defensive guard
+    // against a stale picker session that outlived a "+ Add step" undo.
+    const int stepIdx = (g_pickerStepIdx >= 0
+                         && g_pickerStepIdx < stepCount(slot))
+                          ? g_pickerStepIdx : 0;
+    ActionStep& target = stepAt(slot, stepIdx);
+    target.action = actionStr;
+    // Picking a REAPER action via Browse implies the user wants this
+    // step to BE a REAPER action — set the type so the inline picker
+    // re-renders into the REAPER section without a separate radio click.
+    target.type   = ActionType::Reaper;
     setBinding(g_pickerLayer, g_pickerId, bd);
 }
 

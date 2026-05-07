@@ -88,6 +88,7 @@ public:
 
 private:
     void workerLoop_();
+    void runInit_();
     void startBulkRead_();
     static void readCallback_(libusb_transfer* xfer);
 
@@ -102,7 +103,14 @@ private:
     std::atomic<bool>     shuttingDown_{false};
     std::atomic<bool>     frameTrace_{false};
     std::atomic<uint64_t> grBytes_{0};
+    // True while runInitOnInitThread_() is replaying the boot sequence
+    // (handshake → 96-cell zero-fill → fader-tanz → LCD/colour init →
+    // motor re-engage). The worker thread skips draining the user-send
+    // queue while this is set so REAPER's onTimer pushes don't interleave
+    // with init frames; heartbeats + IN reads continue normally.
+    std::atomic<bool>     initInProgress_{false};
     std::thread           worker_;
+    std::thread           initThread_;
     std::string           lastError_;
     ButtonHandler         buttonHandler_;
     RawInputHandler       rawInputHandler_;

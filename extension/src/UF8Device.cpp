@@ -106,10 +106,25 @@ bool UF8Device::open()
 
     // Start the worker thread BEFORE the init replay — the worker pumps
     // async bulk IN reads, and without a drained IN endpoint the OUT
-    // pipeline stalls around frame 82 of the init sequence.
+    // pipeline stalls around frame 82 of the init sequence. Worker also
+    // emits keepalive heartbeats during the entire session including
+    // while runInit_() is replaying the boot sequence.
     shuttingDown_ = false;
+    initInProgress_ = true;
     worker_ = std::thread([this]{ workerLoop_(); });
 
+    // Init replay runs on its own thread so REAPER's plugin-load (which
+    // calls open() synchronously) doesn't block for ~9 s while the
+    // fader-tanz plays out. The worker skips draining the user-send queue
+    // while initInProgress_ is true so REAPER's onTimer pushes don't
+    // interleave with init frames; libusb serialises bulk_transfer per
+    // handle so heartbeats from the worker can safely fly alongside.
+    initThread_ = std::thread([this]{ runInit_(); });
+    return true;
+}
+
+void UF8Device::runInit_()
+{
     // Give the worker a beat to post its first IN transfer.
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
@@ -119,6 +134,7 @@ bool UF8Device::open()
     // motor-target phases for the motor to physically move). Default 2 ms
     // pacing for everything else matches SSL's observed inter-frame gap.
     for (const auto& f : kInitSequence) {
+        if (shuttingDown_.load()) { initInProgress_ = false; return; }
         if (f.delay_ms_before > 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(f.delay_ms_before));
         }
@@ -131,16 +147,9 @@ bool UF8Device::open()
         if (ircode < 0) {
             lastError_ = std::string("init sequence bulk OUT failed: ")
                        + libusb_error_name(ircode);
-            shuttingDown_ = true;
-            if (worker_.joinable()) worker_.join();
-            libusb_release_interface(handle_, kInterface);
-            libusb_close(handle_);
-            libusb_exit(ctx_);
-            handle_ = nullptr;
-            ctx_ = nullptr;
-            return false;
+            initInProgress_ = false;
+            return;
         }
-        // 2 ms baseline pacing matches SSL 360°'s observed inter-frame gap.
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
 
@@ -151,21 +160,17 @@ bool UF8Device::open()
     // command alone doesn't switch modes — UF8 firmware needs the
     // whole fader-position/motor/label/color sequence.
     //
-    // We filter out the text-zone frames though: the capture was taken on
-    // an SSL session that had "Kick", "Snarer", "OH" etc. on the scribble
-    // strips and those demo strings briefly flash before the timer
-    // overwrites them. Structural frames (layer mode, color, fader pos,
-    // motor, slot-active) stay — only text content is skipped.
+    // Filter out text frames: the capture had session text ("Kick",
+    // "Snarer", etc.) that would briefly flash before the 30 Hz timer
+    // overwrites them with REAPER-derived content.
     auto isTextFrame = [](const uint8_t* b, size_t sz) {
         if (sz < 5 || b[0] != 0xFF || b[1] != 0x66) return false;
         const uint8_t cmd = b[3];
-        return cmd == 0x04   // parameter label / plugin slot name
-            || cmd == 0x0B   // upper scribble strip
-            || cmd == 0x0C   // O/PdB readout
-            || cmd == 0x0E   // lower scribble / value line
-            || cmd == 0x17;  // CS Type
+        return cmd == 0x04 || cmd == 0x0B || cmd == 0x0C
+            || cmd == 0x0E || cmd == 0x17;
     };
     for (const auto& f : kLayerPluginMixerSequence) {
+        if (shuttingDown_.load()) { initInProgress_ = false; return; }
         if (isTextFrame(f.bytes, f.size)) continue;
         int transferred = 0;
         libusb_bulk_transfer(
@@ -177,13 +182,6 @@ bool UF8Device::open()
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-    // Plugin-Mixer color bar only renders when each strip's plugin slot is
-    // marked "populated". The layer-switch replay left every slot empty
-    // (FF 66 02 04 <strip>), which is why color pushes went through at the
-    // USB layer but nothing lit up. Send the "populated" 0x03 flag + 8
-    // non-empty slot-name frames to activate the bar. The strip names are
-    // placeholders — REAPER track names arrive on the scribble-strip via
-    // the MCU pipe, and ColorSync drives the bar via FF 66 09 18.
     auto sendFrame = [&](const std::vector<uint8_t>& f) {
         int t = 0;
         libusb_bulk_transfer(handle_, kEpOut,
@@ -192,19 +190,21 @@ bool UF8Device::open()
                              &t, 500);
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     };
+
+    // Plugin-Mixer color bar requires each strip's plugin slot to be
+    // marked "populated" + non-empty slot name.
     sendFrame(buildPluginSlotActive());
     for (uint8_t s = 0; s < 8; ++s) {
+        if (shuttingDown_.load()) { initInProgress_ = false; return; }
         char name[8];
         std::snprintf(name, sizeof(name), "TRK %u", static_cast<unsigned>(s + 1));
         sendFrame(buildPluginSlotName(s, name));
     }
 
-    // The captured layer-switch replay writes the session text that SSL
-    // 360° had on screen at capture time ("Kick", "Snarer", "OH", "-1.0",
-    // etc.). Blank every text zone on every strip so the user doesn't see
-    // those ghost strings in the ~33 ms before the 30 Hz timer overwrites
-    // them with REAPER-derived content.
+    // Blank every per-strip text zone so SSL's session text doesn't
+    // briefly flash before the 30 Hz timer paints REAPER state.
     for (uint8_t s = 0; s < 8; ++s) {
+        if (shuttingDown_.load()) { initInProgress_ = false; return; }
         sendFrame(buildStripTextUpper(s, ""));
         sendFrame(buildStripTextLower(s, ""));
         sendFrame(buildChannelStripType(s, "    "));
@@ -212,26 +212,19 @@ bool UF8Device::open()
         sendFrame(buildValueLine(s, ""));
     }
 
-    // LED + LCD brightness is set by main.cpp after open() using the
-    // brightness level persisted in REAPER's ExtState. We don't push
-    // here so the user's choice survives device re-open.
-
     // Re-engage all 8 motors after the init sequence. The captured init
-    // ends with FF 1D 02 strip 00 (motor DISABLE) for all strips at t=20.76
-    // — SSL 360° follows up at t=22.57+ with a per-strip echo+enable+target
-    // sweep that drives each fader to its current REAPER track volume.
-    // Without this, our subsequent REAPER-volume pushes via buildFaderPosition
-    // (FF 1E target) hit limp motors and the faders stay wherever the tanz
-    // left them — the user has to physically "abholen" each fader to engage
-    // it. Enabling here lets the existing onTimer push path drive the
-    // motors normally.
+    // ends with FF 1D 02 strip 00 (motor DISABLE) for all strips; without
+    // re-engaging here, REAPER-volume pushes via buildFaderPosition hit
+    // limp motors and faders stay wherever the tanz left them.
     for (uint8_t s = 0; s < 8; ++s) {
+        if (shuttingDown_.load()) { initInProgress_ = false; return; }
         sendFrame(buildMotorEnable(s, true));
     }
 
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-    return true;
+    // Init complete — worker can now drain the user-send queue.
+    initInProgress_ = false;
 }
 
 void UF8Device::close()
@@ -239,6 +232,10 @@ void UF8Device::close()
     if (!handle_) return;
     shuttingDown_ = true;
     pending_->cv.notify_all();
+    // Init thread polls shuttingDown_ between frames so it exits within
+    // ~1 frame (≤ 1 s for the longest pacing pause). Join before tearing
+    // down the libusb handle.
+    if (initThread_.joinable()) initThread_.join();
     if (worker_.joinable()) worker_.join();
 
     libusb_release_interface(handle_, kInterface);
@@ -318,10 +315,18 @@ void UF8Device::workerLoop_()
             pending_->cv.wait_for(lk, std::chrono::milliseconds(20),
                 [&] { return !pending_->q.empty() || shuttingDown_; });
             if (shuttingDown_) break;
-            constexpr size_t kMaxBatch = 16;
-            while (!pending_->q.empty() && batch.size() < kMaxBatch) {
-                batch.push_back(std::move(pending_->q.front()));
-                pending_->q.pop_front();
+            // Skip user-queue drain while the init thread is replaying the
+            // boot sequence. Heartbeats below still fire; user frames pile
+            // up in pending_->q until initInProgress_ flips false, then
+            // drain naturally on the next iteration. Without this, REAPER's
+            // onTimer pushes (e.g. fader positions, colour bars) interleave
+            // with init frames and the boot state ends up corrupted.
+            if (!initInProgress_.load()) {
+                constexpr size_t kMaxBatch = 16;
+                while (!pending_->q.empty() && batch.size() < kMaxBatch) {
+                    batch.push_back(std::move(pending_->q.front()));
+                    pending_->q.pop_front();
+                }
             }
         }
 

@@ -198,6 +198,30 @@ void UC1Surface::setFocusedTrack(void* track)
     refresh();
 }
 
+void UC1Surface::setBcAnchorTrack(void* track)
+{
+    if (track && !ValidatePtr2(nullptr, track, "MediaTrack*")) return;
+    if (track == bcAnchorTrack_) return;
+    // Match the BC-encoder code path: scroll-overlay flag + GR settle
+    // so the BC carousel triple repaints (header + prev/curr/next track
+    // names) and the GR needle doesn't briefly show the outgoing
+    // anchor's reduction value. Without the overlay, V-Pot-driven anchor
+    // changes update the BC display state but the user-visible carousel
+    // still shows the previous anchor.
+    bcScrollOverlayActive_ = true;
+    bcScrollOverlayUntil_ =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
+    bcAnchorTrack_ = track;
+    grSettleUntil_ = std::chrono::steady_clock::now()
+                   + std::chrono::milliseconds(250);
+    // Drop the BC mechanical needle to 0 immediately so the outgoing
+    // anchor's last GR value doesn't briefly read on the new anchor's
+    // meter. UC1Device's 50 Hz FF 5B stream resumes from the new
+    // anchor's pushGainReduction value once the settle window ends.
+    if (device_) device_->send(buildZeroGr());
+    invalidateCache();
+}
+
 void UC1Surface::invalidateCache()
 {
     ringCellCache_.clear();
@@ -687,32 +711,17 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
             // we set it after, refresh would emit buildCentralLabel
             // ("MAIN"/"CS 2") and overwrite the overlay header on the
             // same frame slot (FF 66 …01…). Decoded uc1_41 2026-05-01.
-            bcScrollOverlayActive_ = true;
-            bcScrollOverlayUntil_ =
-                std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
-            bcAnchorTrack_ = tr;
-            // Anchor change also drives the GR readback source — apply
-            // the same settle window as a focus change so the needle
-            // doesn't briefly read the outgoing anchor's GR value.
-            grSettleUntil_ = std::chrono::steady_clock::now()
-                           + std::chrono::milliseconds(250);
-            SetOnlyTrackSelected(tr);
-            reasixty_followSelectedInMixer(tr);
-            setFocusedTrack(tr);
-            // BC encoder navigates the BC anchor; force BC focus so
-            // central LCD + UF8 strips show BC info (matches user
-            // expectation: BC-encoder controls visible BC state).
-            const auto fp = uf8::getFocusedParam();
-            if (fp.domain != uf8::Domain::BusComp) {
-                uf8::setFocus({uf8::Domain::BusComp, 0});
-                // (refresh() runs below — picks up the new domain.)
-            }
-            // Explicit refresh — setFocusedTrack early-exits when
-            // focusedTrack_ already == tr (e.g. SetSurfaceSelected
-            // callback raced ahead), so the BC carousel triple
-            // wouldn't otherwise repaint on this detent. refresh() is
-            // gated to MAIN mode internally; idempotent if it already
-            // ran via the callback.
+            // Encoder 2 (BC encoder) ONLY moves the BC anchor + carousel
+            // display. It does NOT change REAPER's selected track, does
+            // NOT move the UF8 bank, does NOT touch focusedTrack_ (CS
+            // Channel). Frank 2026-05-07: "Encoder 2 soll nicht die
+            // channel-selection ändern, sondern einfach die anzeige BC
+            // und Channel für BC im UC1 display". Earlier behaviour
+            // (SetOnlyTrackSelected + setFocusedTrack) coupled the two
+            // independent track focuses and dragged UF8 along.
+            setBcAnchorTrack(tr);
+            // Explicit refresh — refresh() is gated to MAIN mode
+            // internally and idempotent.
             refresh();
         }
         if (logThis) {
@@ -1477,32 +1486,22 @@ void UC1Surface::pushFocusedParamReadout_()
 
     // Plug-in lookup track: prefer the touched-FX track (the one
     // chase last resolved a Link slot on), else fall back to UC1's
-    // focusedTrack_. The two diverge when the user edits a plug-in
-    // on a non-selected track — we still want to render the
-    // param-value readout for what they just edited.
+    // UC1 always renders the SELECTED track. A V-Pot edit on a non-selected
+    // track (Frank 2026-05-07) was previously hijacking UC1's readout and
+    // colour bar via g_focusedFxTrack; the Settings toggle "Track selection
+    // follows parameter change" handles that case explicitly by re-selecting
+    // the manipulated track, so UC1 here just mirrors focusedTrack_.
     //
-    // Both pointers can outlive their MediaTrack across project switch /
-    // track delete; ValidatePtr2 returns false for stale tracks. Without
-    // these guards lookupPluginOnTrack → TrackFX_GetCount segfaults on
-    // the freed pointer (crash report 2026-05-05 17:18, PC=0x1000000003145393
-    // which is the pointer-auth tag pattern of a destroyed MediaTrack).
-    void* lookupTrack = uf8::g_focusedFxTrack.load(std::memory_order_relaxed);
-    if (lookupTrack && !ValidatePtr2(nullptr, lookupTrack, "MediaTrack*")) {
-        lookupTrack = nullptr;
-        uf8::g_focusedFxTrack.store(nullptr, std::memory_order_relaxed);
-    }
-    if (!lookupTrack) lookupTrack = focusedTrack_;
+    // ValidatePtr2 guards against stale pointers across project switch /
+    // track delete (crash 2026-05-05 17:18, PC tag pattern of a freed
+    // MediaTrack — lookupPluginOnTrack → TrackFX_GetCount segfaulted).
+    void* lookupTrack = focusedTrack_;
     if (lookupTrack && !ValidatePtr2(nullptr, lookupTrack, "MediaTrack*")) {
         lookupTrack = nullptr;
     }
     if (!lookupTrack) return;
 
     auto match = uf8::lookupPluginOnTrack(lookupTrack, focused.domain);
-    if (!match.map && lookupTrack != focusedTrack_ && focusedTrack_
-        && ValidatePtr2(nullptr, focusedTrack_, "MediaTrack*")) {
-        lookupTrack = focusedTrack_;
-        match = uf8::lookupPluginOnTrack(lookupTrack, focused.domain);
-    }
     if (!match.map) return;
     const uf8::LinkSlot* slotPtr = uf8::findSlotByLinkIdx(*match.map,
                                                           focused.slotIdx);
@@ -1565,23 +1564,11 @@ void UC1Surface::pushFocusedParamReadout_()
         device_->send(buildDisplayInvalidate(otherZone));
     }
 
-    // Colour bar follows the touched plug-in's track colour. UC1's
-    // focusedTrack_ is gated to selection (so plug-in GUI clicks on a
-    // non-selected track don't hijack the surface) — but the COLOUR
-    // BAR + readout zone are about "which plug-in am I currently
-    // editing?", which is g_focusedFxTrack. Refresh() pushes the bar
-    // for focusedTrack_; we override it here while the user is editing.
-    if (void* fxTr = uf8::g_focusedFxTrack.load(std::memory_order_relaxed)) {
-        if (ValidatePtr2(nullptr, fxTr, "MediaTrack*")) {
-            const uint32_t rgb = static_cast<uint32_t>(
-                GetTrackColor(static_cast<MediaTrack*>(fxTr))) & 0x00FFFFFFu;
-            const uint8_t palette = (rgb == 0) ? 0x00 : uf8::quantize(rgb);
-            if (static_cast<int>(palette) != lastFocusedPalette_) {
-                lastFocusedPalette_ = palette;
-                device_->send(buildFocusedColour(palette));
-            }
-        }
-    }
+    // Colour bar tracks the SELECTED track via refresh()'s focusedTrack_
+    // path — no override here. The previous "follow last touched FX" logic
+    // bled non-selected V-Pot edits into UC1's display; the Settings option
+    // "Track selection follows parameter change" handles the auto-select
+    // case so this surface always mirrors selection.
 }
 
 void UC1Surface::renderExtFuncsSubscreen_()
@@ -2100,6 +2087,44 @@ void UC1Surface::pushKnobRing_(uint8_t knobId, double normalized, bool dim)
         const uint8_t b5 = def->b5Override ? def->b5Override[i] : b5Default;
         device_->send(make(0x01, cell, b5, selState));
         device_->send(make(0x02, cell, b5, brTarget[i]));
+    }
+}
+
+void UC1Surface::clearKnobRing_(uint8_t knobId)
+{
+    // Force every cell of this knob's ring to fully dark — sel=0x00,
+    // brightness=0x00 on both banks. Used when the focused track has no
+    // CS plug-in (or BC anchor lost) so EQ/DYN/BC sections don't leave
+    // stale dots glowing on the previous track's value.
+    if (!device_) return;
+    const RingDef* def = ringFor(knobId);
+    if (!def) return;
+    auto& last = ringCellCache_[knobId];
+    if (static_cast<int>(last.size()) != def->nCells) {
+        last.assign(def->nCells, 0xFFFF);
+    }
+    const uint8_t b5Default = (knobId == knob::kBCMix
+                        || knobId == knob::kCSFaderLevel
+                        || (knobId >= 0x17 && knobId <= 0x1D)) ? 0x01 : 0x00;
+    auto make = [](uint8_t bank, uint8_t cell, uint8_t b5, uint8_t state) {
+        std::vector<uint8_t> f;
+        f.reserve(8);
+        f.push_back(0xFF); f.push_back(0x13); f.push_back(0x04);
+        f.push_back(bank); f.push_back(cell);  f.push_back(b5);
+        f.push_back(state);
+        uint32_t sum = 0;
+        for (size_t k = 1; k < f.size(); ++k) sum += f[k];
+        f.push_back(static_cast<uint8_t>(sum & 0xFF));
+        return f;
+    };
+    for (int i = 0; i < def->nCells; ++i) {
+        constexpr uint16_t want = 0x0000;  // sel=0, brightness=0
+        if (last[i] == want) continue;
+        last[i] = want;
+        const uint8_t cell = def->cells[i];
+        const uint8_t b5 = def->b5Override ? def->b5Override[i] : b5Default;
+        device_->send(make(0x01, cell, b5, 0x00));
+        device_->send(make(0x02, cell, b5, 0x00));
     }
 }
 
@@ -2929,11 +2954,12 @@ void UC1Surface::refresh()
         pushButtonLed_(btn, stateFor(btn, on));
     }
 
-    // Zero the Bus Comp GR readout so stale values from the last track
-    // don't linger until the JSFX probe next ticks.
-    if (bcBindings_.busCompMap) {
-        device_->send(buildZeroGr());
-    }
+    // BC GR zero-out moved into setBcAnchorTrack — only stale on anchor
+    // change, not on every CS-focus refresh. Firing here on every refresh
+    // pulsed the needle toward 0 each track-select event (UC1Device's
+    // 50 Hz FF 5B stream then pulled it back to the live GR), producing
+    // a visible wiggle on the BC mechanical meter even when the BC
+    // anchor was unchanged. Frank 2026-05-07.
 
     // Push every mapped knob's LED ring immediately on focus change so
     // the rings reflect the current plugin state without waiting for
@@ -2944,28 +2970,45 @@ void UC1Surface::refresh()
     // separates EQ/BC (byte5=0x00) from Dyn/Gate + BC Mix + Fader Level
     // (byte5=0x01), so cell numbers can collide with the 7-seg cells
     // without sharing physical LEDs.
-    if (tr && bindings.channelMap) {
-        for (uint8_t knobId = 0; knobId < 0x20; ++knobId) {
+    // CS-domain knob rings (EQ + DYN + Input Trim + Fader Level). Push
+    // values when the focused track carries a CS plug-in (native, 360°
+    // Link, or learned via UC1PluginMap); otherwise clear every CS ring
+    // fully dark — Frank 2026-05-07: "wenn kein CS Plugin auf selected
+    // channel sollen die LEDs von EQ und DYN Section komplett aus sein".
+    for (uint8_t knobId = 0; knobId < 0x20; ++knobId) {
+        if (classifyKnob(knobId) != ControlDomain::ChannelStrip) continue;
+        if (tr && bindings.channelMap) {
             const int vst3Param = bindings.channelMap->knobParam[knobId];
-            if (vst3Param == kParamNone) continue;
+            if (vst3Param == kParamNone) {
+                clearKnobRing_(knobId);
+                continue;
+            }
             const double v = TrackFX_GetParamNormalized(
                 tr, bindings.channelFxIdx, vst3Param);
             const double visual =
                 bindings.channelMap->inverted[knobId] ? (1.0 - v) : v;
             pushKnobRing_(knobId, visual, knobCascadeDim_(knobId, cascade));
+        } else {
+            clearKnobRing_(knobId);
         }
     }
     // BC knob rings read from the BC anchor track (pinned independent
-    // of CS focus).
-    if (bcTr_ && bcBindings_.busCompMap) {
-        for (uint8_t knobId = 0; knobId < 0x20; ++knobId) {
+    // of CS focus). No anchor → clear every BC ring.
+    for (uint8_t knobId = 0; knobId < 0x20; ++knobId) {
+        if (classifyKnob(knobId) != ControlDomain::BusComp) continue;
+        if (bcTr_ && bcBindings_.busCompMap) {
             const int vst3Param = bcBindings_.busCompMap->knobParam[knobId];
-            if (vst3Param == kParamNone) continue;
+            if (vst3Param == kParamNone) {
+                clearKnobRing_(knobId);
+                continue;
+            }
             const double v = TrackFX_GetParamNormalized(
                 bcTr_, bcBindings_.busCompFxIdx, vst3Param);
             const double visual =
                 bcBindings_.busCompMap->inverted[knobId] ? (1.0 - v) : v;
             pushKnobRing_(knobId, visual, knobCascadeDim_(knobId, cascade));
+        } else {
+            clearKnobRing_(knobId);
         }
     }
 

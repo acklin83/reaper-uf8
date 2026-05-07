@@ -80,6 +80,13 @@ public:
     // BC instances on (independent of focused track).
     void* bcAnchorTrackPublic() const { return effectiveBcTrack_(); }
 
+    // Set the BC anchor without changing REAPER's track selection. Used
+    // by chaseLastTouchedFx when "Track selection follows parameter
+    // change" is on and a BC-domain param is edited: BC encoder follows
+    // the manipulated track while REAPER selection (= CS Channel) stays
+    // put. Validates the pointer; nullptr / stale = no-op.
+    void setBcAnchorTrack(void* track /*MediaTrack**/);
+
     // Drain queued hardware events. Call from REAPER's main thread on a
     // timer (Run() or a deferred action). Returns the number of events
     // handled this tick.
@@ -172,6 +179,11 @@ private:
     // `dim`=true renders the position dot at kStateDim brightness for
     // the section-bypass cascade — rest of the ring stays unlit.
     void pushKnobRing_(uint8_t knobId, double normalized, bool dim = false);
+
+    // Force every cell of a knob's ring fully dark. Used when the focused
+    // track has no CS plug-in (or no BC anchor) so EQ/DYN/BC rings don't
+    // leave stale dots glowing on the previous track's value.
+    void clearKnobRing_(uint8_t knobId);
 
     // Section-bypass cascade. Computed once per poll() before LED
     // pushes; consumed by buttonCascadeDim_/knobCascadeDim_ to override

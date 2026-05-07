@@ -581,6 +581,9 @@ void serializeStepFields_(const ActionStep& s, std::ostringstream& os)
     if (s.wait_ms > 0) {
         os << ", \"wait_ms\": " << s.wait_ms;
     }
+    if (s.fireOnInactive) {
+        os << ", \"fire_on_inactive\": true";
+    }
 }
 
 bool slotHasLedOverride_(const ActionSlot& s)
@@ -807,6 +810,9 @@ bool parseStepFields_(wdl_json_element* obj, ActionStep& out)
         if (auto* s = v->get_string_value()) out.label = s;
     if (auto* v = obj->get_item_by_name("wait_ms"))
         if (auto* s = v->get_string_value(true)) out.wait_ms = std::atoi(s);
+    if (auto* v = obj->get_item_by_name("fire_on_inactive"))
+        if (auto* s = v->get_string_value(true))
+            out.fireOnInactive = (std::atoi(s) != 0);
     if (auto* mi = obj->get_item_by_name("midi"); mi && mi->is_object()) {
         if (auto* v = mi->get_item_by_name("device"))
             if (auto* s = v->get_string_value()) out.midiDevice = s;
@@ -1425,7 +1431,6 @@ void runStep_(const ActionStep& a, bool firing, bool pressed)
         case ActionType::Noop:
             break;
         case ActionType::Reaper: {
-            if (!firing) break;
             // Named commands (ReaScripts, custom actions) are stored as
             // "_RS<hash>" / "_<name>" — atoi would yield 0. Resolve via
             // NamedCommandLookup so script bindings dispatch correctly.
@@ -1436,6 +1441,18 @@ void runStep_(const ActionStep& a, bool firing, bool pressed)
                 actionId = std::atoi(a.action.c_str());
             }
             if (actionId <= 0) break;
+            // INACTIVE-edge handling: only fire on release if either the
+            // action is a REAPER toggle (state >= 0 = needs second
+            // invocation to toggle off) or the user explicitly enabled
+            // "fire again on inactive" on this step. Otherwise the
+            // release is a no-op so one-shot actions don't fire twice
+            // per press — Frank 2026-05-07.
+            if (!firing) {
+                const int state = GetToggleCommandState2(
+                    SectionFromUniqueID(0), actionId);
+                const bool isToggle = (state >= 0);
+                if (!isToggle && !a.fireOnInactive) break;
+            }
             auto it = g_builtins.find("__reaper_action__");
             if (it != g_builtins.end() && it->second.run) {
                 it->second.run(true, pressed, actionId);
@@ -1494,7 +1511,14 @@ void runSlot_(const ActionSlot& slot, bool firing, bool pressed)
         return;
     }
     runStep_(stepAt(slot, 0), firing, pressed);
-    if (!firing) return;
+    // Queue the remaining steps for the main-thread tick. Both the firing
+    // (press) and inactive (release) edges schedule the chain — runStep_
+    // gates per-step what actually happens on inactive (REAPER toggles
+    // re-fire automatically; one-shot REAPER actions opt-in via
+    // ActionStep::fireOnInactive; builtins follow their own firing
+    // semantics). Earlier this short-circuited on !firing, which left
+    // multi-step REAPER bindings with their second-step action unreached
+    // on release — Frank 2026-05-07.
     const int wait0 = slot.wait_ms < 0 ? 0 : slot.wait_ms;
     PendingChain pc;
     pc.snapshot    = slot;
@@ -1642,9 +1666,31 @@ bool dispatch(ButtonId id, bool pressed)
                 if (held >= kLongPressThreshold) {
                     runSlot_(bd.longPress[m],
                                /*firing*/ true, /*pressed*/ false);
+                    // Tag lastFired with the long-press marker (high bit)
+                    // so the LED resolver reads from longPress[m] rather
+                    // than shortPress[m]. Without this, a long-press
+                    // action that toggles state ON (e.g. send_this) would
+                    // render the LED via shortPress's LedOverride and
+                    // ignore the user's per-long-press colour choice.
+                    if (bd.longPress[m].type != ActionType::Noop) {
+                        const auto idx = static_cast<size_t>(id);
+                        if (idx < g_lastFiredMod.size()) {
+                            g_lastFiredMod[idx].store(
+                                static_cast<uint8_t>(m | 0x80),
+                                std::memory_order_relaxed);
+                        }
+                    }
                 } else {
                     runSlot_(bd.shortPress[m],
                                /*firing*/ true, /*pressed*/ false);
+                    if (bd.shortPress[m].type != ActionType::Noop) {
+                        const auto idx = static_cast<size_t>(id);
+                        if (idx < g_lastFiredMod.size()) {
+                            g_lastFiredMod[idx].store(
+                                static_cast<uint8_t>(m),
+                                std::memory_order_relaxed);
+                        }
+                    }
                 }
             }
         }
@@ -2026,8 +2072,16 @@ Modifier lastFiredModifier(ButtonId id)
     const auto idx = static_cast<size_t>(id);
     if (idx >= g_lastFiredMod.size()) return Modifier::Plain;
     const auto v = g_lastFiredMod[idx].load(std::memory_order_relaxed);
-    if (v >= kModifierCount) return Modifier::Plain;
-    return static_cast<Modifier>(v);
+    const uint8_t mod = v & 0x7F;  // strip long-press bit
+    if (mod >= kModifierCount) return Modifier::Plain;
+    return static_cast<Modifier>(mod);
+}
+
+bool lastFiredWasLongPress(ButtonId id)
+{
+    const auto idx = static_cast<size_t>(id);
+    if (idx >= g_lastFiredMod.size()) return false;
+    return (g_lastFiredMod[idx].load(std::memory_order_relaxed) & 0x80) != 0;
 }
 
 } // namespace uf8::bindings

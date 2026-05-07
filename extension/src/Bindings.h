@@ -147,6 +147,12 @@ struct ActionStep {
     int         midiData2   = 127;
     // Delay BEFORE the next step in the chain fires. 0 = back-to-back.
     int         wait_ms     = 0;
+    // For ActionType::Reaper steps: also fire the action on the binding's
+    // INACTIVE edge (release / toggle-off). REAPER toggle actions auto-
+    // qualify regardless of this flag — they need a second invocation to
+    // toggle off. For one-shot REAPER actions (no toggle state) this is
+    // an opt-in checkbox in the Bindings editor — Frank 2026-05-07.
+    bool        fireOnInactive = false;
 };
 
 // Optional per-slot LED override. Each (color, brightness) pair is
@@ -467,5 +473,13 @@ uint64_t generation();
 // engaged — Shift+press of a Toggle button keeps the LED showing
 // the Shift slot's active colour after release.
 Modifier lastFiredModifier(ButtonId id);
+
+// True if the most recent fire on `id` came from the long-press slot
+// (held >= kLongPressThreshold) rather than the short-press slot. Used
+// by main.cpp's LED resolver so an active state driven by a long-press
+// action (e.g. send_this on FLIP) reads its appearance from the
+// longPress[] slot's LedOverride instead of shortPress[]. False when no
+// fire has happened yet, or when the most recent fire was short-press.
+bool lastFiredWasLongPress(ButtonId id);
 
 } // namespace uf8::bindings

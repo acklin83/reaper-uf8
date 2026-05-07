@@ -30,11 +30,14 @@ const char* reasixty_uc1Serial();
 // off onTimer so the picker keeps working even if the user navigates
 // away from the editor while the picker is open.
 void reasixty_actionPickerStart(int layer, uf8::bindings::ButtonId id,
-                                bool longPress);
+                                bool longPress, int modIdx = 0,
+                                int stepIdx = 0);
 bool reasixty_actionPickerActiveFor(int layer, uf8::bindings::ButtonId id,
-                                    bool longPress);
+                                    bool longPress, int modIdx = 0,
+                                    int stepIdx = 0);
 void reasixty_actionPickerCancel();
 std::string reasixty_resolveActionName(const std::string& action);
+bool        reasixty_actionIsToggle(const std::string& action);
 std::string reasixty_loadReaScript();
 int  reasixty_brightnessLevel();
 int  reasixty_scribbleBrightnessLevel();
@@ -46,6 +49,8 @@ bool reasixty_selFollowsColor();
 void reasixty_setSelFollowsColor(bool follow);
 bool reasixty_grAnyFx();
 void reasixty_setGrAnyFx(bool enabled);
+bool reasixty_trackSelFollowsParam();
+void reasixty_setTrackSelFollowsParam(bool follow);
 int  reasixty_ballisticMode();
 void reasixty_setBallisticMode(int mode);
 void reasixty_exportDiagnostic();  // shows confirmation dialog itself
@@ -184,6 +189,15 @@ void SettingsScreen::drawDevice(ImGui_Context* ctx)
                     kGrItems,
                     /*popup_max_height_in_items*/ nullptr)) {
         reasixty_setGrAnyFx(grIdx == 1);
+    }
+
+    // V-Pot / SC / BC parameter edits on a non-selected track auto-select
+    // the manipulated track when on. Off → UC1 stays on the currently
+    // selected track regardless of which strip was just edited.
+    bool tsfp = reasixty_trackSelFollowsParam();
+    if (ImGui_Checkbox(ctx, "Track selection follows parameter change",
+                       &tsfp)) {
+        reasixty_setTrackSelFollowsParam(tsfp);
     }
 
     // Ballistic dropdown. Combo's `items` arg is a NUL-separated list
@@ -1139,11 +1153,13 @@ struct ActionFieldsRef {
     int*                        midiMsgType;
     int*                        midiData1;
     int*                        midiData2;
+    bool*                       fireOnInactive = nullptr;  // optional — REAPER actions only
 };
 
 bool drawActionPicker(ImGui_Context* ctx, const char* prefix,
                       ActionFieldsRef f, int layer,
-                      uf8::bindings::ButtonId id, bool isLongPress)
+                      uf8::bindings::ButtonId id, bool isLongPress,
+                      int modIdx = 0, int stepIdx = 0)
 {
     using namespace uf8::bindings;
     bool dirty = false;
@@ -1208,14 +1224,16 @@ bool drawActionPicker(ImGui_Context* ctx, const char* prefix,
         // onTimer hook so the result lands even if the user navigates
         // away from this editor before the picker closes.
         const bool pickerOpen = reasixty_actionPickerActiveFor(
-            layer, id, isLongPress);
+            layer, id, isLongPress, modIdx, stepIdx);
         std::snprintf(idbuf, sizeof(idbuf), "%s##%s_browse",
                       pickerOpen ? "Cancel Action Pick" : "Browse Action...",
                       prefix);
         if (ImGui_Button(ctx, idbuf,
                          /*size_w*/ nullptr, /*size_h*/ nullptr)) {
             if (pickerOpen) reasixty_actionPickerCancel();
-            else            reasixty_actionPickerStart(layer, id, isLongPress);
+            else            reasixty_actionPickerStart(layer, id,
+                                                       isLongPress,
+                                                       modIdx, stepIdx);
         }
         sameLine(ctx);
         std::snprintf(idbuf, sizeof(idbuf), "Load ReaScript...##%s_load",
@@ -1236,6 +1254,26 @@ bool drawActionPicker(ImGui_Context* ctx, const char* prefix,
             char line[256];
             std::snprintf(line, sizeof(line), "  %s", nameStr.c_str());
             ImGui_TextDisabled(ctx, line);
+        }
+
+        // Inactive-edge re-fire policy — Frank 2026-05-07.
+        //   Toggle action  → automatic, no checkbox; we just say so.
+        //   One-shot action → opt-in checkbox writing step.fireOnInactive.
+        // Only meaningful when the step pointer is wired (drawStepPicker
+        // passes the step's bool*; legacy single-action callers may pass
+        // nullptr and skip this block).
+        if (f.fireOnInactive && !f.action->empty()) {
+            const bool isToggle = reasixty_actionIsToggle(*f.action);
+            if (isToggle) {
+                ImGui_TextDisabled(ctx,
+                    "  Toggle action — auto-fires on release");
+            } else {
+                std::snprintf(idbuf, sizeof(idbuf),
+                              "Fire again on inactive##%s_foi", prefix);
+                if (ImGui_Checkbox(ctx, idbuf, f.fireOnInactive)) {
+                    dirty = true;
+                }
+            }
         }
         ImGui_Unindent(ctx, /*indent_w*/ nullptr);
     }
@@ -1549,14 +1587,16 @@ bool drawActionPicker(ImGui_Context* ctx, const char* prefix,
 bool drawStepPicker_(ImGui_Context* ctx, const char* prefix,
                      int layer, ButtonId id,
                      uf8::bindings::ActionStep& st,
-                     bool isLongPress)
+                     bool isLongPress, int modIdx = 0, int stepIdx = 0)
 {
     ActionFieldsRef ref{
         &st.type, &st.action, &st.param, &st.label,
         &st.midiDevice, &st.midiChannel, &st.midiMsgType,
         &st.midiData1, &st.midiData2,
+        &st.fireOnInactive,
     };
-    return drawActionPicker(ctx, prefix, ref, layer, id, isLongPress);
+    return drawActionPicker(ctx, prefix, ref, layer, id, isLongPress,
+                            modIdx, stepIdx);
 }
 
 // Helper: render an ActionSlot as an ordered chain of steps. Each step
@@ -1566,7 +1606,7 @@ bool drawStepPicker_(ImGui_Context* ctx, const char* prefix,
 // inline picker).
 bool drawSlotPicker(ImGui_Context* ctx, const char* prefix,
                     int layer, ButtonId id, uf8::bindings::ActionSlot& s,
-                    bool isLongPress)
+                    bool isLongPress, int modIdx = 0)
 {
     using namespace uf8::bindings;
     bool dirty = false;
@@ -1587,7 +1627,8 @@ bool drawSlotPicker(ImGui_Context* ctx, const char* prefix,
         }
         char stepPrefix[80];
         std::snprintf(stepPrefix, sizeof(stepPrefix), "%s_st%d", prefix, i);
-        if (drawStepPicker_(ctx, stepPrefix, layer, id, st, isLongPress)) {
+        if (drawStepPicker_(ctx, stepPrefix, layer, id, st, isLongPress,
+                            modIdx, /*stepIdx*/ i)) {
             dirty = true;
         }
         if (i < n - 1) {
@@ -1860,7 +1901,8 @@ void drawBindingEditor(ImGui_Context* ctx, int layer, ButtonId id)
             ImGui_Text(ctx, kModNames[0]);
             char slotPrefix[32];
             std::snprintf(slotPrefix, sizeof(slotPrefix), "%s_pl", tag);
-            if (drawSlotPicker(ctx, slotPrefix, layer, id, slots[0], isLongCol))
+            if (drawSlotPicker(ctx, slotPrefix, layer, id, slots[0], isLongCol,
+                               /*modIdx*/ 0))
                 dirty = true;
 
             // Modifier rows — each in its own collapsing header. Hidden
@@ -1889,7 +1931,8 @@ void drawBindingEditor(ImGui_Context* ctx, int layer, ButtonId id)
                         std::snprintf(modPrefix, sizeof(modPrefix), "%s_%s",
                                       tag, kModSlugs[m]);
                         if (drawSlotPicker(ctx, modPrefix, layer, id,
-                                           slots[m], isLongCol)) dirty = true;
+                                           slots[m], isLongCol,
+                                           /*modIdx*/ m)) dirty = true;
                     }
                 }
             }
@@ -2437,6 +2480,7 @@ void drawUserBankEditor_(ImGui_Context* ctx, int bankIdx,
                 &sp.type, &sp.action, &sp.param, &sp.label,
                 &sp.midiDevice, &sp.midiChannel, &sp.midiMsgType,
                 &sp.midiData1, &sp.midiData2,
+                &sp.fireOnInactive,
             };
             char prefix[32];
             std::snprintf(prefix, sizeof(prefix), "ub%d_s%d", bankIdx, i);
