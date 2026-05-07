@@ -1,0 +1,162 @@
+#!/usr/bin/env python3
+"""Generate extension/src/init_sequence.inc from a USBPcap capture of SSL 360°
+boot. Captures the full init: handshake, 96-cell zero-fill, fader-tanz, LCD/
+colour init. Preserves inter-phase pacing by inserting delay_ms_before fields
+on frames that follow a gap of >50 ms.
+
+Usage:
+  python3 analysis/gen_init_sequence.py captures/cap_init_2026-05-07.pcapng
+"""
+import subprocess
+import sys
+from pathlib import Path
+
+CAP = Path(sys.argv[1]) if len(sys.argv) > 1 else Path('captures/cap_init_2026-05-07.pcapng')
+OUT_INC = Path(__file__).parent.parent / 'extension/src/init_sequence.inc'
+
+# Init window: SSL 360° starts at ~13.25s (after USB enumeration), ends at
+# ~21.2s when the worker handoff happens (long gap before steady-state heartbeat).
+T_START = 13.25
+T_END   = 22.0
+GAP_PACING_MS_THRESHOLD = 50   # any gap >= this becomes an explicit delay
+
+# UF8 device address after replug in the 2026-05-07 capture
+UF8_DEV_ADDR = 25
+
+def is_worker_heartbeat(data: bytes) -> bool:
+    """Frames the UF8Device worker thread emits autonomously. Replaying these
+    in the init sequence creates DOUBLE keepalives that desync the FF 1B
+    counter and break the SSL handshake. Worker covers:
+      FF 66 21 09 / 0a — 64-byte large keepalive pair
+      FF 66 09 15 / 16 — 13-byte GR keepalive pair
+      FF 5B 02 00 00 5D — primary liveness 50 Hz
+      FF 1B 01 <ctr> <ck> — PM keepalive 150 ms (counter cycles 0..3)
+    """
+    if len(data) < 4 or data[0] != 0xff:
+        return False
+    if data[1] == 0x66 and len(data) >= 4:
+        sub = data[2:4]
+        if sub == b'\x21\x09' or sub == b'\x21\x0a':
+            return True
+        if sub == b'\x09\x15' or sub == b'\x09\x16':
+            return True
+    if data[1] == 0x5b and len(data) >= 6 and data[2:6] == b'\x02\x00\x00\x5d':
+        return True
+    if data[1] == 0x1b and len(data) >= 3 and data[2] == 0x01:
+        return True
+    return False
+
+def collect_out_frames():
+    """Return list of (t_relative, bytes) for UF8 vendor-pipe OUT frames in window.
+    Skips frames the worker thread emits on its own clock — replaying them in
+    the init creates double-keepalive race conditions that break the handshake.
+    """
+    p = subprocess.run([
+        'tshark', '-r', str(CAP),
+        '-Y', f'usb.device_address == {UF8_DEV_ADDR} && usb.endpoint_address == 0x02 && usb.capdata',
+        '-T', 'fields', '-e', 'frame.time_relative', '-e', 'usb.capdata',
+    ], capture_output=True, text=True, check=True)
+    frames = []
+    skipped_hb = 0
+    for line in p.stdout.split('\n'):
+        parts = line.strip().split('\t')
+        if len(parts) < 2:
+            continue
+        t = float(parts[0])
+        if t < T_START or t > T_END:
+            continue
+        data = bytes.fromhex(parts[1])
+        # Skip the leading 512-byte zero buffer (USB descriptor exchange artifact)
+        if all(b == 0 for b in data):
+            continue
+        if is_worker_heartbeat(data):
+            skipped_hb += 1
+            continue
+        frames.append((t, data))
+    print(f'Filtered out {skipped_hb} worker-managed heartbeat frames')
+    return frames
+
+def main():
+    frames = collect_out_frames()
+    if not frames:
+        print('ERROR: no frames collected — check capture path and time window', file=sys.stderr)
+        sys.exit(1)
+
+    print(f'Collected {len(frames)} OUT frames from {CAP.name}')
+    print(f'Window: t={frames[0][0]:.3f}s .. t={frames[-1][0]:.3f}s '
+          f'({frames[-1][0] - frames[0][0]:.2f}s)')
+
+    # Pacing strategy: motor-control frames (FF 1E target + FF 1D enable/
+    # disable) need to honor SSL 360°'s wall-clock timing — there's a load-
+    # bearing ~520 ms motor-active window per fader-tanz phase between
+    # enable and disable, plus 750 ms..3 s gaps between phases. Other
+    # opcodes (FF 38/39/3B cell init, FF 66 LCD setup) act as natural
+    # filler in SSL's stream but get blasted at 2 ms in our replay, which
+    # collapses each phase from ~520 ms to ~30 ms — motors never reach
+    # their targets. Solution: detect gaps in the combined FF 1E + FF 1D
+    # sub-stream and pace either opcode when its predecessor was >50 ms ago.
+    def is_motor_ctl(d):
+        return len(d) >= 2 and d[0] == 0xff and d[1] in (0x1d, 0x1e)
+    entries = []
+    last_motor_t = None
+    for idx, (t, data) in enumerate(frames):
+        delay_ms = 0
+        if is_motor_ctl(data) and last_motor_t is not None:
+            gap_ms = int(round((t - last_motor_t) * 1000))
+            if gap_ms >= GAP_PACING_MS_THRESHOLD:
+                delay_ms = gap_ms
+        if is_motor_ctl(data):
+            last_motor_t = t
+        entries.append((delay_ms, data))
+
+    # Stats
+    paced = sum(1 for d, _ in entries if d > 0)
+    total_pace_ms = sum(d for d, _ in entries)
+    print(f'Frames with explicit pacing: {paced}/{len(entries)} '
+          f'(total pause: {total_pace_ms} ms)')
+
+    # Generate .inc
+    out = []
+    out.append('// Auto-generated by analysis/gen_init_sequence.py from')
+    out.append(f'// {CAP.name} (2026-05-07).')
+    out.append('//')
+    out.append('// Full SSL 360° UF8 boot sequence: handshake, 96-cell display zero-fill')
+    out.append('// (FF 38/39/3B idx 00..5F), fader-tanz multi-phase choreography,')
+    out.append('// LCD/colour init bursts. Replays in-order on EP 0x02 OUT after claiming')
+    out.append('// the interface, with delay_ms_before pacing between phases (so the motor')
+    out.append('// has time to actually move during the fader-tanz).')
+    out.append('//')
+    out.append('// Frames where delay_ms_before > 0 should sleep that long BEFORE sending,')
+    out.append('// because SSL 360° gaps between phases are load-bearing for the firmware to')
+    out.append('// settle each phase (especially fader-self-test motor moves).')
+    out.append('')
+    out.append('#pragma once')
+    out.append('#include <array>')
+    out.append('#include <cstddef>')
+    out.append('#include <cstdint>')
+    out.append('')
+    out.append('namespace uf8 {')
+    out.append('')
+    out.append('struct InitFrame {')
+    out.append('    const uint8_t* bytes;')
+    out.append('    std::size_t   size;')
+    out.append('    std::uint32_t delay_ms_before;')
+    out.append('};')
+    out.append('')
+    for i, (delay_ms, data) in enumerate(entries):
+        hex_bytes = ', '.join(f'0x{b:02x}' for b in data)
+        out.append(f'static constexpr std::uint8_t kInitFrame{i}[] = {{ {hex_bytes} }};')
+    out.append('')
+    out.append(f'static constexpr std::array<InitFrame, {len(entries)}> kInitSequence = {{{{')
+    for i, (delay_ms, data) in enumerate(entries):
+        out.append(f'    {{ kInitFrame{i}, sizeof(kInitFrame{i}), {delay_ms} }},')
+    out.append('}};')
+    out.append('')
+    out.append('} // namespace uf8')
+    out.append('')
+
+    OUT_INC.write_text('\n'.join(out))
+    print(f'Wrote {OUT_INC} ({len(entries)} frames)')
+
+if __name__ == '__main__':
+    main()

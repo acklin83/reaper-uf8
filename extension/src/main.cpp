@@ -2533,11 +2533,15 @@ void onUf8Input(const uint8_t* dataIn, size_t lenIn)
             // (kills the motor-echo feedback loop), and release the motor
             // so the user's hand isn't fighting it.
             //
-            // Strip indexing — 0-indexed end-to-end (rawStrip 0..7
-            // maps directly to code strip 0..7). Verified across the
-            // full /tmp/reaper_uf8_in_dispatch.log on Frank's
-            // hardware 2026-05-07: TOUCH frames span rawStrip 0..7
-            // exclusively (never 8), POSITION 0..7. cap51 was right.
+            // Strip indexing — 0-indexed end-to-end across FF 20
+            // (touch), FF 21 (position), FF 33 (secondary sensor),
+            // and outbound FF 1D (motor enable/limp). Verified
+            // 2026-05-07 from a per-fader Windows USBPcap capture:
+            // each physical fader 1..8 emits exactly strip byte
+            // (fader_number - 1) on every opcode it produces.
+            // Earlier 1-indexed-with-wraparound theories (commits
+            // 7d02274 / 07d786d) were misreads of partial logs and
+            // are conclusively dead.
             const uint8_t rawStrip = data[i + 3];
             const uint8_t state    = data[i + 4];
             if (rawStrip > 7) {
@@ -2612,10 +2616,14 @@ void onUf8Input(const uint8_t* dataIn, size_t lenIn)
                             static_cast<double>(signed6)});
             }
         }
-        // cmd 0x33 (secondary sensor — exact semantics TBD; not a
-        // clean touch event despite carrying strip+state-looking
-        // bytes, observed rapid same-millisecond toggling that doesn't
-        // match human touch cadence)
+        // cmd 0x33 — secondary "user-actively-manipulating-cap" sensor.
+        // Decoded 2026-05-07 from per-fader Windows USBPcap capture: fires
+        // only when the user pushes the fader cap (top-of-cap conductive
+        // contact); pure side-touch produces FF 20 alone. State-byte toggles
+        // (OFF/ON pulses) during a push; identical 0-indexed strip byte as
+        // FF 20. We deliberately do NOT process it: FF 20 + FF 21 already
+        // give us reliable touch + position. Treating FF 33 as touch
+        // double-counts the user's hand and causes spurious LIMPs.
 
         i += frameSize;
     }

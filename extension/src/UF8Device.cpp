@@ -113,10 +113,15 @@ bool UF8Device::open()
     // Give the worker a beat to post its first IN transfer.
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
-    // Replay the SSL-360° wakeup/init sequence captured on 2026-04-20.
-    // Without this the UF8 stays in "SSL 360 connection lost" state — any
-    // frames we send are ignored until it sees this handshake.
+    // Replay the SSL-360° wakeup/init sequence captured on 2026-05-07.
+    // Frames carry an explicit delay_ms_before for the load-bearing
+    // inter-phase pauses in the fader-tanz (SSL waits ~750 ms..3 s between
+    // motor-target phases for the motor to physically move). Default 2 ms
+    // pacing for everything else matches SSL's observed inter-frame gap.
     for (const auto& f : kInitSequence) {
+        if (f.delay_ms_before > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(f.delay_ms_before));
+        }
         int transferred = 0;
         int ircode = libusb_bulk_transfer(
             handle_, kEpOut,
@@ -135,7 +140,7 @@ bool UF8Device::open()
             ctx_ = nullptr;
             return false;
         }
-        // 2 ms pacing matches SSL 360°'s observed inter-frame gap.
+        // 2 ms baseline pacing matches SSL 360°'s observed inter-frame gap.
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
 
@@ -210,6 +215,19 @@ bool UF8Device::open()
     // LED + LCD brightness is set by main.cpp after open() using the
     // brightness level persisted in REAPER's ExtState. We don't push
     // here so the user's choice survives device re-open.
+
+    // Re-engage all 8 motors after the init sequence. The captured init
+    // ends with FF 1D 02 strip 00 (motor DISABLE) for all strips at t=20.76
+    // — SSL 360° follows up at t=22.57+ with a per-strip echo+enable+target
+    // sweep that drives each fader to its current REAPER track volume.
+    // Without this, our subsequent REAPER-volume pushes via buildFaderPosition
+    // (FF 1E target) hit limp motors and the faders stay wherever the tanz
+    // left them — the user has to physically "abholen" each fader to engage
+    // it. Enabling here lets the existing onTimer push path drive the
+    // motors normally.
+    for (uint8_t s = 0; s < 8; ++s) {
+        sendFrame(buildMotorEnable(s, true));
+    }
 
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
