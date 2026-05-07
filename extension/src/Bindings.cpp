@@ -1085,55 +1085,67 @@ bool parseLayer_(wdl_json_element* lobj, Layer& out)
             }
         }
 
-        // Colour migration — pre-2026-05-02 configs were seeded with white
-        // for ALL builtins. The hardware actually drives Auto*/Zoom* in
-        // colour; patch in the hardware default so the editor's swatch
-        // matches reality. Reads sp (shortPress[Plain]) since that's where
-        // the old action/param landed.
-        if (sp.type == ActionType::Builtin
-            && bd.color[0] == 0xFF && bd.color[1] == 0xFF && bd.color[2] == 0xFF) {
-            struct Patch { const char* action; uint8_t r, g, b; };
-            static constexpr Patch kPatches[] = {
-                {"auto_read",    0,   255,   0},
-                {"auto_write",   255, 0,     0},
-                {"auto_trim",    255, 128,   0},
-                {"auto_latch",   255, 0,     0},
-                {"auto_touch",   255, 255,   0},
-                {"zoom_up",      0,   255,   0},
-                {"zoom_down",    255, 255,   0},
-                {"zoom_center",  255, 0,     0},
-            };
-            uint8_t pr = 0xFF, pg = 0xFF, pb = 0xFF;
-            bool patched = false;
-            for (const auto& p : kPatches) {
-                if (sp.action == p.action) {
-                    pr = p.r; pg = p.g; pb = p.b;
-                    patched = true;
-                    break;
-                }
-            }
-            if (!patched && sp.action == "automation_mode") {
-                switch (sp.param) {
-                    case 1: pr = 0;   pg = 255; pb = 0;   patched = true; break;
-                    case 2: pr = 255; pg = 255; pb = 0;   patched = true; break;
-                    case 3: pr = 255; pg = 0;   pb = 0;   patched = true; break;
-                    case 4:
-                    case 5: pr = 255; pg = 0;   pb = 0;   patched = true; break;
-                    case 0:
-                        if (bid == ButtonId::AutoTrim) {
-                            pr = 255; pg = 128; pb = 0; patched = true;
-                        }
-                        break;
-                }
-            }
-            if (patched) {
-                bd.color[0]         = pr; bd.color[1]         = pg; bd.color[2]         = pb;
-                bd.inactiveColor[0] = pr; bd.inactiveColor[1] = pg; bd.inactiveColor[2] = pb;
-            }
-        }
         out.bindings[bid] = std::move(bd);
     }
     return true;
+}
+
+// Pre-2026-05-02 configs were seeded with white for ALL builtins.
+// Hardware actually drives Auto*/Zoom* in colour; this one-shot
+// upgrade patches in the hardware default so the editor's swatch
+// matches reality. Was previously running unconditionally inside
+// parseLayer_ — that clobbered any later user-chosen white because
+// chosen white is byte-identical to factory white. Now gated on
+// config version < 4 in load(): runs once on the first migration
+// and then never again, so user edits are durable.
+void upgradeWhiteBuiltinColours_(Layer& L)
+{
+    for (auto& kv : L.bindings) {
+        Binding& bd = kv.second;
+        ButtonId bid = kv.first;
+        ActionStep& sp = bd.shortPress[
+            static_cast<int>(Modifier::Plain)];
+        if (sp.type != ActionType::Builtin) continue;
+        if (!(bd.color[0] == 0xFF && bd.color[1] == 0xFF && bd.color[2] == 0xFF)) continue;
+        struct Patch { const char* action; uint8_t r, g, b; };
+        static constexpr Patch kPatches[] = {
+            {"auto_read",    0,   255,   0},
+            {"auto_write",   255, 0,     0},
+            {"auto_trim",    255, 128,   0},
+            {"auto_latch",   255, 0,     0},
+            {"auto_touch",   255, 255,   0},
+            {"zoom_up",      0,   255,   0},
+            {"zoom_down",    255, 255,   0},
+            {"zoom_center",  255, 0,     0},
+        };
+        uint8_t pr = 0xFF, pg = 0xFF, pb = 0xFF;
+        bool patched = false;
+        for (const auto& p : kPatches) {
+            if (sp.action == p.action) {
+                pr = p.r; pg = p.g; pb = p.b;
+                patched = true;
+                break;
+            }
+        }
+        if (!patched && sp.action == "automation_mode") {
+            switch (sp.param) {
+                case 1: pr = 0;   pg = 255; pb = 0;   patched = true; break;
+                case 2: pr = 255; pg = 255; pb = 0;   patched = true; break;
+                case 3: pr = 255; pg = 0;   pb = 0;   patched = true; break;
+                case 4:
+                case 5: pr = 255; pg = 0;   pb = 0;   patched = true; break;
+                case 0:
+                    if (bid == ButtonId::AutoTrim) {
+                        pr = 255; pg = 128; pb = 0; patched = true;
+                    }
+                    break;
+            }
+        }
+        if (patched) {
+            bd.color[0]         = pr; bd.color[1]         = pg; bd.color[2]         = pb;
+            bd.inactiveColor[0] = pr; bd.inactiveColor[1] = pg; bd.inactiveColor[2] = pb;
+        }
+    }
 }
 
 // ---- Path helpers ---------------------------------------------------------
@@ -1221,7 +1233,12 @@ void registerBuiltin(const char* name, BuiltinDescriptor desc)
 // reach existing configs. load() runs every defined upgrade step in
 // order, then writes the bumped version back so the upgrade is
 // idempotent across REAPER restarts.
-constexpr int kCurrentBindingsVersion = 3;
+// v4 (2026-05-07): "white-builtin colour migration" moved out of
+// parseLayer_ into a one-shot upgrade gated on version < 4. Previous
+// versions ran the migration every load and overwrote user-chosen
+// white with the hardware default colour (zoom-pad red/green/yellow,
+// auto row coloured) — making white edits non-durable.
+constexpr int kCurrentBindingsVersion = 4;
 
 // Upgrade hook: existing configs get factory long-press defaults on
 // the FLIP button (send_this / recv_this+Shift) without touching any
@@ -1280,6 +1297,9 @@ void load()
             }
             if (tmp.version < 3) {
                 for (auto& L : tmp.layers) upgradeSslSoftkeyLabels_(L);
+            }
+            if (tmp.version < 4) {
+                for (auto& L : tmp.layers) upgradeWhiteBuiltinColours_(L);
             }
             tmp.version = kCurrentBindingsVersion;
             g_cfg = std::move(tmp);
