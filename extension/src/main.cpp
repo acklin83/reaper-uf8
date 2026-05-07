@@ -2534,23 +2534,26 @@ void onUf8Input(const uint8_t* dataIn, size_t lenIn)
             // so the user's hand isn't fighting it.
             //
             // Strip indexing — TOUCH IS 1-INDEXED (rawStrip 1..8 for
-            // faders 1..8). POSITION is 0-INDEXED. OUTBOUND motor /
-            // LIMP is 0-INDEXED. Verified live on Frank's hardware
-            // 2026-05-07 via /tmp/uf8_fader_input.log (first touched
-            // fader = fader 1, logged as strip 1) and /tmp/reaper_uf8
-            // _in_dispatch.log (position frames carry rawStrip 0).
-            // Subtracting 1 here aligns touch with the rest. cap51's
-            // earlier "0-indexed end-to-end" claim conflicts with the
-            // live data — the cap51 capture may have been a different
-            // firmware mode or analysed wrong; the live log on Frank's
-            // device today is the ground truth.
+            // faders 1..8) WITH a Fader 8 wraparound where the firmware
+            // sometimes emits rawStrip=0 instead of rawStrip=8 for
+            // Fader 8. POSITION is 0-INDEXED. OUTBOUND motor / LIMP is
+            // 0-INDEXED. Verified live on Frank's hardware 2026-05-07:
+            // first-touched fader logged as strip 1 (1-indexed), and
+            // commit 018f59f's empirical "touch N → motor on N+1"
+            // observation. Mapping:
+            //     rawStrip 0       → strip 7  (Fader 8 wraparound)
+            //     rawStrip 1..8    → strip = rawStrip - 1
+            // cap51's "0-indexed end-to-end" annotation was the
+            // capturer's label, not isolated-touch verified.
             const uint8_t rawStrip = data[i + 3];
             const uint8_t state    = data[i + 4];
-            if (rawStrip < 1 || rawStrip > 8) {
+            if (rawStrip > 8) {
                 i += frameSize;
                 continue;
             }
-            const uint8_t strip = rawStrip - 1;
+            const uint8_t strip = (rawStrip == 0)
+                                      ? static_cast<uint8_t>(7)
+                                      : static_cast<uint8_t>(rawStrip - 1);
             if (strip < 8) {
                 // Diag log — same path as f73201c. Append-mode, one line
                 // per touch event so we can correlate with FF 1B keepalive
