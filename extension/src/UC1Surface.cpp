@@ -3025,18 +3025,23 @@ void UC1Surface::pushGainReduction(float bcGrDb, float csCompGrDb, float csGateG
     // Comp Release / Gate Range / Dyn In / Gate Hold). Same pair-write
     // rule as the bank=0x01-required status-register LEDs.
     //
-    // Brightness: 5 visible steps {0x19, 0x2D, 0x54, 0x99, 0xFF}, ~3 dB
-    // per LED, 0.6 dB per sub-step. Verified from `dual_35_cs_gr_ramp`.
+    // Brightness: 5 visible steps {0x19, 0x2D, 0x54, 0x99, 0xFF}, 5 LEDs
+    // × 5 sub-steps = 25 sub-steps over 20 dB Vollausschlag (SSL native
+    // GR range, see docs/protocol-notes.md:417 — mechanical BC needle is
+    // 0..200 = 0..20 dB; CS LED strip matches). 4 dB per LED, 0.8 dB
+    // per sub-step. Frank 2026-05-07 verified against plug-in meter +
+    // UF8 strip — earlier 0.6 dB/sub-step (15 dB Vollausschlag) read
+    // visibly hotter than the plug-in claimed.
     static const uint8_t kLevels[5] = {0x19, 0x2D, 0x54, 0x99, 0xFF};
 
     auto stripTargets = [&](float dB, uint8_t (&out)[5]) {
         if (dB < 0) dB = 0;
-        const int pos = static_cast<int>(dB / 0.6f);  // 0..24 across 15 dB
+        const int pos = static_cast<int>(dB / 0.8f);  // 0..24 across 20 dB
         const int active = (pos / 5 > 4) ? 4 : (pos / 5);
         const int sub    = (pos % 5 > 4) ? 4 : (pos % 5);
         for (int i = 0; i < 5; ++i) out[i] = 0;
         for (int i = 0; i < active; ++i) out[i] = 0xFF;
-        out[active] = (pos == 0 && dB < 0.3f) ? 0x00 : kLevels[sub];
+        out[active] = (pos == 0 && dB < 0.4f) ? 0x00 : kLevels[sub];
     };
 
     // Match SSL360's exact pattern from dual_35 — counted across the

@@ -5355,8 +5355,11 @@ void onTimer()
     // strip — earlier mistake was treating bytes 5..11 as zero-padding,
     // so all GR rendered onto strip 1 only. Now: locate the focused
     // track inside the visible bank and stamp its strip's byte.
-    // Calibration: byte 0x00 = rest (no LEDs), byte ~0x18 ≈ 10 dB GR
-    // (1.4 byte/dB slope, retained from earlier visual tuning).
+    // Calibration: byte 0x00 = rest (no LEDs), byte 0x18 = 20 dB GR
+    // (Vollausschlag, SSL native GR range — see docs/protocol-notes.md:417,
+    // mechanical BC needle is 0..200 = 0..20 dB and the LED strips
+    // match). 1.2 byte/dB. Earlier 10 dB Vollausschlag read hotter than
+    // the plug-in's own meter (Frank 2026-05-07).
     // Ballistics: up immediately, down 1 byte/tick — Plugin's
     // GainReduction_dB tracks the signal envelope tightly so the raw
     // byte swings several positions per audio beat without rate-limit.
@@ -5420,9 +5423,9 @@ void onTimer()
                     if (gotIt) {
                         gr += offsetDb;
                         if (gr < 0) gr = -gr;
-                        if (gr > 10.0) gr = 10.0;
+                        if (gr > 20.0) gr = 20.0;
                         const uint8_t newByte = static_cast<uint8_t>(
-                            std::lround(gr * (0x18 / 10.0)));
+                            std::lround(gr * (0x18 / 20.0)));
                         uint8_t& held = g_uf8GrBytes[focStrip];
                         if (newByte > held) held = newByte;
                         else if (held > newByte) --held;
