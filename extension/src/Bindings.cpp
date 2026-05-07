@@ -1092,6 +1092,28 @@ bool parseLayer_(wdl_json_element* lobj, Layer& out)
     return true;
 }
 
+// v5 → v6: convert "type=Builtin, action=empty" entries to Noop so
+// they stop silently no-op'ing on press and are visible-to-fix in
+// the Settings editor. This ALSO walks every modifier slot and the
+// long-press matrix.
+void upgradeEmptyBuiltinSlots_(Layer& L)
+{
+    auto fix = [](ActionStep& sp) {
+        if (sp.type == ActionType::Builtin && sp.action.empty()) {
+            sp.type = ActionType::Noop;
+        }
+    };
+    for (auto& kv : L.bindings) {
+        Binding& bd = kv.second;
+        for (int m = 0; m < kModifierCount; ++m) {
+            fix(bd.shortPress[m]);
+            for (auto& step : bd.shortPress[m].extraSteps) fix(step);
+            fix(bd.longPress[m]);
+            for (auto& step : bd.longPress[m].extraSteps) fix(step);
+        }
+    }
+}
+
 // v4 → v5 reset: wipe ALL Auto-row + Zoom-pad colours to white.
 // Frank 2026-05-07: factory hardware-default colours are not wanted —
 // every LED is user-chosen via Settings → Bindings. Configs created
@@ -1220,14 +1242,18 @@ void registerBuiltin(const char* name, BuiltinDescriptor desc)
 // reach existing configs. load() runs every defined upgrade step in
 // order, then writes the bumped version back so the upgrade is
 // idempotent across REAPER restarts.
+// v6 (2026-05-07): clean up corrupt "type=Builtin, action=empty"
+// entries left behind by the Settings UI's combo-picker race (user
+// clicks Built-in radio, picks no name in the combo, dirty flag
+// triggers setBinding with an unsalvageable entry that silently
+// no-ops on press). Convert those entries to Noop so they're at
+// least UI-fixable (currently they sit corrupt forever).
 // v5 (2026-05-07): zoom + auto factory colours abolished — every LED
-// is user-chosen, no firmware/factory hint. v4→v5 upgrade resets the
-// historical hardcoded swatches (auto_read/green, zoom_up/green, …)
-// back to white so the editor starts with a blank canvas; user-edits
-// to anything other than the old factory swatch are preserved.
+// is user-chosen. v4→v5 upgrade resets the historical hardcoded
+// swatches (auto_read/green, zoom_up/green, …) back to white.
 // v4 (2026-05-07): unused — bumped only to gate the colour-migration
 // fix that landed mid-day; superseded by v5 the same day.
-constexpr int kCurrentBindingsVersion = 5;
+constexpr int kCurrentBindingsVersion = 6;
 
 // Upgrade hook: existing configs get factory long-press defaults on
 // the FLIP button (send_this / recv_this+Shift) without touching any
@@ -1289,6 +1315,9 @@ void load()
             }
             if (tmp.version < 5) {
                 for (auto& L : tmp.layers) upgradeStripFactoryColours_(L);
+            }
+            if (tmp.version < 6) {
+                for (auto& L : tmp.layers) upgradeEmptyBuiltinSlots_(L);
             }
             tmp.version = kCurrentBindingsVersion;
             g_cfg = std::move(tmp);
@@ -1708,8 +1737,23 @@ bool hasBinding(int layer, ButtonId id)
 void setBinding(int layer, ButtonId id, const Binding& bd)
 {
     if (layer < 0 || layer > 2 || id == ButtonId::None) return;
+    // Guard: an empty-action Builtin slot is uninvocable — silently
+    // no-ops on press AND falsely registers as "bound" so the user
+    // can't see why their button does nothing. Coerce to Noop.
+    Binding clean = bd;
+    auto sanitize = [](ActionStep& sp) {
+        if (sp.type == ActionType::Builtin && sp.action.empty()) {
+            sp.type = ActionType::Noop;
+        }
+    };
+    for (int m = 0; m < kModifierCount; ++m) {
+        sanitize(clean.shortPress[m]);
+        for (auto& s : clean.shortPress[m].extraSteps) sanitize(s);
+        sanitize(clean.longPress[m]);
+        for (auto& s : clean.longPress[m].extraSteps) sanitize(s);
+    }
     std::lock_guard<std::mutex> lk(g_cfgMutex);
-    g_cfg.layers[layer].bindings[id] = bd;
+    g_cfg.layers[layer].bindings[id] = clean;
     persistLocked_();
 }
 
