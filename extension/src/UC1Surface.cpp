@@ -378,7 +378,6 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
             std::snprintf(line, sizeof(line),
                 "UC1 CHANNEL delta=%d step=%d → track %d of %d\n",
                 (int)ev.delta, step, next + 1, n);
-            ShowConsoleMsg(line);
         }
         ++stats_.knobEventsHandled;
         return;
@@ -602,9 +601,6 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
             presetsSelectCs_ ? uf8::Domain::ChannelStrip
                              : uf8::Domain::BusComp);
         if (!match.map) {
-            ShowConsoleMsg(presetsSelectCs_
-                ? "UC1 Presets: focused track has no CS plug-in\n"
-                : "UC1 Presets: focused track has no BC plug-in\n");
             ++stats_.knobEventsHandled;
             return;
         }
@@ -680,7 +676,6 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
         }
 
         if (found < 0) {
-            if (logThis) ShowConsoleMsg("UC1 BC encoder: no BC track in that direction\n");
             ++stats_.knobEventsHandled;
             return;
         }
@@ -725,7 +720,6 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
             std::snprintf(line, sizeof(line),
                 "UC1 BC delta=%d step=%d → track %d\n",
                 (int)ev.delta, step, found + 1);
-            ShowConsoleMsg(line);
         }
         ++stats_.knobEventsHandled;
         return;
@@ -737,7 +731,6 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
             std::snprintf(line, sizeof(line),
                 "UC1 knob 0x%02x delta=%d  (no focused track)\n",
                 ev.id, (int)ev.delta);
-            ShowConsoleMsg(line);
         }
         ++stats_.knobEventsSuppressed;
         return;
@@ -757,7 +750,6 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
             std::snprintf(line, sizeof(line),
                 "UC1 knob 0x%02x delta=%d  (no BC anchor + no CS on focus)\n",
                 ev.id, (int)ev.delta);
-            ShowConsoleMsg(line);
         }
         ++stats_.knobEventsSuppressed;
         return;
@@ -792,7 +784,6 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
             std::snprintf(line, sizeof(line),
                 "UC1 knob 0x%02x delta=%d  (no matching domain binding)\n",
                 ev.id, (int)ev.delta);
-            ShowConsoleMsg(line);
         }
         ++stats_.knobEventsSuppressed; return;
     }
@@ -804,7 +795,6 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
             std::snprintf(line, sizeof(line),
                 "UC1 knob 0x%02x delta=%d  unmapped in %s  (add to UC1PluginMap)\n",
                 ev.id, (int)ev.delta, map->shortName);
-            ShowConsoleMsg(line);
         }
         ++stats_.knobEventsSuppressed;
         return;
@@ -901,7 +891,6 @@ void UC1Surface::handleKnob_(const KnobEvent& ev)
             ev.id, labelForKnob(ev.id, busCompContext),
             map->shortName, map->inverted[ev.id] ? 1 : 0,
             (int)ev.delta, vst3Param, pname, next);
-        ShowConsoleMsg(line);
     }
 
     ++stats_.knobEventsHandled;
@@ -1031,7 +1020,6 @@ void UC1Surface::handleButton_(const ButtonEvent& ev)
                             std::snprintf(line, sizeof(line),
                                 "UC1 Preset confirmed: %s\n",
                                 name[0] ? name : "<no name>");
-                            ShowConsoleMsg(line);
                         }
                     }
                     setMode(Uc1Mode::Main);
@@ -1113,7 +1101,6 @@ void UC1Surface::handleButton_(const ButtonEvent& ev)
     if (ev.id == button::kMagnifier) {
         if (ev.pressed) {
             // User-definable in Settings (TBD). No-op for now.
-            ShowConsoleMsg("UC1 Magnifier: assignable in Settings — TBD\n");
             ++stats_.buttonEventsHandled;
         }
         return;
@@ -1147,7 +1134,6 @@ void UC1Surface::handleButton_(const ButtonEvent& ev)
                 char line[80];
                 std::snprintf(line, sizeof(line),
                     "UC1 Solo press → solo=%d anySolo=%d\n", on, anySolo());
-                ShowConsoleMsg(line);
             }
             ++stats_.buttonEventsHandled;
         }
@@ -1166,7 +1152,6 @@ void UC1Surface::handleButton_(const ButtonEvent& ev)
                 char line[80];
                 std::snprintf(line, sizeof(line),
                     "UC1 Cut press → mute=%d\n", on);
-                ShowConsoleMsg(line);
             }
             ++stats_.buttonEventsHandled;
         }
@@ -1193,7 +1178,6 @@ void UC1Surface::handleButton_(const ButtonEvent& ev)
                 char line[80];
                 std::snprintf(line, sizeof(line),
                     "UC1 SoloClear press → anySolo=%d\n", anySolo());
-                ShowConsoleMsg(line);
             }
             ++stats_.buttonEventsHandled;
         }
@@ -1759,7 +1743,6 @@ void UC1Surface::pushKnobReadout_(uint8_t knobId, void* trackRaw, int fxIdx,
         std::snprintf(line, sizeof(line),
             "UC1 push zone=0x%02x raw='%s' → '%s'\n",
             zone, formatted, vis.c_str());
-        ShowConsoleMsg(line);
     }
 
     // Variable-width readout — 22 for 6-char values, 23 for 7-char.

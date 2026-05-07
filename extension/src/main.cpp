@@ -2134,27 +2134,8 @@ ReaSixtySurface::ReaSixtySurface()
     // Best-effort UC1 attach — absence is fine, UF8 runs standalone.
     g_uc1_dev = std::make_unique<uc1::UC1Device>();
     if (g_uc1_dev->open()) {
-        ShowConsoleMsg("Rea-Sixty UC1: opened\n");
         g_uc1_surface = std::make_unique<uc1::UC1Surface>();
         g_uc1_surface->attach(*g_uc1_dev);
-        // Dump the first handful of raw IN frames to the console so we
-        // can see what UC1 is sending on its own vs. only after we push
-        // something. Useful for diagnosing connection-lost failures.
-        static int kUc1DumpRemaining = 12;
-        g_uc1_dev->setRawInputHandler([](const uint8_t* data, size_t len) {
-            if (kUc1DumpRemaining <= 0) return;
-            --kUc1DumpRemaining;
-            char buf[256];
-            int off = std::snprintf(buf, sizeof(buf), "UC1 IN len=%zu ", len);
-            for (size_t i = 0; i < len && off + 4 < (int)sizeof(buf); ++i) {
-                off += std::snprintf(buf + off, sizeof(buf) - off, "%02x", data[i]);
-            }
-            if (off + 2 < (int)sizeof(buf)) {
-                buf[off++] = '\n';
-                buf[off] = '\0';
-            }
-            ShowConsoleMsg(buf);
-        });
         // Focus whatever track REAPER currently considers "last touched"
         // so UC1 has something meaningful to drive from the first click.
         if (auto* tr = GetLastTouchedTrack()) {
