@@ -3023,11 +3023,31 @@ void UC1Surface::pushGainReduction(float bcGrDb, float csCompGrDb, float csGateG
     constexpr int   kSubsTotal  = 5 * kSubsPerLed;     // 30
     constexpr float kDbPerSub   = 20.0f / kSubsTotal;  // 0.667 dB
 
+    // Piecewise dB → sub-step matching the SSL Native plug-in's GR
+    // meter scale. Plug-in segments are at 3 / 6 / 10 / 14 / 20 dB —
+    // so each LED covers a non-uniform dB range. Each LED still has
+    // 6 sub-steps; the dB-per-sub varies per band.
+    //   LED 0  0..3 dB    sub 0..6    (0.5 dB/sub)
+    //   LED 1  3..6 dB    sub 6..12   (0.5 dB/sub)
+    //   LED 2  6..10 dB   sub 12..18  (0.667 dB/sub)
+    //   LED 3  10..14 dB  sub 18..24  (0.667 dB/sub)
+    //   LED 4  14..20 dB  sub 24..30  (1.0 dB/sub)
+    // At exactly 6 dB sub == 12 → LED 1 full + LED 2 entering, which
+    // matches the plug-in's "6 dB full, 10 dB first step" Frank
+    // 2026-05-07. Identical formula in main.cpp drives the UF8 byte.
     auto subStepFromDb = [&](float dB) -> int {
         if (dB <= 0) return 0;
-        int s = static_cast<int>(std::lround(dB / kDbPerSub));
-        if (s > kSubsTotal) s = kSubsTotal;
-        return s;
+        double s;
+        if      (dB <=  3.0) s =       (dB        ) * (6.0 / 3.0);
+        else if (dB <=  6.0) s =  6.0 + (dB -  3.0) * (6.0 / 3.0);
+        else if (dB <= 10.0) s = 12.0 + (dB -  6.0) * (6.0 / 4.0);
+        else if (dB <= 14.0) s = 18.0 + (dB - 10.0) * (6.0 / 4.0);
+        else if (dB <= 20.0) s = 24.0 + (dB - 14.0) * (6.0 / 6.0);
+        else                  s = static_cast<double>(kSubsTotal);
+        int r = static_cast<int>(std::lround(s));
+        if (r < 0)            r = 0;
+        if (r > kSubsTotal)   r = kSubsTotal;
+        return r;
     };
     auto stripTargets = [&](int subStep, uint8_t (&out)[5]) {
         if (subStep < 0) subStep = 0;

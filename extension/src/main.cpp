@@ -5407,10 +5407,18 @@ void onTimer()
                         gr += offsetDb;
                         if (gr < 0) gr = -gr;
                         if (gr > 20.0) gr = 20.0;
-                        // Same 30-step sub-step ladder UC1 uses.
-                        // sub = round(gr × 30 / 20); byte 0x02..0x18.
-                        int sub = static_cast<int>(std::lround(gr * 1.5));
-                        if (sub < 0) sub = 0;
+                        // Piecewise dB → sub-step matching the SSL
+                        // plug-in's GR meter (3/6/10/14/20 dB segments).
+                        // Identical to UC1Surface::subStepFromDb so
+                        // both meters render in lock-step.
+                        double s;
+                        if      (gr <=  3.0) s =        (gr       ) * (6.0 / 3.0);
+                        else if (gr <=  6.0) s =  6.0 + (gr -  3.0) * (6.0 / 3.0);
+                        else if (gr <= 10.0) s = 12.0 + (gr -  6.0) * (6.0 / 4.0);
+                        else if (gr <= 14.0) s = 18.0 + (gr - 10.0) * (6.0 / 4.0);
+                        else                  s = 24.0 + (gr - 14.0) * (6.0 / 6.0);
+                        int sub = static_cast<int>(std::lround(s));
+                        if (sub < 0)  sub = 0;
                         if (sub > 30) sub = 30;
                         const uint8_t newByte = (sub == 0)
                             ? uint8_t(0x00)
